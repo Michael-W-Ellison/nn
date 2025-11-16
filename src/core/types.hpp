@@ -114,6 +114,16 @@ public:
         return std::chrono::duration_cast<Duration>(time_point_ - other.time_point_);
     }
 
+    // Add duration to timestamp
+    Timestamp operator+(Duration duration) const {
+        return Timestamp(time_point_ + duration);
+    }
+
+    // Subtract duration from timestamp
+    Timestamp operator-(Duration duration) const {
+        return Timestamp(time_point_ - duration);
+    }
+
     // Comparison operators
     bool operator<(const Timestamp& other) const { return time_point_ < other.time_point_; }
     bool operator>(const Timestamp& other) const { return time_point_ > other.time_point_; }
