@@ -39,3 +39,6 @@ add_subdirectory(src/discovery)
 # Enable testing
 enable_testing()
 add_subdirectory(tests)
+
+# Example applications
+add_subdirectory(examples)
