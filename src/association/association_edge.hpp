@@ -174,6 +174,10 @@ public:
     /// Estimate memory usage in bytes
     size_t EstimateMemoryUsage() const;
 
+    /// Create a deep copy of this edge
+    /// @return Unique pointer to cloned edge
+    std::unique_ptr<AssociationEdge> Clone() const;
+
     // ========================================================================
     // Comparison Operators
     // ========================================================================

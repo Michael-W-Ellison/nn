@@ -14,3 +14,16 @@ target_link_libraries(association_edge_test
 )
 
 gtest_discover_tests(association_edge_test)
+
+# AssociationMatrix test executable
+add_executable(association_matrix_test
+    association_matrix_test.cpp
+)
+
+target_link_libraries(association_matrix_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(association_matrix_test)

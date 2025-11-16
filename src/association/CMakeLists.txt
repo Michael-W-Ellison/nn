@@ -4,6 +4,7 @@
 
 add_library(dpan_association
     association_edge.cpp
+    association_matrix.cpp
 )
 
 target_include_directories(dpan_association PUBLIC

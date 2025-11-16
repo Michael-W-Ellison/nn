@@ -249,6 +249,27 @@ size_t AssociationEdge::EstimateMemoryUsage() const {
     return base_size + context_size;
 }
 
+std::unique_ptr<AssociationEdge> AssociationEdge::Clone() const {
+    // Create new edge with same source, target, type
+    auto cloned = std::make_unique<AssociationEdge>(source_, target_, type_);
+
+    // Copy atomic values
+    cloned->strength_.store(strength_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    cloned->co_occurrence_count_.store(co_occurrence_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    cloned->temporal_correlation_.store(temporal_correlation_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // Copy non-atomic values
+    cloned->decay_rate_ = decay_rate_;
+    cloned->last_reinforcement_.store(last_reinforcement_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    cloned->creation_time_ = creation_time_;
+
+    // Copy context profile (protected by lock)
+    std::lock_guard<std::mutex> lock(context_mutex_);
+    cloned->context_profile_ = context_profile_;
+
+    return cloned;
+}
+
 // ============================================================================
 // Comparison Operators
 // ============================================================================
