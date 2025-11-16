@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 # Storage library
 add_library(dpan_storage
     pattern_database.cpp
+    memory_backend.cpp
 )
 
 target_include_directories(dpan_storage PUBLIC

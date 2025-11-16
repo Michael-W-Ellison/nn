@@ -15,3 +15,17 @@ target_link_libraries(pattern_database_test
 # Register test with CTest
 include(GoogleTest)
 gtest_discover_tests(pattern_database_test)
+
+# MemoryBackend tests
+add_executable(memory_backend_test
+    memory_backend_test.cpp
+)
+
+target_link_libraries(memory_backend_test
+    dpan_core
+    dpan_storage
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(memory_backend_test)
