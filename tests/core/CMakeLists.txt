@@ -41,9 +41,23 @@ target_link_libraries(pattern_node_test
     GTest::gtest_main
 )
 
+# PatternEngine test executable
+add_executable(pattern_engine_test
+    pattern_engine_test.cpp
+)
+
+target_link_libraries(pattern_engine_test
+    dpan_core
+    dpan_storage
+    dpan_similarity
+    dpan_discovery
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(types_test)
 gtest_discover_tests(context_vector_test)
 gtest_discover_tests(pattern_data_test)
 gtest_discover_tests(pattern_node_test)
+gtest_discover_tests(pattern_engine_test)
