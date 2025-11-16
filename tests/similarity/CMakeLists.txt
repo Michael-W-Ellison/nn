@@ -43,3 +43,17 @@ target_link_libraries(frequency_similarity_test
 )
 
 gtest_discover_tests(frequency_similarity_test)
+
+# Statistical similarity tests
+add_executable(statistical_similarity_test
+    statistical_similarity_test.cpp
+)
+
+target_link_libraries(statistical_similarity_test
+    dpan_core
+    dpan_similarity
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(statistical_similarity_test)

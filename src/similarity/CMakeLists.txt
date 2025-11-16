@@ -6,6 +6,7 @@ add_library(dpan_similarity
     similarity_metric.cpp
     geometric_similarity.cpp
     frequency_similarity.cpp
+    statistical_similarity.cpp
 )
 
 target_include_directories(dpan_similarity PUBLIC
