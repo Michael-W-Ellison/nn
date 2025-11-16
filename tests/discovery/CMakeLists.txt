@@ -29,3 +29,18 @@ target_link_libraries(pattern_matcher_test
 )
 
 gtest_discover_tests(pattern_matcher_test)
+
+# Pattern creator tests
+add_executable(pattern_creator_test
+    pattern_creator_test.cpp
+)
+
+target_link_libraries(pattern_creator_test
+    dpan_core
+    dpan_storage
+    dpan_discovery
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(pattern_creator_test)
