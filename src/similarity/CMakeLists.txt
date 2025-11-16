@@ -7,6 +7,7 @@ add_library(dpan_similarity
     geometric_similarity.cpp
     frequency_similarity.cpp
     statistical_similarity.cpp
+    contextual_similarity.cpp
 )
 
 target_include_directories(dpan_similarity PUBLIC
