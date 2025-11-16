@@ -53,8 +53,8 @@ bool MemoryBackend::Store(const PatternNode& node) {
         return false;
     }
 
-    // Move the node into the map
-    patterns_.emplace(id, PatternNode(node.GetID(), node.GetData(), node.GetType()));
+    // Clone the node to preserve all state
+    patterns_.emplace(id, node.Clone());
 
     auto end = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
@@ -76,8 +76,8 @@ std::optional<PatternNode> MemoryBackend::Retrieve(PatternID id) {
     UpdateStats(duration.count(), false);
 
     if (it != patterns_.end()) {
-        // Create a copy to return
-        return PatternNode(it->second.GetID(), it->second.GetData(), it->second.GetType());
+        // Clone to return with all state preserved
+        return it->second.Clone();
     }
 
     return std::nullopt;

@@ -55,6 +55,9 @@ public:
     float ComputeActivation(const FeatureVector& input_features) const;
     bool IsActivated(const FeatureVector& input_features) const;
 
+    // Clone (creates a copy with all state preserved)
+    PatternNode Clone() const;
+
     // Age calculation
     Timestamp::Duration GetAge() const {
         return Timestamp::Now() - creation_timestamp_;

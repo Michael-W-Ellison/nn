@@ -125,6 +125,45 @@ bool PatternNode::IsActivated(const FeatureVector& input_features) const {
     return activation >= threshold;
 }
 
+// Clone
+PatternNode PatternNode::Clone() const {
+    // Create a new node with basic info
+    PatternNode cloned(id_, data_, type_);
+
+    // Copy activation parameters
+    cloned.activation_threshold_.store(
+        activation_threshold_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+    cloned.base_activation_.store(
+        base_activation_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+
+    // Copy statistics
+    cloned.creation_timestamp_ = creation_timestamp_;
+    cloned.last_accessed_.store(
+        last_accessed_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+    cloned.access_count_.store(
+        access_count_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+    cloned.confidence_score_.store(
+        confidence_score_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+
+    // Copy sub-patterns
+    {
+        std::lock_guard<std::mutex> lock(sub_patterns_mutex_);
+        cloned.sub_patterns_ = sub_patterns_;
+    }
+
+    return cloned;
+}
+
 // Serialization
 void PatternNode::Serialize(std::ostream& out) const {
     // Serialize PatternID
