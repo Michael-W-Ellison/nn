@@ -66,3 +66,16 @@ target_link_libraries(temporal_learner_test
 )
 
 gtest_discover_tests(temporal_learner_test)
+
+# SpatialLearner test executable
+add_executable(spatial_learner_test
+    spatial_learner_test.cpp
+)
+
+target_link_libraries(spatial_learner_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(spatial_learner_test)

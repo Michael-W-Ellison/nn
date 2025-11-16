@@ -8,6 +8,7 @@ add_library(dpan_association
     co_occurrence_tracker.cpp
     formation_rules.cpp
     temporal_learner.cpp
+    spatial_learner.cpp
 )
 
 target_include_directories(dpan_association PUBLIC
