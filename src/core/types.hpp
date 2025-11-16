@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <atomic>
+#include <chrono>
 
 namespace dpan {
 
@@ -86,6 +87,50 @@ const char* ToString(AssociationType type);
 
 // Parse AssociationType from string
 AssociationType ParseAssociationType(const std::string& str);
+
+// Timestamp: Microsecond-precision time point
+class Timestamp {
+public:
+    using ClockType = std::chrono::steady_clock;
+    using TimePoint = ClockType::time_point;
+    using Duration = std::chrono::microseconds;
+
+    // Create timestamp for current time
+    static Timestamp Now();
+
+    // Create timestamp from microseconds since epoch
+    static Timestamp FromMicros(int64_t micros);
+
+    // Default constructor creates zero timestamp
+    Timestamp() : time_point_(TimePoint{}) {}
+
+    // Get microseconds since epoch
+    int64_t ToMicros() const;
+
+    // Get duration since another timestamp
+    Duration operator-(const Timestamp& other) const {
+        return std::chrono::duration_cast<Duration>(time_point_ - other.time_point_);
+    }
+
+    // Comparison operators
+    bool operator<(const Timestamp& other) const { return time_point_ < other.time_point_; }
+    bool operator>(const Timestamp& other) const { return time_point_ > other.time_point_; }
+    bool operator<=(const Timestamp& other) const { return time_point_ <= other.time_point_; }
+    bool operator>=(const Timestamp& other) const { return time_point_ >= other.time_point_; }
+    bool operator==(const Timestamp& other) const { return time_point_ == other.time_point_; }
+    bool operator!=(const Timestamp& other) const { return time_point_ != other.time_point_; }
+
+    // String conversion
+    std::string ToString() const;
+
+    // Serialization
+    void Serialize(std::ostream& out) const;
+    static Timestamp Deserialize(std::istream& in);
+
+private:
+    explicit Timestamp(TimePoint tp) : time_point_(tp) {}
+    TimePoint time_point_;
+};
 
 } // namespace dpan
 

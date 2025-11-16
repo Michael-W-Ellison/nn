@@ -72,4 +72,42 @@ AssociationType ParseAssociationType(const std::string& str) {
     throw std::invalid_argument("Unknown AssociationType: " + str);
 }
 
+// Timestamp implementations
+
+Timestamp Timestamp::Now() {
+    return Timestamp(ClockType::now());
+}
+
+Timestamp Timestamp::FromMicros(int64_t micros) {
+    TimePoint tp{Duration(micros)};
+    return Timestamp(tp);
+}
+
+int64_t Timestamp::ToMicros() const {
+    auto duration = time_point_.time_since_epoch();
+    return std::chrono::duration_cast<Duration>(duration).count();
+}
+
+std::string Timestamp::ToString() const {
+    auto micros = ToMicros();
+    auto seconds = micros / 1000000;
+    auto remaining_micros = micros % 1000000;
+
+    std::ostringstream oss;
+    oss << "Timestamp(" << seconds << "."
+        << std::setw(6) << std::setfill('0') << remaining_micros << "s)";
+    return oss.str();
+}
+
+void Timestamp::Serialize(std::ostream& out) const {
+    int64_t micros = ToMicros();
+    out.write(reinterpret_cast<const char*>(&micros), sizeof(micros));
+}
+
+Timestamp Timestamp::Deserialize(std::istream& in) {
+    int64_t micros;
+    in.read(reinterpret_cast<char*>(&micros), sizeof(micros));
+    return FromMicros(micros);
+}
+
 } // namespace dpan

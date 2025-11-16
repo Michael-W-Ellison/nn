@@ -131,5 +131,44 @@ TEST(EnumTest, ParseAssociationType) {
     EXPECT_THROW(ParseAssociationType("INVALID"), std::invalid_argument);
 }
 
+// Timestamp Tests
+
+TEST(TimestampTest, NowCreatesValidTimestamp) {
+    Timestamp t1 = Timestamp::Now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    Timestamp t2 = Timestamp::Now();
+
+    EXPECT_LT(t1, t2);
+}
+
+TEST(TimestampTest, DurationCalculation) {
+    Timestamp t1 = Timestamp::Now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Timestamp t2 = Timestamp::Now();
+
+    auto duration = t2 - t1;
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    EXPECT_GE(millis, 100);
+    EXPECT_LT(millis, 150); // Allow some overhead
+}
+
+TEST(TimestampTest, SerializationRoundTrip) {
+    Timestamp original = Timestamp::Now();
+
+    std::stringstream ss;
+    original.Serialize(ss);
+    Timestamp deserialized = Timestamp::Deserialize(ss);
+
+    EXPECT_EQ(original.ToMicros(), deserialized.ToMicros());
+}
+
+TEST(TimestampTest, FromMicrosRoundTrip) {
+    int64_t micros = 1234567890123456LL;
+    Timestamp ts = Timestamp::FromMicros(micros);
+
+    EXPECT_EQ(micros, ts.ToMicros());
+}
+
 } // namespace
 } // namespace dpan
