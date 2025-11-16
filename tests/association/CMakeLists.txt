@@ -27,3 +27,16 @@ target_link_libraries(association_matrix_test
 )
 
 gtest_discover_tests(association_matrix_test)
+
+# CoOccurrenceTracker test executable
+add_executable(co_occurrence_tracker_test
+    co_occurrence_tracker_test.cpp
+)
+
+target_link_libraries(co_occurrence_tracker_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(co_occurrence_tracker_test)
