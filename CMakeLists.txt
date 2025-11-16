@@ -33,6 +33,7 @@ FetchContent_MakeAvailable(googletest)
 # Add subdirectories
 add_subdirectory(src/core)
 add_subdirectory(src/storage)
+add_subdirectory(src/similarity)
 
 # Enable testing
 enable_testing()
