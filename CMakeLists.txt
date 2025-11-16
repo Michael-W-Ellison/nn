@@ -32,6 +32,7 @@ FetchContent_MakeAvailable(googletest)
 
 # Add subdirectories
 add_subdirectory(src/core)
+add_subdirectory(src/storage)
 
 # Enable testing
 enable_testing()
