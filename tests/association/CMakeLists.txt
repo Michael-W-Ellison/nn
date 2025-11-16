@@ -79,3 +79,16 @@ target_link_libraries(spatial_learner_test
 )
 
 gtest_discover_tests(spatial_learner_test)
+
+# CategoricalLearner test executable
+add_executable(categorical_learner_test
+    categorical_learner_test.cpp
+)
+
+target_link_libraries(categorical_learner_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(categorical_learner_test)

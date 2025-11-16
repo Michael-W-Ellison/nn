@@ -9,6 +9,7 @@ add_library(dpan_association
     formation_rules.cpp
     temporal_learner.cpp
     spatial_learner.cpp
+    categorical_learner.cpp
 )
 
 target_include_directories(dpan_association PUBLIC
