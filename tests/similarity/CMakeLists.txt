@@ -71,3 +71,18 @@ target_link_libraries(contextual_similarity_test
 )
 
 gtest_discover_tests(contextual_similarity_test)
+
+# Similarity search tests
+add_executable(similarity_search_test
+    similarity_search_test.cpp
+)
+
+target_link_libraries(similarity_search_test
+    dpan_core
+    dpan_storage
+    dpan_similarity
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(similarity_search_test)
