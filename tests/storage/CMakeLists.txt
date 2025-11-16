@@ -44,5 +44,18 @@ target_link_libraries(persistent_backend_test
 
 gtest_discover_tests(persistent_backend_test)
 
+# LRUCache tests
+add_executable(lru_cache_test
+    lru_cache_test.cpp
+)
+
+target_link_libraries(lru_cache_test
+    dpan_core
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(lru_cache_test)
+
 # Add indices subdirectory
 add_subdirectory(indices)
