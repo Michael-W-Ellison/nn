@@ -44,3 +44,18 @@ target_link_libraries(pattern_creator_test
 )
 
 gtest_discover_tests(pattern_creator_test)
+
+# Pattern refiner tests
+add_executable(pattern_refiner_test
+    pattern_refiner_test.cpp
+)
+
+target_link_libraries(pattern_refiner_test
+    dpan_core
+    dpan_storage
+    dpan_discovery
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(pattern_refiner_test)

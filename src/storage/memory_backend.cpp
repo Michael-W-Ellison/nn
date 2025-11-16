@@ -94,9 +94,9 @@ bool MemoryBackend::Update(const PatternNode& node) {
         return false;
     }
 
-    // Erase and re-insert (since PatternNode has deleted move assignment)
+    // Erase and re-insert with cloned node to preserve all state
     patterns_.erase(it);
-    patterns_.emplace(id, PatternNode(node.GetID(), node.GetData(), node.GetType()));
+    patterns_.emplace(id, node.Clone());
     return true;
 }
 

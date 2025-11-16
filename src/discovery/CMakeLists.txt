@@ -5,6 +5,7 @@ add_library(dpan_discovery
     pattern_extractor.cpp
     pattern_matcher.cpp
     pattern_creator.cpp
+    pattern_refiner.cpp
 )
 
 target_include_directories(dpan_discovery PUBLIC
