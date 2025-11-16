@@ -29,3 +29,17 @@ target_link_libraries(geometric_similarity_test
 )
 
 gtest_discover_tests(geometric_similarity_test)
+
+# Frequency similarity tests
+add_executable(frequency_similarity_test
+    frequency_similarity_test.cpp
+)
+
+target_link_libraries(frequency_similarity_test
+    dpan_core
+    dpan_similarity
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(frequency_similarity_test)
