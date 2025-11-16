@@ -33,6 +33,18 @@ public:
         float initial_strength = 0.5f
     );
 
+    /// Move constructor
+    AssociationEdge(AssociationEdge&& other) noexcept;
+
+    /// Move assignment operator
+    AssociationEdge& operator=(AssociationEdge&& other) noexcept;
+
+    /// Copy constructor (deleted - use Clone() instead)
+    AssociationEdge(const AssociationEdge&) = delete;
+
+    /// Copy assignment (deleted - use Clone() instead)
+    AssociationEdge& operator=(const AssociationEdge&) = delete;
+
     // ========================================================================
     // Core Identity
     // ========================================================================

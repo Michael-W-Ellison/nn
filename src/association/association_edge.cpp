@@ -24,6 +24,40 @@ AssociationEdge::AssociationEdge(
     last_reinforcement_.store(creation_time_.ToMicros(), std::memory_order_relaxed);
 }
 
+// Move constructor
+AssociationEdge::AssociationEdge(AssociationEdge&& other) noexcept
+    : source_(other.source_),
+      target_(other.target_),
+      type_(other.type_),
+      strength_(other.strength_.load(std::memory_order_relaxed)),
+      co_occurrence_count_(other.co_occurrence_count_.load(std::memory_order_relaxed)),
+      temporal_correlation_(other.temporal_correlation_.load(std::memory_order_relaxed)),
+      decay_rate_(other.decay_rate_),
+      last_reinforcement_(other.last_reinforcement_.load(std::memory_order_relaxed)),
+      context_profile_(std::move(other.context_profile_)),
+      creation_time_(other.creation_time_)
+{
+    // Note: mutex is not moveable, so we get a new one (default constructed)
+}
+
+// Move assignment operator
+AssociationEdge& AssociationEdge::operator=(AssociationEdge&& other) noexcept {
+    if (this != &other) {
+        source_ = other.source_;
+        target_ = other.target_;
+        type_ = other.type_;
+        strength_.store(other.strength_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        co_occurrence_count_.store(other.co_occurrence_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temporal_correlation_.store(other.temporal_correlation_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        decay_rate_ = other.decay_rate_;
+        last_reinforcement_.store(other.last_reinforcement_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        context_profile_ = std::move(other.context_profile_);
+        creation_time_ = other.creation_time_;
+        // Note: mutex is not moveable
+    }
+    return *this;
+}
+
 // ============================================================================
 // Strength Management
 // ============================================================================

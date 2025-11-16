@@ -40,3 +40,16 @@ target_link_libraries(co_occurrence_tracker_test
 )
 
 gtest_discover_tests(co_occurrence_tracker_test)
+
+# FormationRules test executable
+add_executable(formation_rules_test
+    formation_rules_test.cpp
+)
+
+target_link_libraries(formation_rules_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(formation_rules_test)

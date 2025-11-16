@@ -6,6 +6,7 @@ add_library(dpan_association
     association_edge.cpp
     association_matrix.cpp
     co_occurrence_tracker.cpp
+    formation_rules.cpp
 )
 
 target_include_directories(dpan_association PUBLIC
