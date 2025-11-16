@@ -6,6 +6,8 @@
 #include <string>
 #include <atomic>
 #include <chrono>
+#include <vector>
+#include <map>
 
 namespace dpan {
 
@@ -130,6 +132,82 @@ public:
 private:
     explicit Timestamp(TimePoint tp) : time_point_(tp) {}
     TimePoint time_point_;
+};
+
+// ContextVector: Sparse representation of contextual information
+// Used to describe the conditions under which patterns/associations are relevant
+class ContextVector {
+public:
+    using DimensionType = std::string;
+    using ValueType = float;
+    using StorageType = std::map<DimensionType, ValueType>;
+
+    // Constructors
+    ContextVector() = default;
+    explicit ContextVector(const StorageType& data) : data_(data) {}
+
+    // Set a dimension value
+    void Set(const DimensionType& dimension, ValueType value);
+
+    // Get a dimension value (returns 0.0 if not present)
+    ValueType Get(const DimensionType& dimension) const;
+
+    // Check if dimension exists
+    bool Has(const DimensionType& dimension) const;
+
+    // Remove a dimension
+    void Remove(const DimensionType& dimension);
+
+    // Clear all dimensions
+    void Clear();
+
+    // Get number of dimensions
+    size_t Size() const { return data_.size(); }
+
+    // Check if empty
+    bool IsEmpty() const { return data_.empty(); }
+
+    // Get all dimensions
+    std::vector<DimensionType> GetDimensions() const;
+
+    // Compute cosine similarity with another context vector
+    float CosineSimilarity(const ContextVector& other) const;
+
+    // Compute Euclidean distance
+    float EuclideanDistance(const ContextVector& other) const;
+
+    // Compute dot product
+    float DotProduct(const ContextVector& other) const;
+
+    // Get L2 norm (magnitude)
+    float Norm() const;
+
+    // Normalize to unit length
+    ContextVector Normalized() const;
+
+    // Vector addition
+    ContextVector operator+(const ContextVector& other) const;
+
+    // Scalar multiplication
+    ContextVector operator*(float scalar) const;
+
+    // Equality comparison
+    bool operator==(const ContextVector& other) const;
+
+    // Serialization
+    void Serialize(std::ostream& out) const;
+    static ContextVector Deserialize(std::istream& in);
+
+    // String representation
+    std::string ToString() const;
+
+    // Iterator support
+    using const_iterator = StorageType::const_iterator;
+    const_iterator begin() const { return data_.begin(); }
+    const_iterator end() const { return data_.end(); }
+
+private:
+    StorageType data_;
 };
 
 } // namespace dpan
