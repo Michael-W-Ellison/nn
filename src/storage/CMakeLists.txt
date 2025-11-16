@@ -25,3 +25,6 @@ target_link_libraries(dpan_storage PUBLIC
 
 # C++17 required
 target_compile_features(dpan_storage PUBLIC cxx_std_17)
+
+# Add indices subdirectory
+add_subdirectory(indices)

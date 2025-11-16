@@ -43,3 +43,6 @@ target_link_libraries(persistent_backend_test
 )
 
 gtest_discover_tests(persistent_backend_test)
+
+# Add indices subdirectory
+add_subdirectory(indices)
