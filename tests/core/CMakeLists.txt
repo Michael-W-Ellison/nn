@@ -21,7 +21,18 @@ target_link_libraries(context_vector_test
     GTest::gtest_main
 )
 
+# PatternData test executable
+add_executable(pattern_data_test
+    pattern_data_test.cpp
+)
+
+target_link_libraries(pattern_data_test
+    dpan_core
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(types_test)
 gtest_discover_tests(context_vector_test)
+gtest_discover_tests(pattern_data_test)
