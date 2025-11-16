@@ -13,3 +13,19 @@ target_link_libraries(pattern_extractor_test
 )
 
 gtest_discover_tests(pattern_extractor_test)
+
+# Pattern matcher tests
+add_executable(pattern_matcher_test
+    pattern_matcher_test.cpp
+)
+
+target_link_libraries(pattern_matcher_test
+    dpan_core
+    dpan_storage
+    dpan_similarity
+    dpan_discovery
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(pattern_matcher_test)

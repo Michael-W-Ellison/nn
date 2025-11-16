@@ -3,15 +3,18 @@
 # Discovery library
 add_library(dpan_discovery
     pattern_extractor.cpp
+    pattern_matcher.cpp
 )
 
 target_include_directories(dpan_discovery PUBLIC
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# Link to core library
+# Link to required libraries
 target_link_libraries(dpan_discovery PUBLIC
     dpan_core
+    dpan_storage
+    dpan_similarity
 )
 
 # C++17 required
