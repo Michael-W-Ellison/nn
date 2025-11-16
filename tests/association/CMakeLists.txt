@@ -53,3 +53,16 @@ target_link_libraries(formation_rules_test
 )
 
 gtest_discover_tests(formation_rules_test)
+
+# TemporalLearner test executable
+add_executable(temporal_learner_test
+    temporal_learner_test.cpp
+)
+
+target_link_libraries(temporal_learner_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(temporal_learner_test)
