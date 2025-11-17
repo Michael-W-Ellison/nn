@@ -200,6 +200,8 @@ std::unique_ptr<IMemoryTier> CreateArchiveTier(const std::string& storage_path);
 // ============================================================================
 
 /// Hash function for PatternID pairs (for unordered_map)
+#ifndef DPAN_PATTERN_PAIR_HASH_DEFINED
+#define DPAN_PATTERN_PAIR_HASH_DEFINED
 struct PatternPairHash {
     size_t operator()(const std::pair<PatternID, PatternID>& pair) const {
         // Combine hashes using boost-style hash combine
@@ -208,5 +210,6 @@ struct PatternPairHash {
         return seed;
     }
 };
+#endif // DPAN_PATTERN_PAIR_HASH_DEFINED
 
 } // namespace dpan

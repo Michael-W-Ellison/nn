@@ -70,3 +70,18 @@ target_link_libraries(tier_manager_test
 )
 
 gtest_discover_tests(tier_manager_test)
+
+# TieredStorage test executable
+add_executable(tiered_storage_test
+    tiered_storage_test.cpp
+)
+
+target_link_libraries(tiered_storage_test
+    dpan_memory
+    dpan_storage
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(tiered_storage_test)
