@@ -42,3 +42,17 @@ target_link_libraries(utility_tracker_test
 )
 
 gtest_discover_tests(utility_tracker_test)
+
+# MemoryTier test executable
+add_executable(memory_tier_test
+    memory_tier_test.cpp
+)
+
+target_link_libraries(memory_tier_test
+    dpan_memory
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(memory_tier_test)
