@@ -14,6 +14,7 @@ add_library(dpan_memory
     tiered_storage.cpp
     pattern_pruner.cpp
     association_pruner.cpp
+    consolidator.cpp
 )
 
 target_include_directories(dpan_memory PUBLIC

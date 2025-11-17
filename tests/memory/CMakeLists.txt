@@ -115,3 +115,19 @@ target_link_libraries(association_pruner_test
 )
 
 gtest_discover_tests(association_pruner_test)
+
+# Consolidator test executable
+add_executable(consolidator_test
+    consolidator_test.cpp
+)
+
+target_link_libraries(consolidator_test
+    dpan_memory
+    dpan_storage
+    dpan_similarity
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(consolidator_test)
