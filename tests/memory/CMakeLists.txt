@@ -131,3 +131,16 @@ target_link_libraries(consolidator_test
 )
 
 gtest_discover_tests(consolidator_test)
+
+# DecayFunctions test executable
+add_executable(decay_functions_test
+    decay_functions_test.cpp
+)
+
+target_link_libraries(decay_functions_test
+    dpan_memory
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(decay_functions_test)
