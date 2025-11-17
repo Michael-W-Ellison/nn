@@ -105,3 +105,16 @@ target_link_libraries(reinforcement_manager_test
 )
 
 gtest_discover_tests(reinforcement_manager_test)
+
+# StrengthNormalizer test executable
+add_executable(strength_normalizer_test
+    strength_normalizer_test.cpp
+)
+
+target_link_libraries(strength_normalizer_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(strength_normalizer_test)

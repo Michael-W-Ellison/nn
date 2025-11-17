@@ -11,6 +11,7 @@ add_library(dpan_association
     spatial_learner.cpp
     categorical_learner.cpp
     reinforcement_manager.cpp
+    strength_normalizer.cpp
 )
 
 target_include_directories(dpan_association PUBLIC
