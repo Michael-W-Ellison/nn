@@ -28,3 +28,17 @@ target_link_libraries(adaptive_thresholds_test
 )
 
 gtest_discover_tests(adaptive_thresholds_test)
+
+# UtilityTracker test executable
+add_executable(utility_tracker_test
+    utility_tracker_test.cpp
+)
+
+target_link_libraries(utility_tracker_test
+    dpan_memory
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(utility_tracker_test)
