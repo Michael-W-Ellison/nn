@@ -12,6 +12,7 @@ add_library(dpan_association
     categorical_learner.cpp
     reinforcement_manager.cpp
     strength_normalizer.cpp
+    competitive_learner.cpp
 )
 
 target_include_directories(dpan_association PUBLIC

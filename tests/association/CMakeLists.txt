@@ -118,3 +118,16 @@ target_link_libraries(strength_normalizer_test
 )
 
 gtest_discover_tests(strength_normalizer_test)
+
+# CompetitiveLearner test executable
+add_executable(competitive_learner_test
+    competitive_learner_test.cpp
+)
+
+target_link_libraries(competitive_learner_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(competitive_learner_test)
