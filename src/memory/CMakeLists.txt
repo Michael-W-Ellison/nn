@@ -15,6 +15,7 @@ add_library(dpan_memory
     pattern_pruner.cpp
     association_pruner.cpp
     consolidator.cpp
+    interference.cpp
 )
 
 target_include_directories(dpan_memory PUBLIC
@@ -24,4 +25,5 @@ target_include_directories(dpan_memory PUBLIC
 target_link_libraries(dpan_memory PUBLIC
     dpan_core
     dpan_association
+    dpan_similarity
 )

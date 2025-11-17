@@ -144,3 +144,17 @@ target_link_libraries(decay_functions_test
 )
 
 gtest_discover_tests(decay_functions_test)
+
+# Interference test executable
+add_executable(interference_test
+    interference_test.cpp
+)
+
+target_link_libraries(interference_test
+    dpan_memory
+    dpan_similarity
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(interference_test)
