@@ -16,6 +16,7 @@ add_library(dpan_memory
     association_pruner.cpp
     consolidator.cpp
     interference.cpp
+    sleep_consolidator.cpp
 )
 
 target_include_directories(dpan_memory PUBLIC

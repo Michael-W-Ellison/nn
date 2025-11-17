@@ -158,3 +158,16 @@ target_link_libraries(interference_test
 )
 
 gtest_discover_tests(interference_test)
+
+# SleepConsolidator test executable
+add_executable(sleep_consolidator_test
+    sleep_consolidator_test.cpp
+)
+
+target_link_libraries(sleep_consolidator_test
+    dpan_memory
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(sleep_consolidator_test)
