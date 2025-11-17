@@ -13,6 +13,7 @@ add_library(dpan_association
     reinforcement_manager.cpp
     strength_normalizer.cpp
     competitive_learner.cpp
+    association_learning_system.cpp
 )
 
 target_include_directories(dpan_association PUBLIC
@@ -21,6 +22,7 @@ target_include_directories(dpan_association PUBLIC
 
 target_link_libraries(dpan_association PUBLIC
     dpan_core
+    dpan_storage
 )
 
 # C++17 required

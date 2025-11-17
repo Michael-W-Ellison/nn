@@ -131,3 +131,17 @@ target_link_libraries(competitive_learner_test
 )
 
 gtest_discover_tests(competitive_learner_test)
+
+# AssociationLearningSystem test executable (integration tests)
+add_executable(association_learning_system_test
+    association_learning_system_test.cpp
+)
+
+target_link_libraries(association_learning_system_test
+    dpan_association
+    dpan_storage
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(association_learning_system_test)
