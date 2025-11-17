@@ -69,7 +69,7 @@ public:
 
         // Cache is full, evict LRU item
         if (items_.size() >= capacity_) {
-            auto lru = items_.back();
+            auto& lru = items_.back();
             map_.erase(lru.first);
             items_.pop_back();
             evictions_.fetch_add(1, std::memory_order_relaxed);

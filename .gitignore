@@ -28,9 +28,31 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 install_manifest.txt
+CTestTestfile.cmake
+Makefile
+_deps/
+*_include.cmake
 
 # Testing
 Testing/
+*_test
+!*_test.cpp
+!*_test.hpp
+**/*\[1\]_tests.cmake
+
+# Examples (compiled executables)
+examples/basic_example
+examples/anomaly_detection
+examples/time_series_patterns
+examples/association/basic_learning
+examples/association/custom_formation_rules
+examples/association/activation_propagation_demo
+
+# Benchmarks (compiled executables)
+tests/benchmarks/storage_benchmarks
+tests/benchmarks/association_benchmarks
+tests/benchmarks/concurrency_tests
+tests/benchmarks/stress_tests
 
 # OS files
 .DS_Store

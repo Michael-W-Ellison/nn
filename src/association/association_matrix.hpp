@@ -10,6 +10,8 @@
 namespace dpan {
 
 /// Hash function for (PatternID, PatternID) pairs
+#ifndef DPAN_PATTERN_PAIR_HASH_DEFINED
+#define DPAN_PATTERN_PAIR_HASH_DEFINED
 struct PatternPairHash {
     size_t operator()(const std::pair<PatternID, PatternID>& p) const {
         size_t h1 = PatternID::Hash()(p.first);
@@ -17,6 +19,7 @@ struct PatternPairHash {
         return h1 ^ (h2 << 1);  // Combine hashes
     }
 };
+#endif // DPAN_PATTERN_PAIR_HASH_DEFINED
 
 /// AssociationMatrix: Sparse directed graph of pattern associations
 ///
