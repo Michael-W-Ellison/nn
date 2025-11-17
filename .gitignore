@@ -31,7 +31,7 @@ install_manifest.txt
 CTestTestfile.cmake
 Makefile
 _deps/
-*[1]_include.cmake
+*_include.cmake
 
 # Testing
 Testing/
