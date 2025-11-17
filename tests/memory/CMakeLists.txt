@@ -85,3 +85,18 @@ target_link_libraries(tiered_storage_test
 )
 
 gtest_discover_tests(tiered_storage_test)
+
+# PatternPruner test executable
+add_executable(pattern_pruner_test
+    pattern_pruner_test.cpp
+)
+
+target_link_libraries(pattern_pruner_test
+    dpan_memory
+    dpan_storage
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(pattern_pruner_test)
