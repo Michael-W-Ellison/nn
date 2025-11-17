@@ -15,3 +15,16 @@ target_link_libraries(utility_calculator_test
 )
 
 gtest_discover_tests(utility_calculator_test)
+
+# AdaptiveThresholds test executable
+add_executable(adaptive_thresholds_test
+    adaptive_thresholds_test.cpp
+)
+
+target_link_libraries(adaptive_thresholds_test
+    dpan_memory
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(adaptive_thresholds_test)
