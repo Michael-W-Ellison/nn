@@ -134,6 +134,9 @@ private:
     /// Get database file size in bytes
     size_t GetDatabaseSize() const;
 
+    /// Internal count helper - assumes mutex is already locked
+    size_t CountUnlocked() const;
+
     /// Begin a transaction
     void BeginTransaction();
 
