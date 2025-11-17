@@ -36,6 +36,7 @@ add_subdirectory(src/storage)
 add_subdirectory(src/similarity)
 add_subdirectory(src/discovery)
 add_subdirectory(src/association)
+add_subdirectory(src/memory)
 
 # Enable testing
 enable_testing()
