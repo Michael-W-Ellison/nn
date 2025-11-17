@@ -111,6 +111,10 @@ public:
     /// Get number of unique co-occurring pairs
     size_t GetCoOccurrencePairCount() const { return co_occurrence_counts_.size(); }
 
+    /// Get all tracked patterns (patterns that have been activated)
+    /// @return Vector of pattern IDs that have been recorded
+    std::vector<PatternID> GetTrackedPatterns() const;
+
 private:
     Config config_;
 

@@ -1,6 +1,7 @@
 // File: tests/association/association_learning_system_test.cpp
 #include "association/association_learning_system.hpp"
 #include "core/pattern_node.hpp"
+#include "storage/memory_backend.hpp"
 #include <gtest/gtest.h>
 #include <thread>
 #include <chrono>
@@ -107,7 +108,10 @@ TEST(AssociationLearningSystemTest, FormAssociationsFromCoOccurrences) {
     config.formation.min_co_occurrences = 2;
 
     AssociationLearningSystem system(config);
-    
+
+    // Create a simple in-memory database for pattern storage
+    MemoryBackend::Config db_config;
+    MemoryBackend db(db_config);
 
     PatternID p1 = CreateTestPattern();
     PatternID p2 = CreateTestPattern();
@@ -119,8 +123,7 @@ TEST(AssociationLearningSystemTest, FormAssociationsFromCoOccurrences) {
     }
 
     // Form associations
-    // Simplified - FormNewAssociations not fully implemented
-    size_t formed = 0; // system.FormNewAssociations(db);
+    size_t formed = system.FormNewAssociations(db);
 
     // Should have formed at least one association
     EXPECT_GT(formed, 0u);
@@ -133,7 +136,10 @@ TEST(AssociationLearningSystemTest, NoAssociationWithoutSufficientCoOccurrence) 
     config.formation.min_co_occurrences = 10;
 
     AssociationLearningSystem system(config);
-    
+
+    // Create a simple in-memory database for pattern storage
+    MemoryBackend::Config db_config;
+    MemoryBackend db(db_config);
 
     PatternID p1 = CreateTestPattern();
     PatternID p2 = CreateTestPattern();
@@ -141,8 +147,8 @@ TEST(AssociationLearningSystemTest, NoAssociationWithoutSufficientCoOccurrence) 
     // Record only a few co-occurrences (less than threshold)
     system.RecordPatternActivations({p1, p2});
 
-    // Simplified - FormNewAssociations not fully implemented
-    size_t formed = 0; // system.FormNewAssociations(db);
+    // Form associations
+    size_t formed = system.FormNewAssociations(db);
 
     EXPECT_EQ(0u, formed);
 }
@@ -153,7 +159,10 @@ TEST(AssociationLearningSystemTest, FormAssociationsForSpecificPattern) {
     config.formation.min_co_occurrences = 2;
 
     AssociationLearningSystem system(config);
-    
+
+    // Create a simple in-memory database for pattern storage
+    MemoryBackend::Config db_config;
+    MemoryBackend db(db_config);
 
     PatternID p1 = CreateTestPattern();
     PatternID p2 = CreateTestPattern();
@@ -166,8 +175,7 @@ TEST(AssociationLearningSystemTest, FormAssociationsForSpecificPattern) {
     }
 
     // Form associations only for p1
-    // Simplified - FormAssociationsForPattern requires PatternDatabase
-    size_t formed = 0; // system.FormAssociationsForPattern(p1, db);
+    size_t formed = system.FormAssociationsForPattern(p1, db);
 
     EXPECT_GT(formed, 0u);
 }
@@ -528,7 +536,10 @@ TEST(AssociationLearningSystemTest, EndToEndLearningWorkflow) {
     config.formation.min_co_occurrences = 2;
 
     AssociationLearningSystem system(config);
-    
+
+    // Create a simple in-memory database for pattern storage
+    MemoryBackend::Config db_config;
+    MemoryBackend db(db_config);
 
     // Create patterns
     std::vector<PatternID> patterns;
@@ -543,8 +554,7 @@ TEST(AssociationLearningSystemTest, EndToEndLearningWorkflow) {
     }
 
     // Form associations
-    // Simplified - FormNewAssociations not fully implemented
-    size_t formed = 0; // system.FormNewAssociations(db);
+    size_t formed = system.FormNewAssociations(db);
     EXPECT_GT(formed, 0u);
 
     // Test prediction

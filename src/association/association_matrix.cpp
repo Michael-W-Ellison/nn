@@ -475,6 +475,19 @@ std::vector<PatternID> AssociationMatrix::GetIsolatedPatterns() const {
     return isolated;
 }
 
+std::vector<PatternID> AssociationMatrix::GetAllPatterns() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    // Get all patterns (both source and target)
+    std::unordered_set<PatternID> all_patterns;
+    for (const auto& [key, index] : edge_lookup_) {
+        all_patterns.insert(key.first);  // source
+        all_patterns.insert(key.second); // target
+    }
+
+    return std::vector<PatternID>(all_patterns.begin(), all_patterns.end());
+}
+
 // ============================================================================
 // Activation Propagation
 // ============================================================================
