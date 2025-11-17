@@ -10,6 +10,7 @@ add_library(dpan_memory
     warm_tier.cpp
     cold_tier.cpp
     archive_tier.cpp
+    tier_manager.cpp
 )
 
 target_include_directories(dpan_memory PUBLIC

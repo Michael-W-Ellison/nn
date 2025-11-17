@@ -56,3 +56,17 @@ target_link_libraries(memory_tier_test
 )
 
 gtest_discover_tests(memory_tier_test)
+
+# TierManager test executable
+add_executable(tier_manager_test
+    tier_manager_test.cpp
+)
+
+target_link_libraries(tier_manager_test
+    dpan_memory
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(tier_manager_test)
