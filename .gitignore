@@ -28,9 +28,16 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 install_manifest.txt
+CTestTestfile.cmake
+Makefile
+_deps/
+*[1]_include.cmake
 
 # Testing
 Testing/
+*_test
+!*_test.cpp
+!*_test.hpp
 
 # OS files
 .DS_Store
