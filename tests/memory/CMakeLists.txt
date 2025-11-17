@@ -171,3 +171,19 @@ target_link_libraries(sleep_consolidator_test
 )
 
 gtest_discover_tests(sleep_consolidator_test)
+
+# MemoryManager integration test executable
+add_executable(memory_manager_test
+    memory_manager_test.cpp
+)
+
+target_link_libraries(memory_manager_test
+    dpan_memory
+    dpan_storage
+    dpan_similarity
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(memory_manager_test)
