@@ -10,6 +10,7 @@ add_library(dpan_association
     temporal_learner.cpp
     spatial_learner.cpp
     categorical_learner.cpp
+    reinforcement_manager.cpp
 )
 
 target_include_directories(dpan_association PUBLIC

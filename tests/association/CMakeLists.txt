@@ -92,3 +92,16 @@ target_link_libraries(categorical_learner_test
 )
 
 gtest_discover_tests(categorical_learner_test)
+
+# ReinforcementManager test executable
+add_executable(reinforcement_manager_test
+    reinforcement_manager_test.cpp
+)
+
+target_link_libraries(reinforcement_manager_test
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(reinforcement_manager_test)
