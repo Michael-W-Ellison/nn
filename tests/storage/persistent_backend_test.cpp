@@ -7,6 +7,8 @@
 #include <chrono>
 #include <filesystem>
 #include <ctime>
+#include <atomic>
+#include <functional>
 
 namespace dpan {
 namespace {
@@ -26,9 +28,23 @@ PatternNode CreateTestPattern(PatternID id = PatternID::Generate()) {
 }
 
 std::string GetTempDbPath() {
-    static int counter = 0;
-    return "/tmp/test_persistent_" + std::to_string(std::time(nullptr)) +
-           "_" + std::to_string(counter++) + ".db";
+    static std::atomic<int> counter{0};
+    // Use more unique naming: timestamp + microseconds + counter + thread ID
+    auto now = std::chrono::system_clock::now();
+    auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    return "/tmp/test_persistent_" + std::to_string(micros) +
+           "_" + std::to_string(counter++) +
+           "_" + std::to_string(thread_id) + ".db";
+}
+
+void CleanupDatabase(const std::string& db_path) {
+    // Remove all SQLite files (db, WAL, SHM)
+    // This is critical to prevent file accumulation and locking issues
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path + "-wal");
+    std::filesystem::remove(db_path + "-shm");
+    std::filesystem::remove(db_path + "-journal");  // Also remove journal file if present
 }
 
 // ============================================================================
@@ -47,7 +63,7 @@ TEST(PersistentBackendTest, ConstructorCreatesDatabase) {
     }
 
     // Clean up
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, ConfigEnablesWAL) {
@@ -63,9 +79,7 @@ TEST(PersistentBackendTest, ConfigEnablesWAL) {
     }
 
     // Clean up
-    std::filesystem::remove(db_path);
-    std::filesystem::remove(db_path + "-wal");
-    std::filesystem::remove(db_path + "-shm");
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -87,7 +101,7 @@ TEST(PersistentBackendTest, StoreNewPattern) {
         EXPECT_EQ(1u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, StoreDuplicatePatternFails) {
@@ -107,7 +121,7 @@ TEST(PersistentBackendTest, StoreDuplicatePatternFails) {
         EXPECT_EQ(1u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, StoreMultiplePatterns) {
@@ -126,7 +140,7 @@ TEST(PersistentBackendTest, StoreMultiplePatterns) {
         EXPECT_EQ(10u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -151,7 +165,7 @@ TEST(PersistentBackendTest, RetrieveExistingPattern) {
         EXPECT_EQ(id, retrieved->GetID());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, RetrieveNonExistentPattern) {
@@ -168,7 +182,7 @@ TEST(PersistentBackendTest, RetrieveNonExistentPattern) {
         EXPECT_FALSE(retrieved.has_value());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -208,7 +222,7 @@ TEST(PersistentBackendTest, DataPersisstsAcrossRestarts) {
         }
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -244,7 +258,7 @@ TEST(PersistentBackendTest, UpdateExistingPattern) {
         EXPECT_EQ(PatternType::COMPOSITE, retrieved->GetType());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, UpdateNonExistentPatternFails) {
@@ -261,7 +275,7 @@ TEST(PersistentBackendTest, UpdateNonExistentPatternFails) {
         EXPECT_FALSE(result);
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -287,7 +301,7 @@ TEST(PersistentBackendTest, DeleteExistingPattern) {
         EXPECT_EQ(0u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, DeleteNonExistentPatternFails) {
@@ -304,7 +318,7 @@ TEST(PersistentBackendTest, DeleteNonExistentPatternFails) {
         EXPECT_FALSE(result);
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -329,7 +343,7 @@ TEST(PersistentBackendTest, StoreBatchMultiplePatterns) {
         EXPECT_EQ(10u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, StoreBatchSkipsDuplicates) {
@@ -354,7 +368,7 @@ TEST(PersistentBackendTest, StoreBatchSkipsDuplicates) {
         EXPECT_EQ(3u, backend.Count());  // Total 3
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, RetrieveBatchMultiplePatterns) {
@@ -376,7 +390,7 @@ TEST(PersistentBackendTest, RetrieveBatchMultiplePatterns) {
         EXPECT_EQ(5u, retrieved.size());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, DeleteBatchMultiplePatterns) {
@@ -401,7 +415,7 @@ TEST(PersistentBackendTest, DeleteBatchMultiplePatterns) {
         EXPECT_EQ(0u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -441,7 +455,7 @@ TEST(PersistentBackendTest, FindByTypeReturnsMatchingPatterns) {
         EXPECT_EQ(2u, composite.size());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, FindByTimeRangeReturnsMatchingPatterns) {
@@ -468,7 +482,7 @@ TEST(PersistentBackendTest, FindByTimeRangeReturnsMatchingPatterns) {
         EXPECT_EQ(5u, results.size());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, FindAllReturnsAllPatterns) {
@@ -490,7 +504,7 @@ TEST(PersistentBackendTest, FindAllReturnsAllPatterns) {
         EXPECT_EQ(7u, results.size());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -514,7 +528,7 @@ TEST(PersistentBackendTest, CountReturnsCorrectNumber) {
         EXPECT_EQ(2u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, GetStatsReturnsValidStats) {
@@ -535,7 +549,7 @@ TEST(PersistentBackendTest, GetStatsReturnsValidStats) {
         EXPECT_GT(stats.disk_usage_bytes, 0u);
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -561,7 +575,7 @@ TEST(PersistentBackendTest, ClearRemovesAllPatterns) {
         EXPECT_EQ(0u, backend.Count());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, FlushDoesntCrash) {
@@ -579,7 +593,7 @@ TEST(PersistentBackendTest, FlushDoesntCrash) {
         EXPECT_NO_THROW(backend.Flush());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, CompactReducesFileSize) {
@@ -607,7 +621,7 @@ TEST(PersistentBackendTest, CompactReducesFileSize) {
         EXPECT_NO_THROW(backend.Compact());
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -631,8 +645,8 @@ TEST(PersistentBackendTest, CreateSnapshotSucceeds) {
         EXPECT_TRUE(result);
     }
 
-    std::filesystem::remove(db_path);
-    std::filesystem::remove(snapshot_path);
+    CleanupDatabase(db_path);
+    CleanupDatabase(snapshot_path);
 }
 
 TEST(PersistentBackendTest, SnapshotAndRestorePreservesData) {
@@ -672,11 +686,11 @@ TEST(PersistentBackendTest, SnapshotAndRestorePreservesData) {
             EXPECT_TRUE(backend.Exists(id));
         }
 
-        std::filesystem::remove(new_db_path);
+        CleanupDatabase(new_db_path);
     }
 
-    std::filesystem::remove(db_path);
-    std::filesystem::remove(snapshot_path);
+    CleanupDatabase(db_path);
+    CleanupDatabase(snapshot_path);
 }
 
 // ============================================================================
@@ -716,7 +730,7 @@ TEST(PersistentBackendTest, ConcurrentReadsAreSafe) {
         }
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 // ============================================================================
@@ -755,7 +769,7 @@ TEST(PersistentBackendTest, SingleReadPerformance) {
         EXPECT_LT(avg_read_us, 2000.0f);
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 TEST(PersistentBackendTest, BatchWritePerformance) {
@@ -784,7 +798,7 @@ TEST(PersistentBackendTest, BatchWritePerformance) {
         EXPECT_LT(duration.count(), 500);
     }
 
-    std::filesystem::remove(db_path);
+    CleanupDatabase(db_path);
 }
 
 } // namespace

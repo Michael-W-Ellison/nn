@@ -142,6 +142,10 @@ public:
     /// Get patterns with no associations
     std::vector<PatternID> GetIsolatedPatterns() const;
 
+    /// Get all patterns with associations (source or target)
+    /// @return Vector of all pattern IDs
+    std::vector<PatternID> GetAllPatterns() const;
+
     // ========================================================================
     // Activation Propagation
     // ========================================================================

@@ -28,7 +28,14 @@ PersistentBackend::PersistentBackend(const Config& config)
 
 PersistentBackend::~PersistentBackend() {
     if (db_) {
-        sqlite3_close(db_);
+        // Use sqlite3_close_v2() instead of sqlite3_close()
+        // This properly handles WAL checkpointing and waits for all statements to finish
+        // Prevents hanging when destructor is called with active transactions
+        int rc = sqlite3_close_v2(db_);
+        if (rc != SQLITE_OK) {
+            // Log error but don't throw in destructor
+            // The database will be closed eventually when all statements are finalized
+        }
         db_ = nullptr;
     }
 }
@@ -39,6 +46,10 @@ PersistentBackend::~PersistentBackend() {
 
 void PersistentBackend::InitializeDatabase() {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // Set busy timeout to prevent infinite waiting on locks (5 seconds)
+    // This is CRITICAL to prevent tests from hanging
+    sqlite3_busy_timeout(db_, 5000);
 
     // Set pragmas for performance
     if (config_.enable_wal) {
@@ -467,9 +478,8 @@ std::vector<PatternID> PersistentBackend::FindAll(const QueryOptions& options) {
 // Statistics and Monitoring
 // ============================================================================
 
-size_t PersistentBackend::Count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
+// Internal helper - assumes mutex is already locked
+size_t PersistentBackend::CountUnlocked() const {
     const char* sql = "SELECT COUNT(*) FROM patterns;";
     sqlite3_stmt* stmt;
 
@@ -487,11 +497,16 @@ size_t PersistentBackend::Count() const {
     return count;
 }
 
+size_t PersistentBackend::Count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return CountUnlocked();
+}
+
 StorageStats PersistentBackend::GetStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
     StorageStats stats;
-    stats.total_patterns = Count();
+    stats.total_patterns = CountUnlocked();  // Use unlocked version - mutex already held
     stats.disk_usage_bytes = GetDatabaseSize();
     stats.memory_usage_bytes = 0;  // SQLite manages its own cache
 

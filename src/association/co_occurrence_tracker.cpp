@@ -248,4 +248,15 @@ void CoOccurrenceTracker::Clear() {
     total_windows_ = 0;
 }
 
+std::vector<PatternID> CoOccurrenceTracker::GetTrackedPatterns() const {
+    std::vector<PatternID> patterns;
+    patterns.reserve(pattern_counts_.size());
+
+    for (const auto& [pattern, count] : pattern_counts_) {
+        patterns.push_back(pattern);
+    }
+
+    return patterns;
+}
+
 } // namespace dpan

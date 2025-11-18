@@ -79,9 +79,16 @@ void AssociationLearningSystem::RecordPatternActivations(
 // ============================================================================
 
 size_t AssociationLearningSystem::FormNewAssociations(const PatternDatabase& pattern_db) {
-    // Simplified implementation - would need actual pattern iteration
     size_t formed_count = 0;
-    
+
+    // Get all patterns that have been tracked in co-occurrence tracker
+    std::vector<PatternID> tracked_patterns = tracker_.GetTrackedPatterns();
+
+    // Form associations for each tracked pattern
+    for (const auto& pattern : tracked_patterns) {
+        formed_count += FormAssociationsForPattern(pattern, pattern_db);
+    }
+
     return formed_count;
 }
 
@@ -181,10 +188,32 @@ size_t AssociationLearningSystem::PruneWeakAssociations(float min_strength) {
         min_strength = config_.prune_threshold;
     }
 
-    // Use ReinforcementManager's prune method
-    size_t pruned_count = reinforcement_mgr_.PruneWeakAssociations(matrix_);
-    last_pruning_ = Timestamp::Now();
+    size_t pruned_count = 0;
 
+    // Collect weak associations to prune (to avoid iterator invalidation)
+    std::vector<std::pair<PatternID, PatternID>> to_prune;
+
+    // Get all patterns that have associations
+    auto all_patterns = matrix_.GetAllPatterns();
+
+    for (const auto& pattern : all_patterns) {
+        auto outgoing = matrix_.GetOutgoingAssociations(pattern);
+
+        for (const auto* edge : outgoing) {
+            if (edge && edge->GetStrength() < min_strength) {
+                to_prune.push_back({edge->GetSource(), edge->GetTarget()});
+            }
+        }
+    }
+
+    // Remove weak associations
+    for (const auto& [source, target] : to_prune) {
+        if (matrix_.RemoveAssociation(source, target)) {
+            pruned_count++;
+        }
+    }
+
+    last_pruning_ = Timestamp::Now();
     return pruned_count;
 }
 
@@ -394,9 +423,34 @@ bool AssociationLearningSystem::Save(const std::string& filepath) const {
 }
 
 bool AssociationLearningSystem::Load(const std::string& filepath) {
-    // TODO: Implement proper deserialization
-    // AssociationMatrix doesn't support assignment due to mutex
-    return false;
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    // Deserialize matrix
+    auto loaded_matrix = AssociationMatrix::Deserialize(file);
+    if (!loaded_matrix) {
+        return false;
+    }
+
+    // Clear current matrix and copy edges from loaded matrix
+    matrix_.Clear();
+
+    // Get all patterns from loaded matrix
+    auto patterns = loaded_matrix->GetAllPatterns();
+
+    // Copy all associations from loaded matrix to current matrix
+    for (const auto& pattern : patterns) {
+        auto outgoing = loaded_matrix->GetOutgoingAssociations(pattern);
+        for (const auto* edge : outgoing) {
+            if (edge) {
+                matrix_.AddAssociation(*edge);
+            }
+        }
+    }
+
+    return file.good();
 }
 
 // ============================================================================

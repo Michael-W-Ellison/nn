@@ -131,3 +131,59 @@ target_link_libraries(consolidator_test
 )
 
 gtest_discover_tests(consolidator_test)
+
+# DecayFunctions test executable
+add_executable(decay_functions_test
+    decay_functions_test.cpp
+)
+
+target_link_libraries(decay_functions_test
+    dpan_memory
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(decay_functions_test)
+
+# Interference test executable
+add_executable(interference_test
+    interference_test.cpp
+)
+
+target_link_libraries(interference_test
+    dpan_memory
+    dpan_similarity
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(interference_test)
+
+# SleepConsolidator test executable
+add_executable(sleep_consolidator_test
+    sleep_consolidator_test.cpp
+)
+
+target_link_libraries(sleep_consolidator_test
+    dpan_memory
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(sleep_consolidator_test)
+
+# MemoryManager integration test executable
+add_executable(memory_manager_test
+    memory_manager_test.cpp
+)
+
+target_link_libraries(memory_manager_test
+    dpan_memory
+    dpan_storage
+    dpan_similarity
+    dpan_association
+    dpan_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(memory_manager_test)
