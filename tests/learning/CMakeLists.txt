@@ -216,6 +216,7 @@ target_link_libraries(self_attention_test
     dpan_core
     dpan_storage
     dpan_similarity
+    dpan_association
     GTest::gtest_main
 )
 
