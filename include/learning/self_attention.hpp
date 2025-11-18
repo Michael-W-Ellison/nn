@@ -28,6 +28,10 @@
 #include <mutex>
 
 namespace dpan {
+
+// Forward declaration
+class AssociationMatrix;
+
 namespace attention {
 
 /// Normalization mode for attention matrix
@@ -76,6 +80,85 @@ struct SelfAttentionConfig {
         if (temperature <= 0.0f) return false;
         if (attention_threshold < 0.0f || attention_threshold >= 1.0f) return false;
         return true;
+    }
+};
+
+/// Discovered relationship via self-attention
+struct DiscoveredRelationship {
+    /// Related pattern ID
+    PatternID pattern;
+
+    /// Attention weight (strength of relationship)
+    float attention_weight;
+
+    /// Whether this relationship exists in explicit associations
+    bool has_explicit_association;
+
+    /// Type of explicit association (if it exists)
+    /// Only valid if has_explicit_association is true
+    AssociationType explicit_type;
+
+    /// Strength of explicit association (if it exists)
+    /// Only valid if has_explicit_association is true
+    float explicit_strength;
+
+    /// Whether this is a novel relationship (high attention, no explicit association)
+    bool is_novel() const {
+        return !has_explicit_association;
+    }
+
+    /// Whether this is a confirmed relationship (both implicit and explicit)
+    bool is_confirmed() const {
+        return has_explicit_association;
+    }
+};
+
+/// Result of relationship discovery
+struct RelationshipDiscoveryResult {
+    /// Query pattern
+    PatternID query;
+
+    /// All discovered relationships, sorted by attention weight (descending)
+    std::vector<DiscoveredRelationship> relationships;
+
+    /// Number of novel relationships (not in explicit associations)
+    size_t novel_count() const {
+        size_t count = 0;
+        for (const auto& rel : relationships) {
+            if (rel.is_novel()) ++count;
+        }
+        return count;
+    }
+
+    /// Number of confirmed relationships (in both implicit and explicit)
+    size_t confirmed_count() const {
+        size_t count = 0;
+        for (const auto& rel : relationships) {
+            if (rel.is_confirmed()) ++count;
+        }
+        return count;
+    }
+
+    /// Get only novel relationships
+    std::vector<DiscoveredRelationship> get_novel_relationships() const {
+        std::vector<DiscoveredRelationship> novel;
+        for (const auto& rel : relationships) {
+            if (rel.is_novel()) {
+                novel.push_back(rel);
+            }
+        }
+        return novel;
+    }
+
+    /// Get only confirmed relationships
+    std::vector<DiscoveredRelationship> get_confirmed_relationships() const {
+        std::vector<DiscoveredRelationship> confirmed;
+        for (const auto& rel : relationships) {
+            if (rel.is_confirmed()) {
+                confirmed.push_back(rel);
+            }
+        }
+        return confirmed;
     }
 };
 
@@ -165,6 +248,11 @@ public:
     /// @param metric Shared pointer to similarity metric
     void SetSimilarityMetric(std::shared_ptr<SimilarityMetric> metric);
 
+    /// Set association matrix for comparing with explicit associations
+    ///
+    /// @param matrix Pointer to association matrix
+    void SetAssociationMatrix(AssociationMatrix* matrix);
+
     /// Get current configuration
     ///
     /// @return Reference to self-attention configuration
@@ -177,6 +265,28 @@ public:
 
     /// Clear attention matrix cache
     void ClearCache();
+
+    // ========================================================================
+    // Relationship Discovery
+    // ========================================================================
+
+    /// Discover related patterns using self-attention
+    ///
+    /// Uses self-attention to find patterns related to the query pattern.
+    /// Compares discovered relationships with explicit associations to
+    /// identify novel relationships.
+    ///
+    /// @param query_pattern Query pattern to find relationships for
+    /// @param candidate_patterns Set of candidate patterns to consider
+    /// @param top_k Number of top relationships to return
+    /// @param context Current context vector (optional)
+    /// @return Relationship discovery result with novel and confirmed relationships
+    RelationshipDiscoveryResult DiscoverRelatedPatterns(
+        PatternID query_pattern,
+        const std::vector<PatternID>& candidate_patterns,
+        size_t top_k,
+        const ContextVector& context = ContextVector()
+    );
 
     // ========================================================================
     // Analysis and Utilities
@@ -292,6 +402,9 @@ private:
 
     /// Pattern database pointer
     PatternDatabase* pattern_db_;
+
+    /// Association matrix pointer (for comparing with explicit associations)
+    AssociationMatrix* association_matrix_;
 
     /// Similarity metric for computing pairwise similarities
     std::shared_ptr<SimilarityMetric> similarity_metric_;

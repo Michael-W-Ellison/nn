@@ -11,6 +11,8 @@
 
 #include "learning/self_attention.hpp"
 #include "learning/attention_utils.hpp"
+#include "association/association_matrix.hpp"
+#include "association/association_edge.hpp"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -22,6 +24,7 @@ namespace attention {
 SelfAttention::SelfAttention(const SelfAttentionConfig& config)
     : config_(config)
     , pattern_db_(nullptr)
+    , association_matrix_(nullptr)
     , similarity_metric_(nullptr)  // Will use simple dot product if not set
     , matrix_computations_(0)
     , cache_hits_(0)
@@ -158,6 +161,11 @@ void SelfAttention::SetSimilarityMetric(std::shared_ptr<SimilarityMetric> metric
     similarity_metric_ = metric;
 }
 
+void SelfAttention::SetAssociationMatrix(AssociationMatrix* matrix) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    association_matrix_ = matrix;
+}
+
 const SelfAttentionConfig& SelfAttention::GetConfig() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return config_;
@@ -177,6 +185,72 @@ void SelfAttention::SetConfig(const SelfAttentionConfig& config) {
 void SelfAttention::ClearCache() {
     std::lock_guard<std::mutex> lock(mutex_);
     cache_.clear();
+}
+
+// ============================================================================
+// Relationship Discovery
+// ============================================================================
+
+RelationshipDiscoveryResult SelfAttention::DiscoverRelatedPatterns(
+    PatternID query_pattern,
+    const std::vector<PatternID>& candidate_patterns,
+    size_t top_k,
+    const ContextVector& context) {
+
+    RelationshipDiscoveryResult result;
+    result.query = query_pattern;
+
+    // Create pattern set including query
+    std::vector<PatternID> all_patterns;
+    all_patterns.push_back(query_pattern);
+    for (const auto& p : candidate_patterns) {
+        if (p != query_pattern) {
+            all_patterns.push_back(p);
+        }
+    }
+
+    // Compute self-attention matrix
+    auto attention_weights = GetQueryAttention(query_pattern, all_patterns, context);
+
+    // Sort by attention weight (descending)
+    std::vector<std::pair<PatternID, float>> sorted_weights;
+    for (const auto& [pattern, weight] : attention_weights) {
+        // Skip the query pattern itself
+        if (pattern != query_pattern) {
+            sorted_weights.push_back({pattern, weight});
+        }
+    }
+
+    std::sort(sorted_weights.begin(), sorted_weights.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    // Take top-k
+    size_t count = std::min(top_k, sorted_weights.size());
+
+    // Build discovered relationships
+    for (size_t i = 0; i < count; ++i) {
+        DiscoveredRelationship rel;
+        rel.pattern = sorted_weights[i].first;
+        rel.attention_weight = sorted_weights[i].second;
+
+        // Check if explicit association exists
+        rel.has_explicit_association = false;
+        rel.explicit_type = AssociationType::CATEGORICAL;  // Default
+        rel.explicit_strength = 0.0f;
+
+        if (association_matrix_ != nullptr) {
+            const auto* edge = association_matrix_->GetAssociation(query_pattern, rel.pattern);
+            if (edge != nullptr) {
+                rel.has_explicit_association = true;
+                rel.explicit_type = edge->GetType();
+                rel.explicit_strength = edge->GetStrength();
+            }
+        }
+
+        result.relationships.push_back(rel);
+    }
+
+    return result;
 }
 
 // ============================================================================
