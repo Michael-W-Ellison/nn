@@ -62,9 +62,12 @@ target_link_libraries(concurrency_tests
 gtest_discover_tests(concurrency_tests)
 
 # CLI benchmarks
+find_library(YAML_LIBRARY NAMES yaml libyaml PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu)
+
 add_executable(cli_benchmarks
     cli_benchmarks.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
     ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
     ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
 )
@@ -77,6 +80,7 @@ target_link_libraries(cli_benchmarks
         sqlite3
         pthread
         GTest::gtest_main
+        ${YAML_LIBRARY}
 )
 
 target_include_directories(cli_benchmarks
