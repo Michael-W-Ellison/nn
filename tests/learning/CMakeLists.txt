@@ -127,6 +127,27 @@ target_link_libraries(semantic_attention_head_test
     GTest::gtest_main
 )
 
+# Temporal attention head test
+add_executable(temporal_attention_head_test
+    temporal_attention_head_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/temporal_attention_head.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+)
+
+target_include_directories(temporal_attention_head_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/tests/learning
+)
+
+target_link_libraries(temporal_attention_head_test
+    dpan_core
+    dpan_storage
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(attention_utils_test)
@@ -135,4 +156,5 @@ gtest_discover_tests(pattern_importance_test)
 gtest_discover_tests(context_aware_attention_test)
 gtest_discover_tests(multi_head_attention_test)
 gtest_discover_tests(semantic_attention_head_test)
+gtest_discover_tests(temporal_attention_head_test)
 
