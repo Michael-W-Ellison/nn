@@ -19,6 +19,28 @@ target_link_libraries(attention_utils_test
     GTest::gtest_main
 )
 
+# Basic attention mechanism test
+add_executable(basic_attention_test
+    basic_attention_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+)
+
+target_include_directories(basic_attention_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/tests/learning
+)
+
+target_link_libraries(basic_attention_test
+    dpan_core
+    dpan_storage
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(attention_utils_test)
+gtest_discover_tests(basic_attention_test)

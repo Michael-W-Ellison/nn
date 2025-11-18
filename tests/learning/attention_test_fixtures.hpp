@@ -51,7 +51,8 @@ public:
         if (patterns_.find(id) != patterns_.end()) {
             return false;  // Pattern already exists
         }
-        patterns_[id] = node.Clone();
+        // Can't use assignment due to deleted operators, use emplace
+        patterns_.emplace(id, node.Clone());
         return true;
     }
 
@@ -70,7 +71,9 @@ public:
         if (patterns_.find(id) == patterns_.end()) {
             return false;  // Pattern doesn't exist
         }
-        patterns_[id] = node.Clone();
+        // Erase and re-insert due to deleted assignment operators
+        patterns_.erase(id);
+        patterns_.emplace(id, node.Clone());
         return true;
     }
 
