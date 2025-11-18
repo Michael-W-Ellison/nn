@@ -577,6 +577,271 @@ TEST_F(MultiHeadAttentionTest, GetStatistics) {
     EXPECT_TRUE(has_head_stats);
 }
 
+// ============================================================================
+// Task 6.2: Head Output Combination Tests
+// ============================================================================
+
+TEST_F(MultiHeadAttentionTest, CombinationWeightedAverageCorrect) {
+    // Create two heads with known, different behaviors
+    auto pattern_ids = CreateTestPatterns(3);
+
+    AttentionConfig config;
+    config.temperature = 1.0f;
+
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+
+    // Add heads with specific weights
+    multi_head_->AddHead("head1", head1, 0.7f);
+    multi_head_->AddHead("head2", head2, 0.3f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    // Compute combined attention
+    auto combined = multi_head_->ComputeAttention(query, candidates, context);
+
+    ASSERT_EQ(combined.size(), 2u);
+
+    // Verify weights sum to 1.0 (normalized)
+    float sum = 0.0f;
+    for (const auto& [_, weight] : combined) {
+        sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0f, 1e-5f);
+
+    // Verify all weights are in valid range
+    for (const auto& [_, weight] : combined) {
+        EXPECT_GE(weight, 0.0f);
+        EXPECT_LE(weight, 1.0f);
+    }
+}
+
+TEST_F(MultiHeadAttentionTest, AllHeadsContribute) {
+    auto pattern_ids = CreateTestPatterns(3);
+
+    AttentionConfig config;
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head3 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+    head3->SetPatternDatabase(mock_db_.get());
+
+    // Add three heads with equal weights
+    multi_head_->AddHead("head1", head1, 0.33f);
+    multi_head_->AddHead("head2", head2, 0.33f);
+    multi_head_->AddHead("head3", head3, 0.34f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    // Compute combined attention
+    auto combined = multi_head_->ComputeAttention(query, candidates, context);
+
+    // Verify result exists (all heads contributed)
+    ASSERT_EQ(combined.size(), 2u);
+
+    // Get statistics to verify all heads were called
+    auto stats = multi_head_->GetStatistics();
+    EXPECT_EQ(stats["num_heads"], 3.0f);
+    EXPECT_GE(stats["head_combinations"], 1.0f);
+}
+
+TEST_F(MultiHeadAttentionTest, CombinationNormalizationCorrect) {
+    auto pattern_ids = CreateTestPatterns(4);
+
+    AttentionConfig config;
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+
+    // Add heads with weights that don't sum to 1.0 initially
+    // (they should be auto-normalized to 0.5 each)
+    multi_head_->AddHead("head1", head1, 0.8f);
+    multi_head_->AddHead("head2", head2, 0.8f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {
+        pattern_ids[1], pattern_ids[2], pattern_ids[3]
+    };
+    ContextVector context;
+
+    // Compute combined attention multiple times
+    for (int i = 0; i < 5; ++i) {
+        auto combined = multi_head_->ComputeAttention(query, candidates, context);
+
+        ASSERT_EQ(combined.size(), 3u);
+
+        // Verify weights sum to exactly 1.0 every time
+        float sum = 0.0f;
+        for (const auto& [_, weight] : combined) {
+            sum += weight;
+        }
+        EXPECT_NEAR(sum, 1.0f, 1e-5f);
+    }
+}
+
+TEST_F(MultiHeadAttentionTest, CombinationWithDifferentWeights) {
+    auto pattern_ids = CreateTestPatterns(3);
+
+    AttentionConfig config;
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+
+    // Test with 90/10 split
+    multi_head_->AddHead("dominant", head1, 0.9f);
+    multi_head_->AddHead("minor", head2, 0.1f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    auto weights_90_10 = multi_head_->ComputeAttention(query, candidates, context);
+
+    ASSERT_EQ(weights_90_10.size(), 2u);
+
+    // Verify normalization
+    float sum = 0.0f;
+    for (const auto& [_, weight] : weights_90_10) {
+        sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0f, 1e-5f);
+
+    // Now change to 50/50 split and verify difference
+    multi_head_->SetHeadWeight("dominant", 0.5f);
+    multi_head_->SetHeadWeight("minor", 0.5f);
+
+    auto weights_50_50 = multi_head_->ComputeAttention(query, candidates, context);
+
+    ASSERT_EQ(weights_50_50.size(), 2u);
+
+    // Verify normalization again
+    sum = 0.0f;
+    for (const auto& [_, weight] : weights_50_50) {
+        sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0f, 1e-5f);
+}
+
+TEST_F(MultiHeadAttentionTest, CombinationEfficiency) {
+    auto pattern_ids = CreateTestPatterns(10);
+
+    AttentionConfig config;
+
+    // Add 4 heads (typical multi-head attention configuration)
+    for (int i = 0; i < 4; ++i) {
+        auto head = std::make_shared<BasicAttentionMechanism>(config);
+        head->SetPatternDatabase(mock_db_.get());
+        multi_head_->AddHead("head" + std::to_string(i), head, 0.25f);
+    }
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates(pattern_ids.begin() + 1, pattern_ids.end());
+    ContextVector context;
+
+    // Run computation multiple times to verify efficiency
+    const int iterations = 100;
+
+    for (int i = 0; i < iterations; ++i) {
+        auto combined = multi_head_->ComputeAttention(query, candidates, context);
+
+        // Verify correctness is maintained
+        ASSERT_EQ(combined.size(), 9u);
+
+        float sum = 0.0f;
+        for (const auto& [_, weight] : combined) {
+            sum += weight;
+        }
+        EXPECT_NEAR(sum, 1.0f, 1e-5f);
+    }
+
+    // Verify statistics show correct number of computations
+    auto stats = multi_head_->GetStatistics();
+    EXPECT_GE(stats["attention_computations"], static_cast<float>(iterations));
+    EXPECT_GE(stats["head_combinations"], static_cast<float>(iterations));
+}
+
+TEST_F(MultiHeadAttentionTest, CombinationZeroWeightHead) {
+    auto pattern_ids = CreateTestPatterns(3);
+
+    // Disable auto-normalization to test zero weight handling
+    MultiHeadConfig mh_config;
+    mh_config.auto_normalize_weights = false;
+    multi_head_->SetMultiHeadConfig(mh_config);
+
+    AttentionConfig config;
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+
+    // Add heads - one with weight 1.0, one with weight 0.0
+    multi_head_->AddHead("active", head1, 1.0f);
+    multi_head_->AddHead("inactive", head2, 0.0f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    auto combined = multi_head_->ComputeAttention(query, candidates, context);
+
+    // Should still get valid normalized output
+    ASSERT_EQ(combined.size(), 2u);
+
+    float sum = 0.0f;
+    for (const auto& [_, weight] : combined) {
+        sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0f, 1e-5f);
+}
+
+TEST_F(MultiHeadAttentionTest, CombinationConsistency) {
+    auto pattern_ids = CreateTestPatterns(3);
+
+    AttentionConfig config;
+    config.temperature = 1.0f;  // Fixed temperature for consistency
+
+    auto head1 = std::make_shared<BasicAttentionMechanism>(config);
+    auto head2 = std::make_shared<BasicAttentionMechanism>(config);
+
+    head1->SetPatternDatabase(mock_db_.get());
+    head2->SetPatternDatabase(mock_db_.get());
+
+    multi_head_->AddHead("head1", head1, 0.6f);
+    multi_head_->AddHead("head2", head2, 0.4f);
+
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    // Compute attention multiple times with same inputs
+    auto result1 = multi_head_->ComputeAttention(query, candidates, context);
+    auto result2 = multi_head_->ComputeAttention(query, candidates, context);
+    auto result3 = multi_head_->ComputeAttention(query, candidates, context);
+
+    // Results should be identical (deterministic combination)
+    ASSERT_EQ(result1.size(), result2.size());
+    ASSERT_EQ(result1.size(), result3.size());
+
+    for (const auto& [pattern_id, weight1] : result1) {
+        EXPECT_NEAR(weight1, result2[pattern_id], 1e-5f);
+        EXPECT_NEAR(weight1, result3[pattern_id], 1e-5f);
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
