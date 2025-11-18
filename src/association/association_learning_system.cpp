@@ -20,6 +20,7 @@ AssociationLearningSystem::AssociationLearningSystem(const Config& config)
       tracker_(config.co_occurrence),
       formation_rules_(config.formation),
       reinforcement_mgr_(config.reinforcement),
+      attention_mechanism_(nullptr),  // Default to nullptr (backwards compatible)
       last_decay_(Timestamp::Now()),
       last_competition_(Timestamp::Now()),
       last_normalization_(Timestamp::Now()),
@@ -406,6 +407,20 @@ void AssociationLearningSystem::SetConfig(const Config& config) {
 AssociationLearningSystem::Config AssociationLearningSystem::GetConfig() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
     return config_;
+}
+
+// ============================================================================
+// Attention Mechanism Integration
+// ============================================================================
+
+void AssociationLearningSystem::SetAttentionMechanism(AttentionMechanism* attention) {
+    std::lock_guard<std::mutex> lock(attention_mutex_);
+    attention_mechanism_ = attention;
+}
+
+AttentionMechanism* AssociationLearningSystem::GetAttentionMechanism() const {
+    std::lock_guard<std::mutex> lock(attention_mutex_);
+    return attention_mechanism_;
 }
 
 // ============================================================================

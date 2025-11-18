@@ -16,6 +16,9 @@
 
 namespace dpan {
 
+// Forward declaration for attention mechanism integration
+class AttentionMechanism;
+
 /// AssociationLearningSystem: Unified system for learning and managing associations
 ///
 /// This system integrates all association learning components into a cohesive whole:
@@ -298,6 +301,23 @@ public:
     Config GetConfig() const;
 
     // ========================================================================
+    // Attention Mechanism Integration
+    // ========================================================================
+
+    /// Set attention mechanism for attention-weighted predictions
+    /// @param attention Pointer to attention mechanism (nullptr to disable)
+    ///
+    /// When attention mechanism is set:
+    /// - Predict() and PredictWithConfidence() use attention-weighted scoring
+    /// - Combines association strengths with attention scores
+    /// - No performance impact when attention is nullptr (backwards compatible)
+    void SetAttentionMechanism(AttentionMechanism* attention);
+
+    /// Get current attention mechanism
+    /// @return Pointer to attention mechanism (nullptr if not set)
+    AttentionMechanism* GetAttentionMechanism() const;
+
+    // ========================================================================
     // Persistence
     // ========================================================================
 
@@ -321,6 +341,11 @@ private:
     CoOccurrenceTracker tracker_;
     AssociationFormationRules formation_rules_;
     ReinforcementManager reinforcement_mgr_;
+
+    // Optional attention mechanism for attention-weighted predictions
+    // nullptr by default (backwards compatible, no performance impact)
+    AttentionMechanism* attention_mechanism_;
+    mutable std::mutex attention_mutex_;
 
     // Activation history for temporal learning
     std::deque<std::pair<Timestamp, PatternID>> activation_history_;

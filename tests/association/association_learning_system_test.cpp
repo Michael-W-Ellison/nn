@@ -620,5 +620,105 @@ TEST(AssociationLearningSystemTest, LargeScaleAssociations) {
     EXPECT_FALSE(predictions.empty());
 }
 
+// ============================================================================
+// Attention Mechanism Integration Tests
+// ============================================================================
+
+TEST(AssociationLearningSystemTest, AttentionMechanismDefaultsToNull) {
+    AssociationLearningSystem system;
+
+    // By default, attention mechanism should be nullptr
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+}
+
+TEST(AssociationLearningSystemTest, SetAttentionMechanism) {
+    AssociationLearningSystem system;
+
+    // Use a dummy pointer value (not dereferenced, just stored and retrieved)
+    // This is safe because we never actually use the pointer
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Set attention mechanism
+    system.SetAttentionMechanism(dummy_ptr);
+
+    // Verify it's set
+    EXPECT_EQ(dummy_ptr, system.GetAttentionMechanism());
+
+    // Clean up by setting back to nullptr
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, AttentionMechanismCanBeDisabled) {
+    AssociationLearningSystem system;
+
+    // Use a dummy pointer value
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Set attention mechanism
+    system.SetAttentionMechanism(dummy_ptr);
+    EXPECT_NE(nullptr, system.GetAttentionMechanism());
+
+    // Disable by setting to nullptr
+    system.SetAttentionMechanism(nullptr);
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+}
+
+TEST(AssociationLearningSystemTest, BackwardsCompatibleWithoutAttention) {
+    // Test that system works normally without attention mechanism
+    AssociationLearningSystem system;
+
+    // Verify no attention mechanism
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+
+    // Record activations (should work without attention)
+    system.RecordPatternActivation(p1);
+    system.RecordPatternActivation(p2);
+
+    // Create association
+    AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+
+    // Predictions should work without attention
+    auto predictions = system.Predict(p1, 5);
+    EXPECT_FALSE(predictions.empty());
+
+    // PredictWithConfidence should also work
+    auto predictions_with_conf = system.PredictWithConfidence(p1, 5);
+    EXPECT_FALSE(predictions_with_conf.empty());
+}
+
+TEST(AssociationLearningSystemTest, ThreadSafeAttentionAccess) {
+    AssociationLearningSystem system;
+
+    // Use dummy pointer value
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Test concurrent access (should not crash)
+    std::thread writer([&system, dummy_ptr]() {
+        for (int i = 0; i < 100; ++i) {
+            system.SetAttentionMechanism(dummy_ptr);
+            system.SetAttentionMechanism(nullptr);
+        }
+    });
+
+    std::thread reader([&system]() {
+        for (int i = 0; i < 100; ++i) {
+            [[maybe_unused]] auto* attn = system.GetAttentionMechanism();
+        }
+    });
+
+    writer.join();
+    reader.join();
+
+    // If we got here without crashing, thread safety works
+    SUCCEED();
+
+    // Ensure we end in a clean state
+    system.SetAttentionMechanism(nullptr);
+}
+
 } // namespace
 } // namespace dpan
