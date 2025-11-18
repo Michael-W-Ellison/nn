@@ -40,7 +40,29 @@ target_link_libraries(basic_attention_test
     GTest::gtest_main
 )
 
+# Pattern importance test
+add_executable(pattern_importance_test
+    pattern_importance_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/pattern_importance.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+)
+
+target_include_directories(pattern_importance_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/tests/learning
+)
+
+target_link_libraries(pattern_importance_test
+    dpan_core
+    dpan_storage
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(attention_utils_test)
 gtest_discover_tests(basic_attention_test)
+gtest_discover_tests(pattern_importance_test)
+
