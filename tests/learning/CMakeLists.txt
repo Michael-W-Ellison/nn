@@ -169,6 +169,28 @@ target_link_libraries(structural_attention_head_test
     GTest::gtest_main
 )
 
+# Association attention head test
+add_executable(association_attention_head_test
+    association_attention_head_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/association_attention_head.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+)
+
+target_include_directories(association_attention_head_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/tests/learning
+)
+
+target_link_libraries(association_attention_head_test
+    dpan_core
+    dpan_storage
+    dpan_association
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(attention_utils_test)
@@ -179,4 +201,5 @@ gtest_discover_tests(multi_head_attention_test)
 gtest_discover_tests(semantic_attention_head_test)
 gtest_discover_tests(temporal_attention_head_test)
 gtest_discover_tests(structural_attention_head_test)
+gtest_discover_tests(association_attention_head_test)
 
