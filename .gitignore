@@ -63,3 +63,5 @@ Thumbs.db
 *.db-journal
 *.db-shm
 *.db-wal
+*.db.associations
+*.db.mappings
