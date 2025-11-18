@@ -16,6 +16,42 @@
 
 namespace dpan {
 
+/// ANSI color codes for terminal output
+namespace Color {
+    // Reset
+    inline const char* RESET = "\033[0m";
+
+    // Regular colors
+    inline const char* BLACK = "\033[30m";
+    inline const char* RED = "\033[31m";
+    inline const char* GREEN = "\033[32m";
+    inline const char* YELLOW = "\033[33m";
+    inline const char* BLUE = "\033[34m";
+    inline const char* MAGENTA = "\033[35m";
+    inline const char* CYAN = "\033[36m";
+    inline const char* WHITE = "\033[37m";
+
+    // Bold colors
+    inline const char* BOLD_RED = "\033[1;31m";
+    inline const char* BOLD_GREEN = "\033[1;32m";
+    inline const char* BOLD_YELLOW = "\033[1;33m";
+    inline const char* BOLD_BLUE = "\033[1;34m";
+    inline const char* BOLD_MAGENTA = "\033[1;35m";
+    inline const char* BOLD_CYAN = "\033[1;36m";
+    inline const char* BOLD_WHITE = "\033[1;37m";
+
+    // Background colors
+    inline const char* BG_RED = "\033[41m";
+    inline const char* BG_GREEN = "\033[42m";
+    inline const char* BG_YELLOW = "\033[43m";
+
+    // Styles
+    inline const char* BOLD = "\033[1m";
+    inline const char* DIM = "\033[2m";
+    inline const char* ITALIC = "\033[3m";
+    inline const char* UNDERLINE = "\033[4m";
+}
+
 /// Interactive CLI interface for DPAN
 /// Allows direct communication, active learning, and pattern exploration
 class DPANCli {
@@ -57,6 +93,7 @@ private:
     bool running_ = true;
     bool active_learning_mode_ = false;
     bool verbose_ = false;
+    bool colors_enabled_ = true;  // Enable colors by default
     std::string prompt_ = "dpan> ";
     std::string session_file_ = "dpan_session.db";
 
@@ -97,6 +134,9 @@ private:
 
     // Utilities
     std::vector<uint8_t> TextToBytes(const std::string& text);
+
+    // Color helpers
+    const char* C(const char* color) const { return colors_enabled_ ? color : ""; }
 };
 
 } // namespace dpan

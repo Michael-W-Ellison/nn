@@ -35,7 +35,7 @@ void DPANCli::Run() {
 
     std::string line;
     while (running_) {
-        std::cout << prompt_;
+        std::cout << C(Color::BOLD_CYAN) << prompt_ << C(Color::RESET);
         std::getline(std::cin, line);
 
         if (std::cin.eof() || line == "exit" || line == "quit") {
@@ -112,7 +112,7 @@ void DPANCli::InitializeAssociations() {
 }
 
 void DPANCli::PrintWelcome() {
-        std::cout << R"(
+    std::cout << C(Color::BOLD_CYAN) << R"(
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║   DPAN Interactive Learning Interface                       ║
@@ -121,11 +121,9 @@ void DPANCli::PrintWelcome() {
 ║   A neural network that learns and grows from interaction   ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
-
-Type 'help' for available commands, or just start talking!
-The system will learn from everything you say.
-
-)";
+)" << C(Color::RESET);
+    std::cout << C(Color::DIM) << "Type 'help' for available commands, or just start talking!\n";
+    std::cout << "The system will learn from everything you say.\n" << C(Color::RESET) << "\n";
     LoadSessionIfExists();
 }
 
@@ -170,14 +168,21 @@ void DPANCli::HandleCommand(const std::string& cmd) {
             PredictNext(text);
         } else if (command == "verbose") {
             verbose_ = !verbose_;
-            std::cout << "Verbose mode: " << (verbose_ ? "ON" : "OFF") << "\n";
+            std::cout << "Verbose mode: " << (verbose_ ? C(Color::GREEN) : C(Color::DIM))
+                     << (verbose_ ? "ON" : "OFF") << C(Color::RESET) << "\n";
+        } else if (command == "color" || command == "colors") {
+            colors_enabled_ = !colors_enabled_;
+            std::cout << (colors_enabled_ ? C(Color::GREEN) : "") << "Colors: "
+                     << (colors_enabled_ ? "ON" : "OFF")
+                     << (colors_enabled_ ? C(Color::RESET) : "") << "\n";
         } else if (command == "reset") {
             ResetSession();
         } else if (command == "clear") {
             std::cout << "\033[2J\033[1;1H"; // Clear screen
         } else {
-            std::cout << "Unknown command: /" << command << "\n";
-            std::cout << "Type '/help' for available commands.\n";
+            std::cout << C(Color::RED) << "✗ " << C(Color::RESET)
+                     << "Unknown command: /" << command << "\n";
+            std::cout << C(Color::DIM) << "Type '/help' for available commands.\n" << C(Color::RESET);
         }
     }
 
@@ -185,7 +190,7 @@ void DPANCli::HandleConversation(const std::string& text) {
         total_inputs_++;
 
         if (verbose_) {
-            std::cout << "[Processing: \"" << text << "\"]\n";
+            std::cout << C(Color::DIM) << "[Processing: \"" << text << "\"]\n" << C(Color::RESET);
         }
 
         // Convert text to bytes
@@ -205,17 +210,17 @@ void DPANCli::HandleConversation(const std::string& text) {
             pattern_to_text_[primary_pattern] = text;
 
             if (verbose_) {
-                std::cout << "[Created " << result.created_patterns.size()
-                         << " new pattern(s)]\n";
+                std::cout << C(Color::GREEN) << "[Created " << result.created_patterns.size()
+                         << " new pattern(s)]\n" << C(Color::RESET);
             }
         } else if (!result.activated_patterns.empty()) {
             primary_pattern = result.activated_patterns[0];
 
             if (verbose_) {
-                std::cout << "[Activated existing pattern]\n";
+                std::cout << C(Color::BLUE) << "[Activated existing pattern]\n" << C(Color::RESET);
             }
         } else {
-            std::cout << "[No patterns matched or created - learning...]\n";
+            std::cout << C(Color::YELLOW) << "[No patterns matched or created - learning...]\n" << C(Color::RESET);
             return;
         }
 
@@ -244,7 +249,8 @@ void DPANCli::GenerateResponse(PatternID input_pattern) {
         auto predictions = assoc_system_->Predict(input_pattern, 3);
 
         if (predictions.empty()) {
-            std::cout << "→ [Learning... I don't have enough context yet to respond.]\n";
+            std::cout << C(Color::CYAN) << "→ " << C(Color::DIM)
+                     << "[Learning... I don't have enough context yet to respond.]\n" << C(Color::RESET);
             return;
         }
 
@@ -262,23 +268,25 @@ void DPANCli::GenerateResponse(PatternID input_pattern) {
             auto* edge = matrix.GetAssociation(input_pattern, predictions[0]);
             float confidence = edge ? edge->GetStrength() : 0.0f;
 
-            std::cout << "→ " << response_candidates[0];
+            std::cout << C(Color::CYAN) << "→ " << C(Color::BOLD_MAGENTA)
+                     << response_candidates[0] << C(Color::RESET);
             if (verbose_) {
-                std::cout << " [confidence: " << std::fixed << std::setprecision(2)
-                         << confidence << "]";
+                std::cout << C(Color::DIM) << " [confidence: " << std::fixed << std::setprecision(2)
+                         << confidence << "]" << C(Color::RESET);
             }
             std::cout << "\n";
 
             if (response_candidates.size() > 1 && verbose_) {
-                std::cout << "   Other possibilities: ";
+                std::cout << C(Color::DIM) << "   Other possibilities: ";
                 for (size_t i = 1; i < std::min<size_t>(3, response_candidates.size()); ++i) {
                     std::cout << "\"" << response_candidates[i] << "\" ";
                 }
-                std::cout << "\n";
+                std::cout << C(Color::RESET) << "\n";
             }
         } else {
-            std::cout << "→ [I predicted " << predictions.size()
-                     << " pattern(s), but haven't learned text for them yet.]\n";
+            std::cout << C(Color::CYAN) << "→ " << C(Color::DIM)
+                     << "[I predicted " << predictions.size()
+                     << " pattern(s), but haven't learned text for them yet.]\n" << C(Color::RESET);
         }
     }
 
@@ -303,17 +311,20 @@ bool DPANCli::ShouldRequestMoreData(const PatternEngine::ProcessResult& result) 
     }
 
 void DPANCli::RequestMoreData(const std::string& context) {
-        std::cout << "\n[ACTIVE LEARNING] I'm not confident about that. ";
-        std::cout << "Can you tell me more or rephrase?\n";
+        std::cout << "\n" << C(Color::BOLD_YELLOW) << "[ACTIVE LEARNING] " << C(Color::YELLOW)
+                 << "I'm not confident about that. ";
+        std::cout << "Can you tell me more or rephrase?\n" << C(Color::RESET);
     }
 
 void DPANCli::LearnFromFile(const std::string& filepath) {
         if (!std::filesystem::exists(filepath)) {
-            std::cout << "Error: File not found: " << filepath << "\n";
+            std::cout << C(Color::RED) << "✗ Error: " << C(Color::RESET)
+                     << "File not found: " << filepath << "\n";
             return;
         }
 
-        std::cout << "Learning from file: " << filepath << "\n";
+        std::cout << C(Color::BLUE) << "Learning from file: " << C(Color::RESET)
+                 << filepath << "\n";
 
         std::ifstream file(filepath);
         std::string line;
@@ -336,9 +347,11 @@ void DPANCli::LearnFromFile(const std::string& filepath) {
         auto end = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-        std::cout << "\n✓ Learned from " << lines_processed << " lines in "
-                 << duration.count() << " ms\n";
-        std::cout << "  Patterns created: " << patterns_learned_ << "\n";
+        std::cout << "\n" << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                 << "Learned from " << C(Color::BOLD) << lines_processed << C(Color::RESET)
+                 << " lines in " << duration.count() << " ms\n";
+        std::cout << C(Color::DIM) << "  Patterns created: " << patterns_learned_
+                 << C(Color::RESET) << "\n";
     }
 
 void DPANCli::ShowHelp() {
@@ -359,6 +372,7 @@ Information:
   /patterns           List learned patterns
   /associations       Show association graph statistics
   /verbose            Toggle verbose output
+  /color              Toggle colorized output
 
 Session Management:
   /save               Save current session
@@ -383,41 +397,43 @@ void DPANCli::ShowStatistics() {
         auto stats = engine_->GetStatistics();
         auto storage_stats = storage_->GetStats();
 
-        std::cout << "\n";
+        std::cout << "\n" << C(Color::BOLD_CYAN);
         std::cout << "╔══════════════════════════════════════════╗\n";
         std::cout << "║         DPAN Learning Statistics         ║\n";
-        std::cout << "╚══════════════════════════════════════════╝\n\n";
+        std::cout << "╚══════════════════════════════════════════╝\n" << C(Color::RESET) << "\n";
 
-        std::cout << "Session:\n";
-        std::cout << "  Inputs processed: " << total_inputs_ << "\n";
-        std::cout << "  Patterns learned: " << patterns_learned_ << "\n";
-        std::cout << "  Conversation length: " << conversation_history_.size() << "\n";
-        std::cout << "  Vocabulary size: " << text_to_pattern_.size() << " unique inputs\n\n";
+        std::cout << C(Color::BOLD) << "Session:\n" << C(Color::RESET);
+        std::cout << "  Inputs processed: " << C(Color::CYAN) << total_inputs_ << C(Color::RESET) << "\n";
+        std::cout << "  Patterns learned: " << C(Color::CYAN) << patterns_learned_ << C(Color::RESET) << "\n";
+        std::cout << "  Conversation length: " << C(Color::CYAN) << conversation_history_.size() << C(Color::RESET) << "\n";
+        std::cout << "  Vocabulary size: " << C(Color::CYAN) << text_to_pattern_.size() << C(Color::RESET) << " unique inputs\n\n";
 
-        std::cout << "Patterns:\n";
-        std::cout << "  Total patterns: " << stats.total_patterns << "\n";
-        std::cout << "  Atomic: " << stats.atomic_patterns << "\n";
-        std::cout << "  Composite: " << stats.composite_patterns << "\n";
-        std::cout << "  Average confidence: " << std::fixed << std::setprecision(2)
-                 << stats.avg_confidence << "\n\n";
+        std::cout << C(Color::BOLD) << "Patterns:\n" << C(Color::RESET);
+        std::cout << "  Total patterns: " << C(Color::CYAN) << stats.total_patterns << C(Color::RESET) << "\n";
+        std::cout << "  Atomic: " << C(Color::CYAN) << stats.atomic_patterns << C(Color::RESET) << "\n";
+        std::cout << "  Composite: " << C(Color::CYAN) << stats.composite_patterns << C(Color::RESET) << "\n";
+        std::cout << "  Average confidence: " << C(Color::CYAN) << std::fixed << std::setprecision(2)
+                 << stats.avg_confidence << C(Color::RESET) << "\n\n";
 
-        std::cout << "Associations:\n";
+        std::cout << C(Color::BOLD) << "Associations:\n" << C(Color::RESET);
         auto assoc_stats = assoc_system_->GetStatistics();
-        std::cout << "  Total associations: " << assoc_stats.total_associations << "\n";
-        std::cout << "  Average strength: " << std::fixed << std::setprecision(2)
-                 << assoc_stats.average_strength << "\n";
-        std::cout << "  Strongest association: " << std::fixed << std::setprecision(2)
-                 << assoc_stats.max_strength << "\n\n";
+        std::cout << "  Total associations: " << C(Color::CYAN) << assoc_stats.total_associations << C(Color::RESET) << "\n";
+        std::cout << "  Average strength: " << C(Color::CYAN) << std::fixed << std::setprecision(2)
+                 << assoc_stats.average_strength << C(Color::RESET) << "\n";
+        std::cout << "  Strongest association: " << C(Color::CYAN) << std::fixed << std::setprecision(2)
+                 << assoc_stats.max_strength << C(Color::RESET) << "\n\n";
 
-        std::cout << "Storage:\n";
-        std::cout << "  Database: " << session_file_ << "\n";
-        std::cout << "  Size: " << storage_stats.disk_usage_bytes / 1024 << " KB\n";
-        std::cout << "  Active learning: " << (active_learning_mode_ ? "ON" : "OFF") << "\n\n";
+        std::cout << C(Color::BOLD) << "Storage:\n" << C(Color::RESET);
+        std::cout << "  Database: " << C(Color::DIM) << session_file_ << C(Color::RESET) << "\n";
+        std::cout << "  Size: " << C(Color::CYAN) << storage_stats.disk_usage_bytes / 1024 << C(Color::RESET) << " KB\n";
+        std::cout << "  Active learning: " << (active_learning_mode_ ?
+                 C(Color::GREEN) : C(Color::DIM)) << (active_learning_mode_ ? "ON" : "OFF")
+                 << C(Color::RESET) << "\n\n";
     }
 
 void DPANCli::ShowPatterns() {
-        std::cout << "\nLearned Patterns (text mappings):\n";
-        std::cout << "================================\n\n";
+        std::cout << "\n" << C(Color::BOLD_CYAN) << "Learned Patterns (text mappings):\n";
+        std::cout << "================================\n" << C(Color::RESET) << "\n";
 
         size_t count = 0;
         for (const auto& [text, pattern_id] : text_to_pattern_) {
@@ -451,7 +467,8 @@ void DPANCli::ShowPatterns() {
         }
 
         if (count == 0) {
-            std::cout << "No patterns learned yet. Start a conversation!\n";
+            std::cout << C(Color::YELLOW) << "No patterns learned yet. Start a conversation!\n"
+                     << C(Color::RESET);
         }
     }
 
@@ -459,18 +476,19 @@ void DPANCli::ShowAssociations() {
         auto stats = assoc_system_->GetStatistics();
         const auto& matrix = assoc_system_->GetAssociationMatrix();
 
-        std::cout << "\nAssociation Graph:\n";
-        std::cout << "==================\n\n";
+        std::cout << "\n" << C(Color::BOLD_CYAN) << "Association Graph:\n";
+        std::cout << "==================\n" << C(Color::RESET) << "\n";
         std::cout << "Total associations: " << stats.total_associations << "\n";
         std::cout << "Average strength: " << std::fixed << std::setprecision(2)
                  << stats.average_strength << "\n\n";
 
         if (stats.total_associations == 0) {
-            std::cout << "No associations formed yet. Keep learning!\n";
+            std::cout << C(Color::YELLOW) << "No associations formed yet. Keep learning!\n"
+                     << C(Color::RESET);
             return;
         }
 
-        std::cout << "Strongest associations:\n";
+        std::cout << C(Color::BOLD) << "Strongest associations:\n" << C(Color::RESET);
 
         // Find strongest associations
         std::vector<std::tuple<PatternID, PatternID, float>> strong_assocs;
@@ -516,8 +534,9 @@ void DPANCli::PredictNext(const std::string& text) {
         }
 
         if (text_to_pattern_.count(query) == 0) {
-            std::cout << "Unknown input: \"" << query << "\"\n";
-            std::cout << "I haven't learned this pattern yet.\n";
+            std::cout << C(Color::YELLOW) << "Unknown input: " << C(Color::RESET)
+                     << "\"" << query << "\"\n";
+            std::cout << C(Color::DIM) << "I haven't learned this pattern yet.\n" << C(Color::RESET);
             return;
         }
 
@@ -525,11 +544,13 @@ void DPANCli::PredictNext(const std::string& text) {
         auto predictions = assoc_system_->Predict(pattern, 5);
 
         if (predictions.empty()) {
-            std::cout << "No predictions available for: \"" << query << "\"\n";
+            std::cout << C(Color::YELLOW) << "No predictions available for: "
+                     << C(Color::RESET) << "\"" << query << "\"\n";
             return;
         }
 
-        std::cout << "\nPredictions for \"" << query << "\":\n";
+        std::cout << "\n" << C(Color::BOLD) << "Predictions for \"" << query << "\":\n"
+                 << C(Color::RESET);
 
         const auto& matrix = assoc_system_->GetAssociationMatrix();
         for (size_t i = 0; i < predictions.size(); ++i) {
@@ -546,23 +567,28 @@ void DPANCli::PredictNext(const std::string& text) {
 
 void DPANCli::ToggleActiveLearning() {
         active_learning_mode_ = !active_learning_mode_;
-        std::cout << "Active learning mode: "
-                 << (active_learning_mode_ ? "ON" : "OFF") << "\n";
+        std::cout << "Active learning mode: " << (active_learning_mode_ ?
+                 C(Color::BOLD_GREEN) : C(Color::DIM))
+                 << (active_learning_mode_ ? "ON" : "OFF") << C(Color::RESET) << "\n";
 
         if (active_learning_mode_) {
-            std::cout << "DPAN will now ask for clarification when uncertain.\n";
+            std::cout << C(Color::DIM) << "DPAN will now ask for clarification when uncertain.\n"
+                     << C(Color::RESET);
         }
     }
 
 void DPANCli::SaveSession() {
-        std::cout << "Saving session to " << session_file_ << "...\n";
+        std::cout << C(Color::BLUE) << "Saving session to " << C(Color::RESET)
+                 << session_file_ << "...\n";
 
         // Storage is already persistent, but save associations
         std::string assoc_file = session_file_ + ".associations";
         if (assoc_system_->Save(assoc_file)) {
-            std::cout << "✓ Session saved successfully\n";
+            std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                     << "Session saved successfully\n";
         } else {
-            std::cout << "✗ Failed to save associations\n";
+            std::cout << C(Color::RED) << "✗ " << C(Color::RESET)
+                     << "Failed to save associations\n";
         }
 
         // Save text mappings
@@ -581,7 +607,8 @@ void DPANCli::SaveSession() {
             out.write(reinterpret_cast<const char*>(&id_val), sizeof(id_val));
         }
 
-        std::cout << "✓ Saved " << count << " text mappings\n";
+        std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                 << "Saved " << count << " text mappings\n";
     }
 
 void DPANCli::LoadSession() {
@@ -590,17 +617,19 @@ void DPANCli::LoadSession() {
 
 void DPANCli::LoadSessionIfExists() {
         if (!std::filesystem::exists(session_file_)) {
-            std::cout << "No previous session found. Starting fresh.\n";
+            std::cout << C(Color::DIM) << "No previous session found. Starting fresh.\n"
+                     << C(Color::RESET);
             return;
         }
 
-        std::cout << "Loading previous session...\n";
+        std::cout << C(Color::BLUE) << "Loading previous session...\n" << C(Color::RESET);
 
         // Load associations
         std::string assoc_file = session_file_ + ".associations";
         if (std::filesystem::exists(assoc_file)) {
             if (assoc_system_->Load(assoc_file)) {
-                std::cout << "✓ Loaded associations\n";
+                std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                         << "Loaded associations\n";
             }
         }
 
@@ -627,11 +656,13 @@ void DPANCli::LoadSessionIfExists() {
                 pattern_to_text_[pattern_id] = text;
             }
 
-            std::cout << "✓ Loaded " << count << " text mappings\n";
+            std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                     << "Loaded " << count << " text mappings\n";
         }
 
         auto stats = engine_->GetStatistics();
-        std::cout << "Session loaded: " << stats.total_patterns << " patterns\n\n";
+        std::cout << C(Color::GREEN) << "Session loaded: " << C(Color::CYAN)
+                 << stats.total_patterns << C(Color::RESET) << " patterns\n\n";
     }
 
 void DPANCli::ResetSession() {
@@ -640,7 +671,7 @@ void DPANCli::ResetSession() {
         std::getline(std::cin, confirm);
 
         if (confirm != "y" && confirm != "Y") {
-            std::cout << "Reset cancelled.\n";
+            std::cout << C(Color::YELLOW) << "Reset cancelled.\n" << C(Color::RESET);
             return;
         }
 
@@ -661,18 +692,21 @@ void DPANCli::ResetSession() {
         InitializeEngine();
         InitializeAssociations();
 
-        std::cout << "✓ Session reset. Starting fresh.\n";
+        std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                 << "Session reset. Starting fresh.\n";
     }
 
 void DPANCli::Shutdown() {
-        std::cout << "\nShutting down...\n";
+        std::cout << "\n" << C(Color::BLUE) << "Shutting down...\n" << C(Color::RESET);
         SaveSession();
 
-        std::cout << "\nSession Summary:\n";
-        std::cout << "  Inputs processed: " << total_inputs_ << "\n";
-        std::cout << "  Patterns learned: " << patterns_learned_ << "\n";
-        std::cout << "  Conversation length: " << conversation_history_.size() << "\n";
-        std::cout << "\nThank you for teaching me! Goodbye.\n";
+        std::cout << "\n" << C(Color::BOLD) << "Session Summary:\n" << C(Color::RESET);
+        std::cout << "  Inputs processed: " << C(Color::CYAN) << total_inputs_ << C(Color::RESET) << "\n";
+        std::cout << "  Patterns learned: " << C(Color::CYAN) << patterns_learned_ << C(Color::RESET) << "\n";
+        std::cout << "  Conversation length: " << C(Color::CYAN) << conversation_history_.size()
+                 << C(Color::RESET) << "\n";
+        std::cout << "\n" << C(Color::BOLD_CYAN) << "Thank you for teaching me! Goodbye.\n"
+                 << C(Color::RESET);
     }
 
 std::vector<uint8_t> DPANCli::TextToBytes(const std::string& text) {
