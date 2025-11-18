@@ -145,16 +145,22 @@ private:
     void ShowPatterns();
     void ShowAssociations();
     void ShowAttentionInfo();
+    void ShowAttentionHeads(const std::string& text);
     void PredictNext(const std::string& text);
     void PredictDetailed(const std::string& text);
     void CompareMode(const std::string& text);
     void LearnFromFile(const std::string& filepath);
     void ToggleActiveLearning();
     void ToggleAttention();
+    void ToggleVerbose();
+    void ToggleColors();
     void SaveSession();
     void LoadSession();
     void LoadSessionIfExists();
     void ResetSession();
+    void ExportSession(const std::string& filepath);
+    void ImportSession(const std::string& filepath);
+    void RunBenchmark();
     void Shutdown();
 
     // Response generation

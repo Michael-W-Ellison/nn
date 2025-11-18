@@ -186,7 +186,21 @@ void DPANCli::HandleCommand(const std::string& cmd) {
         } else if (command == "active") {
             ToggleActiveLearning();
         } else if (command == "attention") {
-            ToggleAttention();
+            // Check for subcommands
+            std::string subcommand;
+            iss >> subcommand;
+            if (subcommand.empty()) {
+                ToggleAttention();
+            } else if (subcommand == "heads") {
+                std::string text;
+                std::getline(iss, text);
+                ShowAttentionHeads(text);
+            } else {
+                std::cout << C(Color::RED) << "✗ " << C(Color::RESET)
+                         << "Unknown attention subcommand: " << subcommand << "\n";
+                std::cout << C(Color::DIM) << "Use '/attention heads <text>' or '/attention' to toggle.\n"
+                         << C(Color::RESET);
+            }
         } else if (command == "save") {
             SaveSession();
         } else if (command == "load") {
@@ -210,16 +224,21 @@ void DPANCli::HandleCommand(const std::string& cmd) {
             std::getline(iss, text);
             CompareMode(text);
         } else if (command == "verbose") {
-            verbose_ = !verbose_;
-            std::cout << "Verbose mode: " << (verbose_ ? C(Color::GREEN) : C(Color::DIM))
-                     << (verbose_ ? "ON" : "OFF") << C(Color::RESET) << "\n";
+            ToggleVerbose();
         } else if (command == "color" || command == "colors") {
-            colors_enabled_ = !colors_enabled_;
-            std::cout << (colors_enabled_ ? C(Color::GREEN) : "") << "Colors: "
-                     << (colors_enabled_ ? "ON" : "OFF")
-                     << (colors_enabled_ ? C(Color::RESET) : "") << "\n";
+            ToggleColors();
         } else if (command == "reset") {
             ResetSession();
+        } else if (command == "export") {
+            std::string filepath;
+            iss >> filepath;
+            ExportSession(filepath);
+        } else if (command == "import") {
+            std::string filepath;
+            iss >> filepath;
+            ImportSession(filepath);
+        } else if (command == "benchmark") {
+            RunBenchmark();
         } else if (command == "clear") {
             std::cout << "\033[2J\033[1;1H"; // Clear screen
         } else {
@@ -430,6 +449,7 @@ Learning:
   /learn <file>       Learn from a text file (one line = one input)
   /active             Toggle active learning mode (DPAN asks questions)
   /attention          Toggle attention-enhanced predictions
+  /attention heads <t> Show multi-head attention breakdown for text
 
 Information:
   /stats              Show learning statistics
@@ -443,6 +463,11 @@ Session Management:
   /save               Save current session
   /load               Load previous session
   /reset              Reset session (clear all learned data)
+  /export <file>      Export session to JSON format
+  /import <file>      Import session from JSON (limited support)
+
+Performance:
+  /benchmark          Run performance benchmarks
 
 Utility:
   /clear              Clear screen
@@ -453,6 +478,9 @@ Examples:
   Hello world
   /learn conversation.txt
   /predict The cat sat on the
+  /attention heads Hello
+  /export session.json
+  /benchmark
   /stats
 
 )";
@@ -1125,6 +1153,377 @@ void DPANCli::ResetSession() {
         std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
                  << "Session reset. Starting fresh.\n";
     }
+
+void DPANCli::ToggleVerbose() {
+    verbose_ = !verbose_;
+    std::cout << "Verbose mode: " << (verbose_ ? C(Color::GREEN) : C(Color::DIM))
+             << (verbose_ ? "ON" : "OFF") << C(Color::RESET) << "\n";
+}
+
+void DPANCli::ToggleColors() {
+    colors_enabled_ = !colors_enabled_;
+    std::cout << (colors_enabled_ ? C(Color::GREEN) : "") << "Colors: "
+             << (colors_enabled_ ? "ON" : "OFF")
+             << (colors_enabled_ ? C(Color::RESET) : "") << "\n";
+}
+
+void DPANCli::ShowAttentionHeads(const std::string& text) {
+    std::string query = text;
+    // Trim leading space if present
+    if (!query.empty() && query[0] == ' ') {
+        query = query.substr(1);
+    }
+
+    if (query.empty()) {
+        std::cout << C(Color::YELLOW) << "Usage: " << C(Color::RESET)
+                 << "/attention heads <text>\n";
+        std::cout << C(Color::DIM) << "Shows how each attention head contributes to predictions.\n"
+                 << C(Color::RESET);
+        return;
+    }
+
+    if (text_to_pattern_.count(query) == 0) {
+        std::cout << C(Color::YELLOW) << "Unknown input: " << C(Color::RESET)
+                 << "\"" << query << "\"\n";
+        std::cout << C(Color::DIM) << "I haven't learned this pattern yet.\n" << C(Color::RESET);
+        return;
+    }
+
+    if (!attention_mechanism_) {
+        std::cout << C(Color::YELLOW) << "Attention mechanism not available.\n"
+                 << C(Color::RESET);
+        return;
+    }
+
+    PatternID pattern = text_to_pattern_[query];
+
+    // Get basic predictions to use as candidates
+    auto basic_predictions = assoc_system_->PredictWithConfidence(
+        pattern, 5, &current_context_);
+
+    if (basic_predictions.empty()) {
+        std::cout << C(Color::YELLOW) << "No predictions available for: "
+                 << C(Color::RESET) << "\"" << query << "\"\n";
+        return;
+    }
+
+    // Extract candidate IDs
+    std::vector<PatternID> candidates;
+    for (const auto& [id, _] : basic_predictions) {
+        candidates.push_back(id);
+    }
+
+    // Get detailed attention scores
+    auto detailed_scores = attention_mechanism_->ComputeDetailedAttention(
+        pattern, candidates, current_context_);
+
+    // Print header
+    std::cout << "\n" << C(Color::BOLD_CYAN);
+    std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║         Multi-Head Attention Breakdown                      ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    std::cout << C(Color::RESET);
+    std::cout << C(Color::BOLD) << "Query: " << C(Color::RESET) << "\"" << query << "\"\n\n";
+
+    // Show configuration
+    const auto& config = attention_mechanism_->GetConfig();
+    std::cout << C(Color::DIM) << "Configuration:\n";
+    std::cout << "  Attention type: " << config.attention_type << "\n";
+    std::cout << "  Temperature: " << std::fixed << std::setprecision(2) << config.temperature << "\n";
+    std::cout << "  Association weight: " << (config.association_weight * 100) << "%\n";
+    std::cout << "  Attention weight: " << (config.attention_weight * 100) << "%\n";
+    std::cout << C(Color::RESET) << "\n";
+
+    // Show each candidate with head breakdown
+    for (size_t i = 0; i < detailed_scores.size() && i < 5; ++i) {
+        const auto& score_detail = detailed_scores[i];
+        std::string pred_text = pattern_to_text_.count(score_detail.pattern_id) ?
+                               pattern_to_text_[score_detail.pattern_id] : "<unknown>";
+
+        std::cout << C(Color::BOLD) << (i+1) << ". \"" << pred_text << "\""
+                 << C(Color::RESET) << "\n";
+        std::cout << "   Final attention weight: " << C(Color::CYAN)
+                 << std::fixed << std::setprecision(3) << score_detail.weight
+                 << C(Color::RESET) << "\n\n";
+
+        // Show head contributions
+        const auto& comp = score_detail.components;
+
+        std::cout << C(Color::DIM) << "   Head Contributions:\n" << C(Color::RESET);
+
+        // Create a bar chart for each head
+        auto print_bar = [&](const std::string& name, float value, const char* color) {
+            if (value > 0.001f) {
+                std::cout << "     " << std::setw(20) << std::left << name << " ";
+                std::cout << color;
+                int bar_len = static_cast<int>(value * 30);
+                std::cout << std::string(bar_len, '#');
+                std::cout << C(Color::RESET) << " " << std::fixed << std::setprecision(3) << value << "\n";
+            }
+        };
+
+        print_bar("Semantic", comp.semantic_similarity, Color::BLUE);
+        print_bar("Context", comp.context_similarity, Color::GREEN);
+        print_bar("Importance", comp.importance_score, Color::YELLOW);
+        print_bar("Temporal", comp.temporal_score, Color::MAGENTA);
+        print_bar("Structural", comp.structural_score, Color::CYAN);
+
+        std::cout << "\n";
+    }
+
+    std::cout << C(Color::DIM) << "Note: Bar length represents relative contribution.\n"
+             << "Head values are normalized and may not sum to 1.0.\n" << C(Color::RESET);
+}
+
+void DPANCli::ExportSession(const std::string& filepath) {
+    if (filepath.empty()) {
+        std::cout << C(Color::RED) << "✗ Error: " << C(Color::RESET)
+                 << "Please specify output file path\n";
+        std::cout << C(Color::DIM) << "Usage: /export <filepath>\n" << C(Color::RESET);
+        return;
+    }
+
+    std::cout << C(Color::BLUE) << "Exporting session to " << C(Color::RESET)
+             << filepath << "...\n";
+
+    try {
+        std::ofstream out(filepath);
+        if (!out) {
+            std::cout << C(Color::RED) << "✗ Error: " << C(Color::RESET)
+                     << "Cannot open file for writing: " << filepath << "\n";
+            return;
+        }
+
+        // Export as JSON-like format
+        out << "{\n";
+        out << "  \"session\": {\n";
+        out << "    \"total_inputs\": " << total_inputs_ << ",\n";
+        out << "    \"patterns_learned\": " << patterns_learned_ << ",\n";
+        out << "    \"conversation_length\": " << conversation_history_.size() << ",\n";
+        out << "    \"vocabulary_size\": " << text_to_pattern_.size() << "\n";
+        out << "  },\n";
+
+        // Export statistics
+        auto stats = engine_->GetStatistics();
+        auto assoc_stats = assoc_system_->GetStatistics();
+
+        out << "  \"statistics\": {\n";
+        out << "    \"total_patterns\": " << stats.total_patterns << ",\n";
+        out << "    \"atomic_patterns\": " << stats.atomic_patterns << ",\n";
+        out << "    \"composite_patterns\": " << stats.composite_patterns << ",\n";
+        out << "    \"avg_confidence\": " << std::fixed << std::setprecision(3)
+            << stats.avg_confidence << ",\n";
+        out << "    \"total_associations\": " << assoc_stats.total_associations << ",\n";
+        out << "    \"avg_strength\": " << std::fixed << std::setprecision(3)
+            << assoc_stats.average_strength << "\n";
+        out << "  },\n";
+
+        // Export text mappings
+        out << "  \"mappings\": [\n";
+        size_t count = 0;
+        for (const auto& [text, pattern_id] : text_to_pattern_) {
+            if (count > 0) out << ",\n";
+            out << "    {\"text\": \"" << text << "\", \"pattern_id\": "
+                << pattern_id.value() << "}";
+            count++;
+        }
+        out << "\n  ],\n";
+
+        // Export associations (top 100)
+        out << "  \"associations\": [\n";
+        const auto& matrix = assoc_system_->GetAssociationMatrix();
+        std::vector<std::tuple<std::string, std::string, float>> top_assocs;
+
+        for (const auto& [text, pattern_id] : text_to_pattern_) {
+            auto outgoing = matrix.GetOutgoingAssociations(pattern_id);
+            for (const auto* edge : outgoing) {
+                if (edge && pattern_to_text_.count(edge->GetTarget())) {
+                    top_assocs.push_back({text,
+                                        pattern_to_text_[edge->GetTarget()],
+                                        edge->GetStrength()});
+                }
+            }
+        }
+
+        // Sort by strength and take top 100
+        std::sort(top_assocs.begin(), top_assocs.end(),
+                 [](const auto& a, const auto& b) {
+                     return std::get<2>(a) > std::get<2>(b);
+                 });
+
+        size_t assoc_count = 0;
+        for (size_t i = 0; i < std::min(size_t(100), top_assocs.size()); ++i) {
+            if (assoc_count > 0) out << ",\n";
+            out << "    {\"source\": \"" << std::get<0>(top_assocs[i])
+                << "\", \"target\": \"" << std::get<1>(top_assocs[i])
+                << "\", \"strength\": " << std::fixed << std::setprecision(3)
+                << std::get<2>(top_assocs[i]) << "}";
+            assoc_count++;
+        }
+        out << "\n  ]\n";
+
+        out << "}\n";
+        out.close();
+
+        std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                 << "Session exported successfully\n";
+        std::cout << C(Color::DIM) << "  Exported " << text_to_pattern_.size()
+                 << " patterns and " << assoc_count << " associations\n" << C(Color::RESET);
+
+    } catch (const std::exception& e) {
+        std::cout << C(Color::RED) << "✗ Error during export: " << C(Color::RESET)
+                 << e.what() << "\n";
+    }
+}
+
+void DPANCli::ImportSession(const std::string& filepath) {
+    if (filepath.empty()) {
+        std::cout << C(Color::RED) << "✗ Error: " << C(Color::RESET)
+                 << "Please specify input file path\n";
+        std::cout << C(Color::DIM) << "Usage: /import <filepath>\n" << C(Color::RESET);
+        return;
+    }
+
+    if (!std::filesystem::exists(filepath)) {
+        std::cout << C(Color::RED) << "✗ Error: " << C(Color::RESET)
+                 << "File not found: " << filepath << "\n";
+        return;
+    }
+
+    std::cout << C(Color::BLUE) << "Importing session from " << C(Color::RESET)
+             << filepath << "...\n";
+    std::cout << C(Color::YELLOW) << "Note: Import from JSON export is not fully implemented.\n";
+    std::cout << C(Color::DIM) << "Use /load to restore from native .db format.\n"
+             << C(Color::RESET);
+
+    // This would require JSON parsing, which is complex without a library
+    // For now, just show a message
+    std::cout << C(Color::YELLOW) << "Import functionality requires JSON library.\n";
+    std::cout << C(Color::DIM) << "For session restore, use the native /load command instead.\n"
+             << C(Color::RESET);
+}
+
+void DPANCli::RunBenchmark() {
+    std::cout << "\n" << C(Color::BOLD_CYAN);
+    std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║              DPAN Performance Benchmark                      ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    std::cout << C(Color::RESET) << "\n";
+
+    std::cout << "Running performance tests...\n\n";
+
+    // Benchmark 1: Pattern processing speed
+    {
+        std::cout << C(Color::BOLD) << "1. Pattern Processing Speed\n" << C(Color::RESET);
+        std::vector<std::string> test_inputs = {
+            "The quick brown fox",
+            "jumps over the lazy dog",
+            "Hello world from DPAN",
+            "Artificial intelligence learning",
+            "Pattern recognition system"
+        };
+
+        auto start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 100; ++i) {
+            for (const auto& text : test_inputs) {
+                auto bytes = TextToBytes(text);
+                engine_->ProcessInput(bytes, DataModality::TEXT);
+            }
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        float ops_per_sec = (500.0f / duration.count()) * 1000.0f;
+        std::cout << "   Processed 500 inputs in " << duration.count() << " ms\n";
+        std::cout << "   " << C(Color::CYAN) << std::fixed << std::setprecision(1)
+                 << ops_per_sec << C(Color::RESET) << " operations/second\n\n";
+    }
+
+    // Benchmark 2: Prediction speed
+    {
+        std::cout << C(Color::BOLD) << "2. Prediction Speed\n" << C(Color::RESET);
+
+        if (text_to_pattern_.empty()) {
+            std::cout << C(Color::YELLOW) << "   No patterns available for prediction benchmark\n\n"
+                     << C(Color::RESET);
+        } else {
+            PatternID test_pattern = text_to_pattern_.begin()->second;
+
+            auto start = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < 1000; ++i) {
+                assoc_system_->PredictWithConfidence(test_pattern, 5, &current_context_);
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+            float ops_per_sec = (1000.0f / duration.count()) * 1000.0f;
+            std::cout << "   Ran 1000 predictions in " << duration.count() << " ms\n";
+            std::cout << "   " << C(Color::CYAN) << std::fixed << std::setprecision(1)
+                     << ops_per_sec << C(Color::RESET) << " predictions/second\n\n";
+        }
+    }
+
+    // Benchmark 3: Association formation speed
+    {
+        std::cout << C(Color::BOLD) << "3. Association Formation\n" << C(Color::RESET);
+
+        auto start = std::chrono::high_resolution_clock::now();
+        size_t formed = assoc_system_->FormNewAssociations(*storage_);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        std::cout << "   Formed " << formed << " associations in " << duration.count() << " ms\n";
+        if (formed > 0) {
+            float per_assoc = static_cast<float>(duration.count()) / formed;
+            std::cout << "   " << C(Color::CYAN) << std::fixed << std::setprecision(2)
+                     << per_assoc << C(Color::RESET) << " ms per association\n";
+        }
+        std::cout << "\n";
+    }
+
+    // Benchmark 4: Attention overhead (if enabled)
+    if (attention_mechanism_ && !text_to_pattern_.empty()) {
+        std::cout << C(Color::BOLD) << "4. Attention Mechanism Overhead\n" << C(Color::RESET);
+
+        PatternID test_pattern = text_to_pattern_.begin()->second;
+
+        // Benchmark without attention
+        auto start1 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 500; ++i) {
+            assoc_system_->PredictWithConfidence(test_pattern, 5, &current_context_);
+        }
+        auto end1 = std::chrono::high_resolution_clock::now();
+        auto without_attention = std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1);
+
+        // Benchmark with attention
+        auto start2 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < 500; ++i) {
+            assoc_system_->PredictWithAttention(test_pattern, 5, current_context_);
+        }
+        auto end2 = std::chrono::high_resolution_clock::now();
+        auto with_attention = std::chrono::duration_cast<std::chrono::microseconds>(end2 - start2);
+
+        std::cout << "   Without attention: " << without_attention.count() / 500.0f << " μs/prediction\n";
+        std::cout << "   With attention: " << with_attention.count() / 500.0f << " μs/prediction\n";
+
+        float overhead = ((with_attention.count() - without_attention.count()) * 100.0f) / without_attention.count();
+        std::cout << "   Overhead: " << C(Color::YELLOW) << std::fixed << std::setprecision(1)
+                 << overhead << "%" << C(Color::RESET) << "\n\n";
+    }
+
+    // Display current system stats
+    auto stats = engine_->GetStatistics();
+    auto assoc_stats = assoc_system_->GetStatistics();
+
+    std::cout << C(Color::BOLD) << "Current System State:\n" << C(Color::RESET);
+    std::cout << "   Patterns: " << stats.total_patterns << "\n";
+    std::cout << "   Associations: " << assoc_stats.total_associations << "\n";
+    std::cout << "   Average strength: " << std::fixed << std::setprecision(3)
+             << assoc_stats.average_strength << "\n";
+    std::cout << "   Database size: " << storage_->GetStats().disk_usage_bytes / 1024 << " KB\n\n";
+
+    std::cout << C(Color::GREEN) << "✓ Benchmark complete\n" << C(Color::RESET);
+}
 
 void DPANCli::Shutdown() {
         std::cout << "\n" << C(Color::BLUE) << "Shutting down...\n" << C(Color::RESET);

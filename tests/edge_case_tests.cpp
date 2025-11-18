@@ -88,7 +88,7 @@ TEST(EdgeCaseTest, MemoryBackendStoreNullPatternData) {
 
     // Cannot test true null as PatternNode requires valid data
     // But can test minimal pattern
-    FeatureVector features(1, 0.0f);
+    FeatureVector features(std::vector<float>(1, 0.0f));
     PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
     PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
 
@@ -103,7 +103,7 @@ TEST(EdgeCaseTest, MemoryBackendExceedsCapacity) {
     // Store more than capacity
     std::vector<PatternID> ids;
     for (int i = 0; i < 20; ++i) {
-        FeatureVector features(1, static_cast<float>(i));
+        FeatureVector features(std::vector<float>(1, static_cast<float>(i)));
         PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
         PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
         ids.push_back(node.GetID());
@@ -119,7 +119,7 @@ TEST(EdgeCaseTest, MemoryBackendConcurrentStoreRetrieve) {
     MemoryBackend backend(config);
 
     PatternID id = PatternID::Generate();
-    FeatureVector features(3, 1.0f);
+    FeatureVector features(std::vector<float>(3, 1.0f));
     PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
     PatternNode node(id, data, PatternType::ATOMIC);
 
@@ -140,7 +140,7 @@ TEST(EdgeCaseTest, AssociationMatrixSelfLoop) {
     PatternID id = PatternID::Generate();
 
     // Try to create self-loop (pattern associated with itself)
-    bool result = matrix.AddAssociation(id, id, 0.5f, AssociationType::TEMPORAL);
+    bool result = matrix.AddAssociation(id, id, 0.5f, AssociationType::CAUSAL);
 
     // Should either accept (if allowed) or reject (if prevented)
     // Document behavior: Currently allows self-loops
@@ -154,7 +154,7 @@ TEST(EdgeCaseTest, AssociationMatrixZeroStrength) {
     PatternID id2 = PatternID::Generate();
 
     // Association with zero strength
-    bool result = matrix.AddAssociation(id1, id2, 0.0f, AssociationType::TEMPORAL);
+    bool result = matrix.AddAssociation(id1, id2, 0.0f, AssociationType::CAUSAL);
 
     // Should handle zero strength (might reject or normalize)
     EXPECT_TRUE(result || !result);  // Document actual behavior
@@ -167,7 +167,7 @@ TEST(EdgeCaseTest, AssociationMatrixNegativeStrength) {
     PatternID id2 = PatternID::Generate();
 
     // Negative strength (inhibitory association?)
-    bool result = matrix.AddAssociation(id1, id2, -0.5f, AssociationType::TEMPORAL);
+    bool result = matrix.AddAssociation(id1, id2, -0.5f, AssociationType::CAUSAL);
 
     // Should either normalize or reject
     if (result) {
@@ -185,7 +185,7 @@ TEST(EdgeCaseTest, AssociationMatrixExtremelyLargeStrength) {
     PatternID id2 = PatternID::Generate();
 
     // Very large strength value
-    bool result = matrix.AddAssociation(id1, id2, 1000000.0f, AssociationType::TEMPORAL);
+    bool result = matrix.AddAssociation(id1, id2, 1000000.0f, AssociationType::CAUSAL);
 
     if (result) {
         auto edge = matrix.GetAssociation(id1, id2);
@@ -209,7 +209,7 @@ TEST(EdgeCaseTest, AssociationMatrixMillionEdges) {
     for (int i = 0; i < 1000; ++i) {
         PatternID from = patterns[i % patterns.size()];
         PatternID to = patterns[(i + 1) % patterns.size()];
-        if (matrix.AddAssociation(from, to, 0.5f, AssociationType::TEMPORAL)) {
+        if (matrix.AddAssociation(from, to, 0.5f, AssociationType::CAUSAL)) {
             ++added;
         }
     }
@@ -227,7 +227,7 @@ TEST(EdgeCaseTest, UtilityCalculatorZeroAccessCount) {
     UtilityCalculator calc(config);
 
     // Pattern never accessed
-    FeatureVector features(3, 1.0f);
+    FeatureVector features(std::vector<float>(3, 1.0f));
     PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
     PatternNode pattern(PatternID::Generate(), data, PatternType::ATOMIC);
 
@@ -249,7 +249,7 @@ TEST(EdgeCaseTest, UtilityCalculatorExtremelyOldPattern) {
     UtilityCalculator calc(config);
 
     // Pattern from 100 years ago
-    FeatureVector features(3, 1.0f);
+    FeatureVector features(std::vector<float>(3, 1.0f));
     PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
     PatternNode pattern(PatternID::Generate(), data, PatternType::ATOMIC);
 
@@ -272,7 +272,7 @@ TEST(EdgeCaseTest, UtilityCalculatorExtremelyRecentPattern) {
     UtilityCalculator calc(config);
 
     // Pattern from 1 millisecond ago
-    FeatureVector features(3, 1.0f);
+    FeatureVector features(std::vector<float>(3, 1.0f));
     PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
     PatternNode pattern(PatternID::Generate(), data, PatternType::ATOMIC);
 
