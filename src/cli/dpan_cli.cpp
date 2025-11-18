@@ -11,6 +11,7 @@
 // - Session persistence
 
 #include "dpan_cli.hpp"
+#include "cli/cli_config.hpp"
 #include "storage/memory_backend.hpp"
 #include "learning/basic_attention.hpp"
 #include <iostream>
@@ -1283,6 +1284,50 @@ std::vector<uint8_t> DPANCli::TextToBytes(const std::string& text) {
     return std::vector<uint8_t>(text.begin(), text.end());
 }
 
+// ============================================================================
+// Configuration Loading
+// ============================================================================
+
+bool DPANCli::LoadConfig(const std::string& config_path) {
+    auto config_opt = CliConfig::LoadFromFile(config_path);
+    if (!config_opt.has_value()) {
+        std::cerr << C(Color::RED) << "Failed to load configuration from: "
+                  << config_path << C(Color::RESET) << "\n";
+        return false;
+    }
+
+    ApplyConfig(config_opt.value());
+
+    if (verbose_) {
+        std::cout << C(Color::GREEN) << "Configuration loaded from: "
+                  << config_path << C(Color::RESET) << "\n";
+    }
+
+    return true;
+}
+
+void DPANCli::ApplyConfig(const CliConfig& config) {
+    // Apply interface settings
+    prompt_ = config.interface.prompt;
+    colors_enabled_ = config.interface.colors_enabled;
+    verbose_ = config.interface.verbose;
+    session_file_ = config.interface.session_file;
+
+    // Apply learning settings
+    active_learning_mode_ = config.learning.active_learning;
+    attention_enabled_ = config.learning.attention_enabled;
+
+    if (verbose_) {
+        std::cout << C(Color::DIM) << "[Applying configuration...]\n" << C(Color::RESET);
+        std::cout << C(Color::DIM) << "  Prompt: " << prompt_ << "\n";
+        std::cout << C(Color::DIM) << "  Colors: " << (colors_enabled_ ? "enabled" : "disabled") << "\n";
+        std::cout << C(Color::DIM) << "  Session file: " << session_file_ << "\n";
+        std::cout << C(Color::DIM) << "  Active learning: " << (active_learning_mode_ ? "enabled" : "disabled") << "\n";
+        std::cout << C(Color::DIM) << "  Attention: " << (attention_enabled_ ? "enabled" : "disabled") << "\n";
+        std::cout << C(Color::RESET);
+    }
+}
+
 } // namespace dpan
 
 #ifndef DPAN_CLI_TEST_BUILD
@@ -1291,6 +1336,42 @@ int main(int argc, char** argv) {
 
     try {
         dpan::DPANCli cli;
+
+        // Check for command-line arguments
+        std::string config_file;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--config" || arg == "-c") {
+                if (i + 1 < argc) {
+                    config_file = argv[++i];
+                } else {
+                    std::cerr << "Error: --config requires a file path\n";
+                    return 1;
+                }
+            } else if (arg == "--help" || arg == "-h") {
+                std::cout << "DPAN CLI - Dynamic Pattern Association Network\n\n";
+                std::cout << "Usage: " << argv[0] << " [options]\n\n";
+                std::cout << "Options:\n";
+                std::cout << "  -c, --config <file>   Load configuration from YAML file\n";
+                std::cout << "  -h, --help            Show this help message\n\n";
+                std::cout << "Example:\n";
+                std::cout << "  " << argv[0] << " --config dpan_config.yaml\n\n";
+                return 0;
+            } else {
+                std::cerr << "Unknown option: " << arg << "\n";
+                std::cerr << "Use --help for usage information\n";
+                return 1;
+            }
+        }
+
+        // Load configuration if specified
+        if (!config_file.empty()) {
+            std::cout << "Loading configuration from: " << config_file << "\n";
+            if (!cli.LoadConfig(config_file)) {
+                std::cerr << "Warning: Failed to load configuration, using defaults\n";
+            }
+        }
+
         cli.Run();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << "\n";

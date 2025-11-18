@@ -35,3 +35,30 @@ set_tests_properties(DPANCliTest PROPERTIES
     TIMEOUT 60
     LABELS "cli;integration"
 )
+
+# Config tests
+add_executable(cli_config_test
+    cli_config_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
+)
+
+find_library(YAML_LIBRARY NAMES yaml libyaml PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu)
+
+target_link_libraries(cli_config_test
+    PRIVATE
+        gtest_main
+        ${YAML_LIBRARY}
+)
+
+target_include_directories(cli_config_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+)
+
+add_test(NAME CliConfigTest COMMAND cli_config_test)
+
+set_tests_properties(CliConfigTest PROPERTIES
+    TIMEOUT 10
+    LABELS "cli;config;unit"
+)

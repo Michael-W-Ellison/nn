@@ -94,6 +94,15 @@ public:
     /// Get current context (for testing/inspection)
     const ContextVector& GetCurrentContext() const { return current_context_; }
 
+    /// Load configuration from YAML file
+    /// @param config_path Path to YAML configuration file
+    /// @return true if successful, false otherwise
+    bool LoadConfig(const std::string& config_path);
+
+    /// Apply configuration settings
+    /// @param config Configuration structure to apply
+    void ApplyConfig(const struct CliConfig& config);
+
 private:
     // Engine and system state
     std::unique_ptr<PatternEngine> engine_;
