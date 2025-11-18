@@ -135,7 +135,9 @@ private:
     void ShowStatistics();
     void ShowPatterns();
     void ShowAssociations();
+    void ShowAttentionInfo();
     void PredictNext(const std::string& text);
+    void PredictDetailed(const std::string& text);
     void CompareMode(const std::string& text);
     void LearnFromFile(const std::string& filepath);
     void ToggleActiveLearning();

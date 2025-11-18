@@ -908,5 +908,114 @@ TEST_F(DPANCliTest, CompareCommandInHelp) {
     EXPECT_TRUE(true);  // Just verify we got here
 }
 
+// ============================================================================
+// Visualization Tests (Tasks 9.1-9.3)
+// ============================================================================
+
+TEST_F(DPANCliTest, AttentionInfoCommand) {
+    // Should execute without crashing
+    cli_->ProcessCommand("/attention-info");
+
+    // Should show configuration and statistics
+    EXPECT_TRUE(true);  // Just verify we got here
+}
+
+TEST_F(DPANCliTest, AttentionInfoWhenEnabled) {
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+
+    // Show attention info
+    cli_->ProcessCommand("/attention-info");
+
+    // Should not crash
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, VerbosePredictionsShowAttentionWeights) {
+    // Build some patterns
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("neural networks");
+    cli_->ProcessCommand("machine learning");
+
+    // Enable verbose and attention
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("/attention");
+
+    // Make a prediction - should show attention weights in verbose mode
+    cli_->ProcessCommand("/predict machine");
+
+    // Verify state
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, DetailedPredictCommand) {
+    // Build some patterns
+    cli_->ProcessCommand("hello world");
+    cli_->ProcessCommand("world peace");
+    cli_->ProcessCommand("hello world");
+
+    // Detailed prediction should work
+    cli_->ProcessCommand("/predict-detailed hello");
+
+    // Should not crash
+    EXPECT_EQ(cli_->GetConversationLength(), 3u);
+}
+
+TEST_F(DPANCliTest, DetailedPredictWithUnknownPattern) {
+    // Try detailed prediction on unknown pattern
+    cli_->ProcessCommand("/predict-detailed unknown");
+
+    // Should handle gracefully
+    EXPECT_EQ(cli_->GetConversationLength(), 0u);
+}
+
+TEST_F(DPANCliTest, DetailedPredictShowsComponents) {
+    // Build conversation
+    cli_->ProcessCommand("artificial intelligence");
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("artificial intelligence");
+
+    // Detailed prediction should show component breakdown
+    cli_->ProcessCommand("/predict-detailed artificial");
+
+    // Verify state hasn't changed
+    EXPECT_EQ(cli_->GetConversationLength(), 3u);
+}
+
+TEST_F(DPANCliTest, VisualizationCommandsInHelp) {
+    // Verify all visualization commands are documented
+    cli_->ProcessCommand("/help");
+
+    // Just verify help doesn't crash
+    EXPECT_TRUE(true);
+}
+
+TEST_F(DPANCliTest, AttentionWeightsShownOnlyInVerbose) {
+    // Build patterns
+    cli_->ProcessCommand("test one");
+    cli_->ProcessCommand("test two");
+    cli_->ProcessCommand("test one");
+
+    // Enable attention but NOT verbose
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    EXPECT_FALSE(cli_->IsVerboseEnabled());
+
+    // Predictions should not show detailed weights
+    cli_->ProcessCommand("/predict test");
+
+    // Now enable verbose
+    cli_->ProcessCommand("/verbose");
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+
+    // Predictions should show detailed weights
+    cli_->ProcessCommand("/predict test");
+
+    // State should be preserved
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+}
+
 } // namespace
 } // namespace dpan

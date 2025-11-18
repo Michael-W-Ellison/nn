@@ -183,10 +183,16 @@ void DPANCli::HandleCommand(const std::string& cmd) {
             ShowPatterns();
         } else if (command == "associations") {
             ShowAssociations();
+        } else if (command == "attention-info") {
+            ShowAttentionInfo();
         } else if (command == "predict") {
             std::string text;
             std::getline(iss, text);
             PredictNext(text);
+        } else if (command == "predict-detailed") {
+            std::string text;
+            std::getline(iss, text);
+            PredictDetailed(text);
         } else if (command == "compare") {
             std::string text;
             std::getline(iss, text);
@@ -397,9 +403,10 @@ Available Commands:
 ===================
 
 Conversation:
-  <text>              Learn from and respond to text input
-  /predict <text>     Show what the system predicts will follow
-  /compare <text>     Compare predictions with/without attention
+  <text>                 Learn from and respond to text input
+  /predict <text>        Show what the system predicts will follow
+  /predict-detailed <t>  Show predictions with attention breakdown
+  /compare <text>        Compare predictions with/without attention
 
 Learning:
   /learn <file>       Learn from a text file (one line = one input)
@@ -410,6 +417,7 @@ Information:
   /stats              Show learning statistics
   /patterns           List learned patterns
   /associations       Show association graph statistics
+  /attention-info     Show attention mechanism information
   /verbose            Toggle verbose output
   /color              Toggle colorized output
 
@@ -565,6 +573,73 @@ void DPANCli::ShowAssociations() {
         }
     }
 
+void DPANCli::ShowAttentionInfo() {
+        std::cout << "\n" << C(Color::BOLD_CYAN);
+        std::cout << "╔══════════════════════════════════════════╗\n";
+        std::cout << "║        Attention Mechanism Info          ║\n";
+        std::cout << "╚══════════════════════════════════════════╝\n";
+        std::cout << C(Color::RESET) << "\n";
+
+        // Show status
+        std::cout << C(Color::BOLD) << "Status:\n" << C(Color::RESET);
+        std::cout << "  Attention: " << (attention_enabled_ ?
+                 C(Color::BOLD_GREEN) + std::string("ENABLED") :
+                 C(Color::DIM) + std::string("DISABLED")) << C(Color::RESET) << "\n";
+
+        if (!attention_mechanism_) {
+            std::cout << C(Color::YELLOW) << "\nAttention mechanism not initialized.\n"
+                     << C(Color::RESET);
+            return;
+        }
+
+        // Show configuration
+        std::cout << "\n" << C(Color::BOLD) << "Configuration:\n" << C(Color::RESET);
+        const auto& config = attention_mechanism_->GetConfig();
+
+        std::cout << "  Temperature: " << C(Color::CYAN) << std::fixed << std::setprecision(2)
+                 << config.temperature << C(Color::RESET) << "\n";
+        std::cout << "  Attention type: " << C(Color::CYAN) << config.attention_type
+                 << C(Color::RESET) << "\n";
+
+        std::cout << "\n" << C(Color::BOLD) << "Score Weighting:\n" << C(Color::RESET);
+        std::cout << "  Association weight: " << C(Color::CYAN) << std::fixed << std::setprecision(1)
+                 << (config.association_weight * 100) << "%" << C(Color::RESET) << "\n";
+        std::cout << "  Attention weight: " << C(Color::CYAN) << std::fixed << std::setprecision(1)
+                 << (config.attention_weight * 100) << "%" << C(Color::RESET) << "\n";
+
+        std::cout << "\n" << C(Color::BOLD) << "Features:\n" << C(Color::RESET);
+        std::cout << "  Context-aware: " << (config.use_context ?
+                 C(Color::GREEN) + std::string("YES") :
+                 C(Color::DIM) + std::string("NO")) << C(Color::RESET) << "\n";
+        std::cout << "  Importance weighting: " << (config.use_importance ?
+                 C(Color::GREEN) + std::string("YES") :
+                 C(Color::DIM) + std::string("NO")) << C(Color::RESET) << "\n";
+        std::cout << "  Caching: " << (config.enable_caching ?
+                 C(Color::GREEN) + std::string("ENABLED") :
+                 C(Color::DIM) + std::string("DISABLED")) << C(Color::RESET);
+        if (config.enable_caching) {
+            std::cout << " (" << config.cache_size << " entries)";
+        }
+        std::cout << "\n";
+
+        // Show statistics
+        std::cout << "\n" << C(Color::BOLD) << "Statistics:\n" << C(Color::RESET);
+        auto stats = attention_mechanism_->GetStatistics();
+
+        if (stats.empty()) {
+            std::cout << C(Color::DIM) << "  No statistics available yet.\n" << C(Color::RESET);
+        } else {
+            for (const auto& [name, value] : stats) {
+                std::cout << "  " << name << ": " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(2) << value
+                         << C(Color::RESET) << "\n";
+            }
+        }
+
+        std::cout << "\n" << C(Color::DIM) << "Use '/attention' to toggle attention mode.\n"
+                 << C(Color::RESET);
+    }
+
 void DPANCli::PredictNext(const std::string& text) {
         std::string query = text;
         // Trim leading space if present
@@ -601,14 +676,174 @@ void DPANCli::PredictNext(const std::string& text) {
                  << (attention_enabled_ ? " (attention-enhanced)" : "") << ":\n"
                  << C(Color::RESET);
 
-        for (size_t i = 0; i < predictions_with_scores.size(); ++i) {
-            const auto& [pred_id, score] = predictions_with_scores[i];
-            std::string pred_text = pattern_to_text_.count(pred_id) ?
-                                   pattern_to_text_[pred_id] : "<unknown>";
+        // If verbose and attention enabled, show detailed breakdown
+        if (verbose_ && attention_enabled_ && attention_mechanism_) {
+            // Get candidates for detailed attention
+            std::vector<PatternID> candidates;
+            for (const auto& [id, _] : predictions_with_scores) {
+                candidates.push_back(id);
+            }
 
-            std::cout << "  " << (i+1) << ". \"" << pred_text << "\" ["
-                     << std::fixed << std::setprecision(3) << score << "]\n";
+            // Get basic predictions for comparison
+            auto basic_predictions = assoc_system_->PredictWithConfidence(
+                pattern, 5, &current_context_);
+
+            std::map<PatternID, float> basic_scores;
+            for (const auto& [id, score] : basic_predictions) {
+                basic_scores[id] = score;
+            }
+
+            // Show detailed breakdown
+            for (size_t i = 0; i < predictions_with_scores.size(); ++i) {
+                const auto& [pred_id, score] = predictions_with_scores[i];
+                std::string pred_text = pattern_to_text_.count(pred_id) ?
+                                       pattern_to_text_[pred_id] : "<unknown>";
+
+                std::cout << "  " << (i+1) << ". \"" << pred_text << "\" ["
+                         << std::fixed << std::setprecision(3) << score << "]\n";
+
+                // Show attention weight contribution
+                if (basic_scores.count(pred_id)) {
+                    float basic_score = basic_scores[pred_id];
+                    float delta = score - basic_score;
+
+                    std::cout << C(Color::DIM) << "     Association: "
+                             << std::fixed << std::setprecision(3) << basic_score
+                             << " | Attention boost: ";
+                    if (delta > 0.001f) {
+                        std::cout << C(Color::GREEN) << "+" << delta;
+                    } else if (delta < -0.001f) {
+                        std::cout << C(Color::RED) << delta;
+                    } else {
+                        std::cout << "0.000";
+                    }
+                    std::cout << C(Color::RESET) << "\n";
+                } else {
+                    std::cout << C(Color::DIM) << "     [Attention-only prediction]\n"
+                             << C(Color::RESET);
+                }
+            }
+        } else {
+            // Standard output
+            for (size_t i = 0; i < predictions_with_scores.size(); ++i) {
+                const auto& [pred_id, score] = predictions_with_scores[i];
+                std::string pred_text = pattern_to_text_.count(pred_id) ?
+                                       pattern_to_text_[pred_id] : "<unknown>";
+
+                std::cout << "  " << (i+1) << ". \"" << pred_text << "\" ["
+                         << std::fixed << std::setprecision(3) << score << "]\n";
+            }
         }
+    }
+
+void DPANCli::PredictDetailed(const std::string& text) {
+        std::string query = text;
+        // Trim leading space if present
+        if (!query.empty() && query[0] == ' ') {
+            query = query.substr(1);
+        }
+
+        if (text_to_pattern_.count(query) == 0) {
+            std::cout << C(Color::YELLOW) << "Unknown input: " << C(Color::RESET)
+                     << "\"" << query << "\"\n";
+            std::cout << C(Color::DIM) << "I haven't learned this pattern yet.\n" << C(Color::RESET);
+            return;
+        }
+
+        if (!attention_mechanism_) {
+            std::cout << C(Color::YELLOW) << "Attention mechanism not available.\n"
+                     << C(Color::RESET);
+            std::cout << C(Color::DIM) << "Use '/predict' for basic predictions.\n" << C(Color::RESET);
+            return;
+        }
+
+        PatternID pattern = text_to_pattern_[query];
+
+        // Get basic predictions to use as candidates
+        auto basic_predictions = assoc_system_->PredictWithConfidence(
+            pattern, 5, &current_context_);
+
+        if (basic_predictions.empty()) {
+            std::cout << C(Color::YELLOW) << "No predictions available for: "
+                     << C(Color::RESET) << "\"" << query << "\"\n";
+            return;
+        }
+
+        // Extract candidate IDs
+        std::vector<PatternID> candidates;
+        for (const auto& [id, _] : basic_predictions) {
+            candidates.push_back(id);
+        }
+
+        // Get detailed attention scores with component breakdown
+        auto detailed_scores = attention_mechanism_->ComputeDetailedAttention(
+            pattern, candidates, current_context_);
+
+        // Print header
+        std::cout << "\n" << C(Color::BOLD_CYAN);
+        std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+        std::cout << "║         Detailed Attention Analysis                        ║\n";
+        std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+        std::cout << C(Color::RESET);
+        std::cout << C(Color::BOLD) << "Query: " << C(Color::RESET) << "\"" << query << "\"\n\n";
+
+        // Show each prediction with component breakdown
+        for (size_t i = 0; i < detailed_scores.size() && i < 5; ++i) {
+            const auto& score_detail = detailed_scores[i];
+            std::string pred_text = pattern_to_text_.count(score_detail.pattern_id) ?
+                                   pattern_to_text_[score_detail.pattern_id] : "<unknown>";
+
+            std::cout << C(Color::BOLD) << (i+1) << ". \"" << pred_text << "\""
+                     << C(Color::RESET) << "\n";
+            std::cout << "   Final weight: " << C(Color::CYAN)
+                     << std::fixed << std::setprecision(3) << score_detail.weight
+                     << C(Color::RESET) << " (raw: " << score_detail.raw_score << ")\n";
+
+            // Show component breakdown
+            std::cout << C(Color::DIM) << "   Components:\n";
+
+            const auto& comp = score_detail.components;
+
+            // Semantic similarity
+            if (comp.semantic_similarity > 0.0f) {
+                std::cout << "     • Semantic similarity: " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(3) << comp.semantic_similarity
+                         << C(Color::RESET) << "\n";
+            }
+
+            // Context similarity
+            if (comp.context_similarity > 0.0f) {
+                std::cout << "     • Context similarity: " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(3) << comp.context_similarity
+                         << C(Color::RESET) << "\n";
+            }
+
+            // Importance score
+            if (comp.importance_score > 0.0f) {
+                std::cout << "     • Pattern importance: " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(3) << comp.importance_score
+                         << C(Color::RESET) << "\n";
+            }
+
+            // Temporal score
+            if (comp.temporal_score > 0.0f) {
+                std::cout << "     • Temporal relevance: " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(3) << comp.temporal_score
+                         << C(Color::RESET) << "\n";
+            }
+
+            // Structural score
+            if (comp.structural_score > 0.0f) {
+                std::cout << "     • Structural similarity: " << C(Color::CYAN)
+                         << std::fixed << std::setprecision(3) << comp.structural_score
+                         << C(Color::RESET) << "\n";
+            }
+
+            std::cout << C(Color::RESET) << "\n";
+        }
+
+        std::cout << C(Color::DIM) << "Note: Only non-zero components are shown.\n"
+                 << "Enable verbose mode (/verbose) for more details.\n" << C(Color::RESET);
     }
 
 void DPANCli::CompareMode(const std::string& text) {
