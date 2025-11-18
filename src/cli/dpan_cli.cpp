@@ -275,10 +275,16 @@ void DPANCli::HandleConversation(const std::string& text) {
         // Record in association system with current context
         assoc_system_->RecordPatternActivation(primary_pattern, current_context_);
 
-        // Form associations with recent patterns
+        // Form associations periodically to reduce O(n²) overhead
+        // Only form associations during first 100 inputs or every 10th input
+        // This reduces the computational cost while maintaining learning quality
         if (conversation_history_.size() > 1) {
-            // Use the storage backend as PatternDatabase
-            assoc_system_->FormAssociationsForPattern(primary_pattern, *storage_);
+            bool should_form = (conversation_history_.size() <= 100) ||
+                             (conversation_history_.size() % 10 == 0);
+
+            if (should_form) {
+                assoc_system_->FormAssociationsForPattern(primary_pattern, *storage_);
+            }
         }
 
         // Generate response

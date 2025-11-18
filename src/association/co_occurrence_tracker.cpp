@@ -28,12 +28,32 @@ void CoOccurrenceTracker::RecordActivation(PatternID pattern, Timestamp timestam
     activations_.push_back({timestamp, pattern});
     pattern_counts_[pattern]++;
 
-    // Get all patterns in the current window
+    // OPTIMIZATION: Only update co-occurrences between the new pattern and
+    // existing patterns in the window, not ALL pairs (which is O(n²))
+    // This reduces complexity from O(K²) to O(K) per activation
     Timestamp window_start = timestamp - config_.window_size;
     auto patterns_in_window = GetPatternsInWindow(window_start, timestamp);
 
-    // Update co-occurrences
-    UpdateCoOccurrences(patterns_in_window);
+    // Remove the new pattern from the window list (we just added it)
+    auto unique_patterns_in_window = std::unordered_set<PatternID>(
+        patterns_in_window.begin(),
+        patterns_in_window.end()
+    );
+    unique_patterns_in_window.erase(pattern);  // Remove self
+
+    // Update co-occurrences only with the new pattern
+    for (const auto& other_pattern : unique_patterns_in_window) {
+        PatternID p1 = pattern;
+        PatternID p2 = other_pattern;
+
+        // Always store in consistent order (smaller ID first)
+        if (p2 < p1) {
+            std::swap(p1, p2);
+        }
+
+        auto key = std::make_pair(p1, p2);
+        co_occurrence_counts_[key]++;
+    }
 
     // Prune old activations (older than 2x window size to save memory)
     Timestamp cutoff = timestamp - (config_.window_size * 2);

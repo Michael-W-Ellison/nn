@@ -60,3 +60,34 @@ target_link_libraries(concurrency_tests
 )
 
 gtest_discover_tests(concurrency_tests)
+
+# CLI benchmarks
+add_executable(cli_benchmarks
+    cli_benchmarks.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
+)
+
+target_link_libraries(cli_benchmarks
+    PRIVATE
+        dpan_core
+        dpan_storage
+        dpan_association
+        sqlite3
+        pthread
+        GTest::gtest_main
+)
+
+target_include_directories(cli_benchmarks
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(cli_benchmarks
+    PRIVATE
+        DPAN_CLI_TEST_BUILD
+)
+
+gtest_discover_tests(cli_benchmarks)
