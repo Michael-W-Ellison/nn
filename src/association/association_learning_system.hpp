@@ -229,6 +229,28 @@ public:
         const ContextVector* context = nullptr
     ) const;
 
+    /// Predict with attention-weighted scoring
+    ///
+    /// Combines association strengths with attention weights for improved predictions.
+    /// When attention mechanism is set, combines scores using configurable weights:
+    /// - final_score = association_weight * assoc_strength + attention_weight * attention
+    ///
+    /// When attention mechanism is nullptr, falls back to PredictWithConfidence().
+    ///
+    /// @param source Source pattern to predict from
+    /// @param k Number of top predictions to return
+    /// @param context Context vector for context-sensitive prediction
+    /// @return Vector of (pattern, combined_score) pairs, sorted by score (descending)
+    ///
+    /// @note Requires SetAttentionMechanism() to be called with valid pointer for attention weighting
+    /// @note Falls back to association-only prediction when attention is nullptr
+    /// @note Combination weights are controlled by attention mechanism's configuration
+    std::vector<std::pair<PatternID, float>> PredictWithAttention(
+        PatternID source,
+        size_t k = 5,
+        const ContextVector& context = ContextVector()
+    ) const;
+
     /// Propagate activation through association network
     /// @param source Starting pattern
     /// @param initial_activation Initial activation level
