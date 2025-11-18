@@ -9,10 +9,12 @@
 #include "core/pattern_engine.hpp"
 #include "association/association_learning_system.hpp"
 #include "storage/persistent_backend.hpp"
+#include "core/types.hpp"
 #include <string>
 #include <vector>
 #include <map>
 #include <memory>
+#include <chrono>
 
 namespace dpan {
 
@@ -84,6 +86,9 @@ public:
     /// Initialize without loading previous session (for testing)
     void InitializeClean();
 
+    /// Get current context (for testing/inspection)
+    const ContextVector& GetCurrentContext() const { return current_context_; }
+
 private:
     // Engine and system state
     std::unique_ptr<PatternEngine> engine_;
@@ -103,6 +108,11 @@ private:
     std::vector<PatternID> conversation_history_;
     std::map<std::string, PatternID> text_to_pattern_;
     std::map<PatternID, std::string> pattern_to_text_;
+
+    // Context tracking
+    ContextVector current_context_;
+    std::chrono::steady_clock::time_point last_interaction_time_;
+    std::map<std::string, float> recent_topics_;  // Topic -> recency weight
 
     // Initialization
     void InitializeEngine();
@@ -131,6 +141,13 @@ private:
     void GenerateResponse(PatternID input_pattern);
     bool ShouldRequestMoreData(const PatternEngine::ProcessResult& result);
     void RequestMoreData(const std::string& context);
+
+    // Context tracking
+    void UpdateContext(const std::string& input_text);
+    void ApplyContextDecay();
+    void ExtractTopicsFromText(const std::string& text, std::vector<std::string>& topics);
+    void UpdateRecentTopics(const std::vector<std::string>& topics);
+    void BuildContextVector();
 
     // Utilities
     std::vector<uint8_t> TextToBytes(const std::string& text);

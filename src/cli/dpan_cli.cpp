@@ -22,12 +22,14 @@
 #include <filesystem>
 #include <chrono>
 #include <thread>
+#include <cmath>
 
 namespace dpan {
 
 DPANCli::DPANCli() {
     InitializeEngine();
     InitializeAssociations();
+    last_interaction_time_ = std::chrono::steady_clock::now();
 }
 
 void DPANCli::Run() {
@@ -224,10 +226,14 @@ void DPANCli::HandleConversation(const std::string& text) {
             return;
         }
 
-        // Record in association system
-        ContextVector context;
-        assoc_system_->RecordPatternActivation(primary_pattern, context);
+        // Add to conversation history
         conversation_history_.push_back(primary_pattern);
+
+        // Update conversation context based on input (after adding to history)
+        UpdateContext(text);
+
+        // Record in association system with current context
+        assoc_system_->RecordPatternActivation(primary_pattern, current_context_);
 
         // Form associations with recent patterns
         if (conversation_history_.size() > 1) {
@@ -541,7 +547,7 @@ void DPANCli::PredictNext(const std::string& text) {
         }
 
         PatternID pattern = text_to_pattern_[query];
-        auto predictions = assoc_system_->Predict(pattern, 5);
+        auto predictions = assoc_system_->Predict(pattern, 5, &current_context_);
 
         if (predictions.empty()) {
             std::cout << C(Color::YELLOW) << "No predictions available for: "
@@ -708,6 +714,147 @@ void DPANCli::Shutdown() {
         std::cout << "\n" << C(Color::BOLD_CYAN) << "Thank you for teaching me! Goodbye.\n"
                  << C(Color::RESET);
     }
+
+// ============================================================================
+// Context Tracking
+// ============================================================================
+
+void DPANCli::UpdateContext(const std::string& input_text) {
+    // Apply temporal decay to existing context
+    ApplyContextDecay();
+
+    // Extract topics from input
+    std::vector<std::string> topics;
+    ExtractTopicsFromText(input_text, topics);
+
+    // Update recent topics
+    UpdateRecentTopics(topics);
+
+    // Rebuild context vector from accumulated state
+    BuildContextVector();
+
+    // Update last interaction time
+    last_interaction_time_ = std::chrono::steady_clock::now();
+}
+
+void DPANCli::ApplyContextDecay() {
+    // Calculate time since last interaction
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        now - last_interaction_time_).count();
+
+    // Decay factor: reduce by 10% every 30 seconds
+    float decay_rate = 0.10f;
+    float decay_interval = 30.0f;  // seconds
+    float decay_factor = std::pow(1.0f - decay_rate, elapsed / decay_interval);
+
+    // Apply decay to all recent topics
+    for (auto& [topic, weight] : recent_topics_) {
+        weight *= decay_factor;
+    }
+
+    // Remove topics below threshold
+    for (auto it = recent_topics_.begin(); it != recent_topics_.end(); ) {
+        if (it->second < 0.05f) {  // Remove if below 5%
+            it = recent_topics_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void DPANCli::ExtractTopicsFromText(const std::string& text, std::vector<std::string>& topics) {
+    // Simple topic extraction: split by whitespace and extract words
+    // More sophisticated NLP could be added later
+    std::istringstream iss(text);
+    std::string word;
+
+    while (iss >> word) {
+        // Remove punctuation
+        word.erase(std::remove_if(word.begin(), word.end(),
+                                  [](char c) { return std::ispunct(c); }),
+                  word.end());
+
+        // Convert to lowercase
+        std::transform(word.begin(), word.end(), word.begin(),
+                      [](char c) { return std::tolower(c); });
+
+        // Filter out short words and common stop words
+        if (word.length() >= 3 && word != "the" && word != "and" &&
+            word != "but" && word != "for" && word != "are" && word != "was") {
+            topics.push_back(word);
+        }
+    }
+}
+
+void DPANCli::UpdateRecentTopics(const std::vector<std::string>& topics) {
+    // Add or boost topics with decreasing weight for duplicates
+    std::map<std::string, size_t> topic_counts;
+
+    for (const auto& topic : topics) {
+        topic_counts[topic]++;
+    }
+
+    // Update weights
+    for (const auto& [topic, count] : topic_counts) {
+        if (recent_topics_.count(topic) == 0) {
+            // New topic: full weight
+            recent_topics_[topic] = 1.0f;
+        } else {
+            // Existing topic: boost by 0.5 per occurrence, capped at 1.0
+            recent_topics_[topic] = std::min(1.0f, recent_topics_[topic] + 0.5f * count);
+        }
+    }
+
+    // Cap total number of tracked topics (keep top 20 by weight)
+    if (recent_topics_.size() > 20) {
+        // Sort by weight
+        std::vector<std::pair<std::string, float>> sorted_topics(
+            recent_topics_.begin(), recent_topics_.end());
+
+        std::sort(sorted_topics.begin(), sorted_topics.end(),
+                 [](const auto& a, const auto& b) { return a.second > b.second; });
+
+        // Keep only top 20
+        recent_topics_.clear();
+        for (size_t i = 0; i < 20 && i < sorted_topics.size(); ++i) {
+            recent_topics_[sorted_topics[i].first] = sorted_topics[i].second;
+        }
+    }
+}
+
+void DPANCli::BuildContextVector() {
+    // Clear existing context
+    current_context_.Clear();
+
+    // Add conversation length as context dimension
+    float conversation_recency = std::min(1.0f, conversation_history_.size() / 10.0f);
+    current_context_.Set("conversation_depth", conversation_recency);
+
+    // Add topic diversity
+    float topic_diversity = std::min(1.0f, recent_topics_.size() / 10.0f);
+    current_context_.Set("topic_diversity", topic_diversity);
+
+    // Add strongest topics as context dimensions
+    std::vector<std::pair<std::string, float>> sorted_topics(
+        recent_topics_.begin(), recent_topics_.end());
+
+    std::sort(sorted_topics.begin(), sorted_topics.end(),
+             [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    // Add top 5 topics as context dimensions
+    for (size_t i = 0; i < std::min(size_t(5), sorted_topics.size()); ++i) {
+        std::string dim_name = "topic_" + sorted_topics[i].first;
+        current_context_.Set(dim_name, sorted_topics[i].second);
+    }
+
+    // Add temporal context: time of day influence (normalized 0-1)
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto* tm = std::localtime(&time_t_now);
+    float hour_factor = tm->tm_hour / 24.0f;
+    current_context_.Set("temporal_hour", hour_factor);
+}
 
 std::vector<uint8_t> DPANCli::TextToBytes(const std::string& text) {
     return std::vector<uint8_t>(text.begin(), text.end());
