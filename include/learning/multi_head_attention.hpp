@@ -23,10 +23,109 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <mutex>
+#include <variant>
 
 namespace dpan {
+
+// Forward declarations
+class AssociationMatrix;
+
 namespace attention {
+
+/// Supported attention head types
+enum class AttentionHeadType {
+    SEMANTIC,     ///< Content-based similarity attention
+    TEMPORAL,     ///< Recency-based attention
+    STRUCTURAL,   ///< Pattern structure similarity attention
+    ASSOCIATION,  ///< Association strength-based attention
+    BASIC,        ///< Basic attention mechanism
+    CONTEXT       ///< Context-aware attention
+};
+
+/// Convert head type to string
+inline std::string HeadTypeToString(AttentionHeadType type) {
+    switch (type) {
+        case AttentionHeadType::SEMANTIC:    return "semantic";
+        case AttentionHeadType::TEMPORAL:    return "temporal";
+        case AttentionHeadType::STRUCTURAL:  return "structural";
+        case AttentionHeadType::ASSOCIATION: return "association";
+        case AttentionHeadType::BASIC:       return "basic";
+        case AttentionHeadType::CONTEXT:     return "context";
+        default:                              return "unknown";
+    }
+}
+
+/// Convert string to head type
+inline bool StringToHeadType(const std::string& str, AttentionHeadType& type) {
+    if (str == "semantic") {
+        type = AttentionHeadType::SEMANTIC;
+        return true;
+    } else if (str == "temporal") {
+        type = AttentionHeadType::TEMPORAL;
+        return true;
+    } else if (str == "structural") {
+        type = AttentionHeadType::STRUCTURAL;
+        return true;
+    } else if (str == "association") {
+        type = AttentionHeadType::ASSOCIATION;
+        return true;
+    } else if (str == "basic") {
+        type = AttentionHeadType::BASIC;
+        return true;
+    } else if (str == "context") {
+        type = AttentionHeadType::CONTEXT;
+        return true;
+    }
+    return false;
+}
+
+/// Configuration for a single attention head
+struct HeadConfig {
+    /// Unique name for this head
+    std::string name;
+
+    /// Type of attention mechanism for this head
+    AttentionHeadType type;
+
+    /// Weight for combining this head's output [0.0, 1.0]
+    float weight = 1.0f;
+
+    /// Head-specific parameters
+    /// Common parameters across heads:
+    /// - "temperature": Softmax temperature (all heads)
+    /// - "enable_caching": Enable/disable caching (all heads)
+    /// - "cache_size": Cache size (all heads)
+    ///
+    /// Semantic-specific:
+    /// - "similarity_threshold": Minimum similarity threshold
+    /// - "similarity_metric": Similarity metric type
+    ///
+    /// Temporal-specific:
+    /// - "decay_constant_ms": Temporal decay constant in milliseconds
+    /// - "min_age_threshold_ms": Minimum age threshold
+    ///
+    /// Structural-specific:
+    /// - "jaccard_weight": Weight for Jaccard similarity
+    /// - "size_weight": Weight for size similarity
+    /// - "similarity_threshold": Minimum similarity threshold
+    /// - "atomic_penalty": Penalty for atomic vs composite comparison
+    ///
+    /// Association-specific:
+    /// - "use_contextual_strength": Use contextual strength (0=false, 1=true)
+    /// - "strength_threshold": Minimum association strength
+    /// - "default_strength": Default strength for missing associations
+    std::map<std::string, float> parameters;
+
+    /// Validate head configuration
+    bool Validate() const {
+        if (name.empty()) return false;
+        if (weight < 0.0f || weight > 1.0f) return false;
+        // Type is always valid as it's an enum
+        return true;
+    }
+};
 
 /// Represents a single attention head in multi-head attention
 struct AttentionHead {
@@ -78,9 +177,28 @@ struct MultiHeadConfig {
     /// Default: false
     bool debug_logging = false;
 
+    /// Head configurations for automatic initialization
+    /// If non-empty, heads will be created from these configs
+    std::vector<HeadConfig> head_configs;
+
     /// Validate configuration
     bool Validate() const {
         if (temperature <= 0.0f) return false;
+
+        // Validate all head configs
+        for (const auto& head_config : head_configs) {
+            if (!head_config.Validate()) return false;
+        }
+
+        // Check for duplicate head names
+        std::set<std::string> names;
+        for (const auto& head_config : head_configs) {
+            if (names.count(head_config.name) > 0) {
+                return false;  // Duplicate name
+            }
+            names.insert(head_config.name);
+        }
+
         return true;
     }
 };
@@ -245,6 +363,33 @@ public:
     ///
     /// @param config New multi-head configuration
     void SetMultiHeadConfig(const MultiHeadConfig& config);
+
+    /// Initialize heads from configuration
+    ///
+    /// Creates and adds attention heads based on head configurations.
+    /// This method clears existing heads and creates new ones from the config.
+    ///
+    /// @param head_configs Vector of head configurations
+    /// @param pattern_db Pattern database (required for all heads)
+    /// @param association_matrix Association matrix (required for association heads)
+    /// @return true if all heads were successfully created, false otherwise
+    bool InitializeHeadsFromConfig(
+        const std::vector<HeadConfig>& head_configs,
+        PatternDatabase* pattern_db,
+        AssociationMatrix* association_matrix = nullptr);
+
+    /// Create a single attention head from configuration
+    ///
+    /// Factory method that creates the appropriate head type based on config.
+    ///
+    /// @param config Head configuration
+    /// @param pattern_db Pattern database (required for all heads)
+    /// @param association_matrix Association matrix (required for association heads)
+    /// @return Shared pointer to created head, or nullptr if creation failed
+    std::shared_ptr<AttentionMechanism> CreateHeadFromConfig(
+        const HeadConfig& config,
+        PatternDatabase* pattern_db,
+        AssociationMatrix* association_matrix = nullptr);
 
 protected:
     /// Combine attention weights from multiple heads

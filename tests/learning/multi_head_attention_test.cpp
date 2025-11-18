@@ -5,6 +5,7 @@
 #include "learning/multi_head_attention.hpp"
 #include "learning/basic_attention.hpp"
 #include "learning/context_aware_attention.hpp"
+#include "association/association_matrix.hpp"
 #include "attention_test_fixtures.hpp"
 #include <gtest/gtest.h>
 #include <memory>
@@ -840,6 +841,280 @@ TEST_F(MultiHeadAttentionTest, CombinationConsistency) {
         EXPECT_NEAR(weight1, result2[pattern_id], 1e-5f);
         EXPECT_NEAR(weight1, result3[pattern_id], 1e-5f);
     }
+}
+
+// ============================================================================
+// Head Configuration Tests
+// ============================================================================
+
+TEST_F(MultiHeadAttentionTest, InitializeSemanticHeadFromConfig) {
+    HeadConfig head_config;
+    head_config.name = "semantic";
+    head_config.type = AttentionHeadType::SEMANTIC;
+    head_config.weight = 1.0f;
+    head_config.parameters["temperature"] = 1.5f;
+    head_config.parameters["similarity_threshold"] = 0.3f;
+
+    std::vector<HeadConfig> configs = {head_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+
+    ASSERT_TRUE(success);
+    ASSERT_EQ(multi_head_->GetNumHeads(), 1u);
+
+    const auto* head = multi_head_->GetHead("semantic");
+    ASSERT_NE(head, nullptr);
+    EXPECT_EQ(head->name, "semantic");
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeTemporalHeadFromConfig) {
+    HeadConfig head_config;
+    head_config.name = "temporal";
+    head_config.type = AttentionHeadType::TEMPORAL;
+    head_config.weight = 1.0f;
+    head_config.parameters["decay_constant_ms"] = 500.0f;
+    head_config.parameters["temperature"] = 1.0f;
+
+    std::vector<HeadConfig> configs = {head_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+
+    ASSERT_TRUE(success);
+    ASSERT_EQ(multi_head_->GetNumHeads(), 1u);
+
+    const auto* head = multi_head_->GetHead("temporal");
+    ASSERT_NE(head, nullptr);
+    EXPECT_EQ(head->name, "temporal");
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeStructuralHeadFromConfig) {
+    HeadConfig head_config;
+    head_config.name = "structural";
+    head_config.type = AttentionHeadType::STRUCTURAL;
+    head_config.weight = 1.0f;
+    head_config.parameters["jaccard_weight"] = 0.7f;
+    head_config.parameters["size_weight"] = 0.3f;
+
+    std::vector<HeadConfig> configs = {head_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+
+    ASSERT_TRUE(success);
+    ASSERT_EQ(multi_head_->GetNumHeads(), 1u);
+
+    const auto* head = multi_head_->GetHead("structural");
+    ASSERT_NE(head, nullptr);
+    EXPECT_EQ(head->name, "structural");
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeAssociationHeadFromConfig) {
+    // Create association matrix
+    auto association_matrix = std::make_unique<AssociationMatrix>();
+
+    HeadConfig head_config;
+    head_config.name = "association";
+    head_config.type = AttentionHeadType::ASSOCIATION;
+    head_config.weight = 1.0f;
+    head_config.parameters["strength_threshold"] = 0.2f;
+    head_config.parameters["default_strength"] = 0.1f;
+
+    std::vector<HeadConfig> configs = {head_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get(), association_matrix.get());
+
+    ASSERT_TRUE(success);
+    ASSERT_EQ(multi_head_->GetNumHeads(), 1u);
+
+    const auto* head = multi_head_->GetHead("association");
+    ASSERT_NE(head, nullptr);
+    EXPECT_EQ(head->name, "association");
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeMultipleHeadsFromConfig) {
+    // Create configs for multiple heads
+    HeadConfig semantic_config;
+    semantic_config.name = "semantic";
+    semantic_config.type = AttentionHeadType::SEMANTIC;
+    semantic_config.weight = 0.4f;
+
+    HeadConfig temporal_config;
+    temporal_config.name = "temporal";
+    temporal_config.type = AttentionHeadType::TEMPORAL;
+    temporal_config.weight = 0.3f;
+    temporal_config.parameters["decay_constant_ms"] = 1000.0f;
+
+    HeadConfig basic_config;
+    basic_config.name = "basic";
+    basic_config.type = AttentionHeadType::BASIC;
+    basic_config.weight = 0.3f;
+
+    std::vector<HeadConfig> configs = {semantic_config, temporal_config, basic_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+
+    ASSERT_TRUE(success);
+    ASSERT_EQ(multi_head_->GetNumHeads(), 3u);
+
+    // Check all heads were created
+    EXPECT_NE(multi_head_->GetHead("semantic"), nullptr);
+    EXPECT_NE(multi_head_->GetHead("temporal"), nullptr);
+    EXPECT_NE(multi_head_->GetHead("basic"), nullptr);
+
+    // Weights should be normalized
+    float weight_sum = 0.0f;
+    for (const auto& head : multi_head_->GetHeads()) {
+        weight_sum += head.weight;
+    }
+    EXPECT_NEAR(weight_sum, 1.0f, 1e-5f);
+}
+
+TEST_F(MultiHeadAttentionTest, ConfigValidation_DuplicateNames) {
+    HeadConfig config1;
+    config1.name = "test";
+    config1.type = AttentionHeadType::SEMANTIC;
+    config1.weight = 0.5f;
+
+    HeadConfig config2;
+    config2.name = "test";  // Duplicate name
+    config2.type = AttentionHeadType::TEMPORAL;
+    config2.weight = 0.5f;
+
+    MultiHeadConfig multi_config;
+    multi_config.head_configs = {config1, config2};
+
+    // Validation should fail due to duplicate names
+    EXPECT_FALSE(multi_config.Validate());
+}
+
+TEST_F(MultiHeadAttentionTest, ConfigValidation_InvalidHeadConfig) {
+    HeadConfig config;
+    config.name = "";  // Invalid: empty name
+    config.type = AttentionHeadType::SEMANTIC;
+    config.weight = 0.5f;
+
+    MultiHeadConfig multi_config;
+    multi_config.head_configs = {config};
+
+    // Validation should fail due to empty name
+    EXPECT_FALSE(multi_config.Validate());
+}
+
+TEST_F(MultiHeadAttentionTest, ConfigValidation_InvalidWeight) {
+    HeadConfig config;
+    config.name = "test";
+    config.type = AttentionHeadType::SEMANTIC;
+    config.weight = 1.5f;  // Invalid: > 1.0
+
+    EXPECT_FALSE(config.Validate());
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeFromConfig_NoPatternDB) {
+    HeadConfig config;
+    config.name = "test";
+    config.type = AttentionHeadType::SEMANTIC;
+    config.weight = 1.0f;
+
+    std::vector<HeadConfig> configs = {config};
+
+    // Should fail without pattern database
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, nullptr);
+    EXPECT_FALSE(success);
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeFromConfig_AssociationWithoutMatrix) {
+    HeadConfig config;
+    config.name = "association";
+    config.type = AttentionHeadType::ASSOCIATION;
+    config.weight = 1.0f;
+
+    std::vector<HeadConfig> configs = {config};
+
+    // Should fail: association head requires association matrix
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get(), nullptr);
+    EXPECT_FALSE(success);
+}
+
+TEST_F(MultiHeadAttentionTest, InitializeFromConfig_InvalidStructuralWeights) {
+    HeadConfig config;
+    config.name = "structural";
+    config.type = AttentionHeadType::STRUCTURAL;
+    config.weight = 1.0f;
+    config.parameters["jaccard_weight"] = 0.6f;
+    config.parameters["size_weight"] = 0.6f;  // Sum > 1.0
+
+    std::vector<HeadConfig> configs = {config};
+
+    // Should fail: structural weights don't sum to 1.0
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+    EXPECT_FALSE(success);
+}
+
+TEST_F(MultiHeadAttentionTest, HeadTypeConversion) {
+    // Test HeadTypeToString
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::SEMANTIC), "semantic");
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::TEMPORAL), "temporal");
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::STRUCTURAL), "structural");
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::ASSOCIATION), "association");
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::BASIC), "basic");
+    EXPECT_EQ(HeadTypeToString(AttentionHeadType::CONTEXT), "context");
+
+    // Test StringToHeadType
+    AttentionHeadType type;
+    EXPECT_TRUE(StringToHeadType("semantic", type));
+    EXPECT_EQ(type, AttentionHeadType::SEMANTIC);
+
+    EXPECT_TRUE(StringToHeadType("temporal", type));
+    EXPECT_EQ(type, AttentionHeadType::TEMPORAL);
+
+    EXPECT_TRUE(StringToHeadType("structural", type));
+    EXPECT_EQ(type, AttentionHeadType::STRUCTURAL);
+
+    EXPECT_TRUE(StringToHeadType("association", type));
+    EXPECT_EQ(type, AttentionHeadType::ASSOCIATION);
+
+    EXPECT_TRUE(StringToHeadType("basic", type));
+    EXPECT_EQ(type, AttentionHeadType::BASIC);
+
+    EXPECT_TRUE(StringToHeadType("context", type));
+    EXPECT_EQ(type, AttentionHeadType::CONTEXT);
+
+    EXPECT_FALSE(StringToHeadType("invalid", type));
+}
+
+TEST_F(MultiHeadAttentionTest, ConfiguredHeadsComputeAttention) {
+    auto pattern_ids = CreateTestPatterns(3);
+
+    // Create configs
+    HeadConfig semantic_config;
+    semantic_config.name = "semantic";
+    semantic_config.type = AttentionHeadType::SEMANTIC;
+    semantic_config.weight = 0.6f;
+
+    HeadConfig basic_config;
+    basic_config.name = "basic";
+    basic_config.type = AttentionHeadType::BASIC;
+    basic_config.weight = 0.4f;
+
+    std::vector<HeadConfig> configs = {semantic_config, basic_config};
+
+    bool success = multi_head_->InitializeHeadsFromConfig(configs, mock_db_.get());
+    ASSERT_TRUE(success);
+
+    // Compute attention
+    PatternID query = pattern_ids[0];
+    std::vector<PatternID> candidates = {pattern_ids[1], pattern_ids[2]};
+    ContextVector context;
+
+    auto weights = multi_head_->ComputeAttention(query, candidates, context);
+
+    ASSERT_EQ(weights.size(), 2u);
+
+    // Verify normalized
+    float sum = 0.0f;
+    for (const auto& [_, weight] : weights) {
+        sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0f, 1e-5f);
 }
 
 int main(int argc, char** argv) {

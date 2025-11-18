@@ -88,6 +88,10 @@ add_executable(multi_head_attention_test
     ${PROJECT_SOURCE_DIR}/src/learning/multi_head_attention.cpp
     ${PROJECT_SOURCE_DIR}/src/learning/context_aware_attention.cpp
     ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/semantic_attention_head.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/temporal_attention_head.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/structural_attention_head.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/association_attention_head.cpp
     ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
     ${PROJECT_SOURCE_DIR}/src/core/types.cpp
 )
@@ -102,6 +106,8 @@ target_include_directories(multi_head_attention_test
 target_link_libraries(multi_head_attention_test
     dpan_core
     dpan_storage
+    dpan_association
+    dpan_similarity
     GTest::gtest_main
 )
 
