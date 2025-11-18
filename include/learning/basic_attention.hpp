@@ -186,7 +186,7 @@ public:
     /// @param os Output stream (e.g., std::cout, file stream)
     void SetDebugStream(std::ostream* os);
 
-private:
+protected:
     // ========================================================================
     // Core Attention Computation
     // ========================================================================
