@@ -38,6 +38,9 @@ add_subdirectory(src/discovery)
 add_subdirectory(src/association)
 add_subdirectory(src/memory)
 
+# CLI interface
+add_subdirectory(src/cli)
+
 # Enable testing
 enable_testing()
 add_subdirectory(tests)
