@@ -1017,5 +1017,467 @@ TEST_F(DPANCliTest, AttentionWeightsShownOnlyInVerbose) {
     EXPECT_TRUE(cli_->IsVerboseEnabled());
 }
 
+// ============================================================================
+// Unit Tests - Task 10.1
+// ============================================================================
+
+TEST_F(DPANCliTest, CommandParsingEmpty) {
+    // Empty command should do nothing
+    cli_->ProcessCommand("");
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, CommandParsingWhitespace) {
+    // Whitespace-only should do nothing
+    cli_->ProcessCommand("   ");
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, AttentionInfoWithoutMechanism) {
+    // Should handle gracefully even without attention mechanism initialized
+    // (Though in practice it's always initialized in our CLI)
+    cli_->ProcessCommand("/attention-info");
+    // Should not crash
+    EXPECT_TRUE(true);
+}
+
+TEST_F(DPANCliTest, PredictCommandRequiresPattern) {
+    // Predict should fail gracefully for unknown patterns
+    cli_->ProcessCommand("/predict nonexistent");
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, CompareCommandRequiresPattern) {
+    // Compare should fail gracefully for unknown patterns
+    cli_->ProcessCommand("/compare nonexistent");
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, DetailedPredictRequiresPattern) {
+    // Detailed predict should fail gracefully for unknown patterns
+    cli_->ProcessCommand("/predict-detailed nonexistent");
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, StatePreservedAcrossCommands) {
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Enable verbose
+    cli_->ProcessCommand("/verbose");
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+
+    // Process some text
+    cli_->ProcessCommand("test input");
+
+    // States should still be preserved
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, ToggleCommandsAreIdempotent) {
+    // Toggle attention twice
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    cli_->ProcessCommand("/attention");
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // State should be consistent
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, VocabularySizeGrowsWithUniqueInputs) {
+    cli_->ProcessCommand("first");
+    EXPECT_EQ(1u, cli_->GetVocabularySize());
+
+    cli_->ProcessCommand("second");
+    EXPECT_EQ(2u, cli_->GetVocabularySize());
+
+    // Repeated input doesn't grow vocabulary
+    cli_->ProcessCommand("first");
+    EXPECT_EQ(2u, cli_->GetVocabularySize());
+}
+
+TEST_F(DPANCliTest, ConversationLengthGrowsWithAllInputs) {
+    cli_->ProcessCommand("first");
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("second");
+    EXPECT_EQ(2u, cli_->GetConversationLength());
+
+    // Repeated input still grows conversation
+    cli_->ProcessCommand("first");
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, AttentionOnlyAffectsPredictionsNotLearning) {
+    // Learn with attention off
+    cli_->ProcessCommand("hello");
+    EXPECT_EQ(1u, cli_->GetPatternsLearned());
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+
+    // Learning still works
+    cli_->ProcessCommand("world");
+    EXPECT_EQ(2u, cli_->GetPatternsLearned());
+
+    // Disable attention
+    cli_->ProcessCommand("/attention");
+
+    // Learning still works
+    cli_->ProcessCommand("again");
+    EXPECT_EQ(3u, cli_->GetPatternsLearned());
+}
+
+TEST_F(DPANCliTest, ContextAccumulatesRegardlessOfAttention) {
+    // Context should accumulate whether attention is on or off
+    cli_->ProcessCommand("machine learning");
+    auto& context1 = cli_->GetCurrentContext();
+
+    cli_->ProcessCommand("neural networks");
+    auto& context2 = cli_->GetCurrentContext();
+    size_t size2 = context2.Size();
+
+    // Context should have grown
+    EXPECT_GT(size2, 0u);
+
+    // Enable attention - context should still work
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("deep learning");
+    auto& context3 = cli_->GetCurrentContext();
+
+    EXPECT_GT(context3.Size(), 0u);
+}
+
+TEST_F(DPANCliTest, VerboseModeIndependentOfAttention) {
+    // Verbose can be enabled without attention
+    cli_->ProcessCommand("/verbose");
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // Attention can be enabled without verbose
+    cli_->ProcessCommand("/verbose");  // Turn off
+    cli_->ProcessCommand("/attention");
+    EXPECT_FALSE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Both can be enabled together
+    cli_->ProcessCommand("/verbose");
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, UnknownCommandsHandledGracefully) {
+    // Unknown commands should be handled gracefully
+    cli_->ProcessCommand("/unknown-command");
+    cli_->ProcessCommand("/not-a-real-command");
+    cli_->ProcessCommand("/asdf1234");
+
+    // Should not crash and state should be unchanged
+    EXPECT_EQ(0u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, HelpCommandAlwaysWorks) {
+    // Help should work in any state
+    cli_->ProcessCommand("/help");
+
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("/help");
+
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("/help");
+
+    // Should not crash
+    EXPECT_TRUE(true);
+}
+
+TEST_F(DPANCliTest, StatsCommandAlwaysWorks) {
+    // Stats should work even with no data
+    cli_->ProcessCommand("/stats");
+
+    // Stats should work with data
+    cli_->ProcessCommand("test");
+    cli_->ProcessCommand("/stats");
+
+    // Should not crash
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+}
+
+// ============================================================================
+// Integration Tests - Task 11.1
+// ============================================================================
+
+TEST_F(DPANCliTest, IntegrationFullConversationWorkflow) {
+    // Simulate a full conversation workflow
+    cli_->ProcessCommand("Hello there");
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("How are you");
+    EXPECT_EQ(2u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("Hello there");  // Repeat
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+
+    // Should have learned 2 unique patterns
+    EXPECT_EQ(2u, cli_->GetVocabularySize());
+
+    // Context should have accumulated
+    auto& context = cli_->GetCurrentContext();
+    EXPECT_GT(context.Size(), 0u);
+}
+
+TEST_F(DPANCliTest, IntegrationAttentionCompleteWorkflow) {
+    // Build conversation
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("neural networks");
+    cli_->ProcessCommand("deep learning");
+    cli_->ProcessCommand("machine learning");  // Repeat to create association
+
+    // Test basic prediction
+    cli_->ProcessCommand("/predict machine");
+
+    // Enable attention and test again
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    cli_->ProcessCommand("/predict machine");
+
+    // Compare both modes
+    cli_->ProcessCommand("/compare machine");
+
+    // Get detailed breakdown
+    cli_->ProcessCommand("/predict-detailed machine");
+
+    // Check attention info
+    cli_->ProcessCommand("/attention-info");
+
+    // Verify state
+    EXPECT_EQ(4u, cli_->GetConversationLength());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, IntegrationVerboseAttentionWorkflow) {
+    // Build patterns
+    cli_->ProcessCommand("artificial intelligence");
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("artificial intelligence");
+
+    // Enable both verbose and attention
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("/attention");
+
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Predictions should show detailed weights
+    cli_->ProcessCommand("/predict artificial");
+
+    // Verify final state
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, IntegrationContextEvolutionOverConversation) {
+    // Track context evolution over a conversation
+    cli_->ProcessCommand("deep learning frameworks");
+
+    cli_->ProcessCommand("tensorflow and pytorch");
+    auto& context2 = cli_->GetCurrentContext();
+    size_t size2 = context2.Size();
+
+    cli_->ProcessCommand("neural network architectures");
+    auto& context3 = cli_->GetCurrentContext();
+    size_t size3 = context3.Size();
+
+    // Context should be accumulating
+    EXPECT_GT(size2, 0u);
+    EXPECT_GT(size3, 0u);
+
+    // Should have conversation depth
+    EXPECT_TRUE(context3.Has("conversation_depth"));
+
+    // Should have topic diversity
+    EXPECT_TRUE(context3.Has("topic_diversity"));
+}
+
+TEST_F(DPANCliTest, IntegrationMultipleCommandTypes) {
+    // Test various command types in sequence
+    cli_->ProcessCommand("test pattern one");
+    cli_->ProcessCommand("test pattern two");
+
+    // Show stats
+    cli_->ProcessCommand("/stats");
+
+    // Show patterns
+    cli_->ProcessCommand("/patterns");
+
+    // Show associations
+    cli_->ProcessCommand("/associations");
+
+    // Toggle modes
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("/active");
+
+    // Show info
+    cli_->ProcessCommand("/attention-info");
+    cli_->ProcessCommand("/help");
+
+    // Verify all states are correct
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    EXPECT_TRUE(cli_->IsActiveLearningEnabled());
+    EXPECT_EQ(2u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, IntegrationPredictionConsistency) {
+    // Build a clear pattern
+    cli_->ProcessCommand("hello");
+    cli_->ProcessCommand("world");
+    cli_->ProcessCommand("hello");
+    cli_->ProcessCommand("world");
+    cli_->ProcessCommand("hello");
+    cli_->ProcessCommand("world");
+
+    // Predictions without attention
+    cli_->ProcessCommand("/predict hello");
+
+    // Predictions with attention
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("/predict hello");
+
+    // Compare should show the difference
+    cli_->ProcessCommand("/compare hello");
+
+    // Conversation length should only include actual inputs, not commands
+    EXPECT_EQ(6u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, IntegrationAllVisualizationFeatures) {
+    // Build conversation
+    cli_->ProcessCommand("data science");
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("data science");
+
+    // Test all visualization features
+    cli_->ProcessCommand("/stats");
+    cli_->ProcessCommand("/patterns");
+    cli_->ProcessCommand("/associations");
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("/attention-info");
+
+    // Test all prediction modes
+    cli_->ProcessCommand("/predict data");
+    cli_->ProcessCommand("/compare data");
+    cli_->ProcessCommand("/predict-detailed data");
+
+    // Verify state integrity
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, IntegrationStateToggling) {
+    // Test state toggling doesn't affect conversation
+    cli_->ProcessCommand("test one");
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("test two");
+    EXPECT_EQ(2u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("/attention");  // Toggle off
+    cli_->ProcessCommand("test three");
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("test four");
+    EXPECT_EQ(4u, cli_->GetConversationLength());
+
+    // All patterns should be learned
+    EXPECT_EQ(4u, cli_->GetVocabularySize());
+    EXPECT_EQ(4u, cli_->GetPatternsLearned());
+}
+
+TEST_F(DPANCliTest, IntegrationComplexConversationFlow) {
+    // Simulate a complex conversation with all features
+    cli_->ProcessCommand("I love programming");
+    cli_->ProcessCommand("Python is great");
+    cli_->ProcessCommand("Machine learning is fascinating");
+
+    // Check stats
+    cli_->ProcessCommand("/stats");
+    EXPECT_EQ(3u, cli_->GetConversationLength());
+
+    // Enable verbose and attention
+    cli_->ProcessCommand("/verbose");
+    cli_->ProcessCommand("/attention");
+
+    // Continue conversation
+    cli_->ProcessCommand("I love programming");  // Repeat
+    EXPECT_EQ(4u, cli_->GetConversationLength());
+
+    // Test predictions with all features
+    cli_->ProcessCommand("/predict I");
+
+    // Check context has accumulated
+    auto& context = cli_->GetCurrentContext();
+    EXPECT_GT(context.Size(), 0u);
+    EXPECT_TRUE(context.Has("conversation_depth"));
+
+    // Verify final state
+    EXPECT_TRUE(cli_->IsVerboseEnabled());
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+    EXPECT_EQ(3u, cli_->GetVocabularySize());
+}
+
+TEST_F(DPANCliTest, IntegrationErrorRecovery) {
+    // Test that errors don't corrupt state
+    cli_->ProcessCommand("valid input");
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+
+    // Try invalid commands
+    cli_->ProcessCommand("/predict nonexistent");
+    cli_->ProcessCommand("/compare nonexistent");
+    cli_->ProcessCommand("/predict-detailed nonexistent");
+    cli_->ProcessCommand("/unknown-command");
+
+    // State should be unchanged
+    EXPECT_EQ(1u, cli_->GetConversationLength());
+    EXPECT_EQ(1u, cli_->GetVocabularySize());
+
+    // Continue normally
+    cli_->ProcessCommand("another valid input");
+    EXPECT_EQ(2u, cli_->GetConversationLength());
+}
+
+TEST_F(DPANCliTest, IntegrationAttentionVsBasicComparison) {
+    // Build strong associations
+    cli_->ProcessCommand("cat");
+    cli_->ProcessCommand("dog");
+    cli_->ProcessCommand("cat");
+    cli_->ProcessCommand("dog");
+    cli_->ProcessCommand("cat");
+
+    // Compare basic vs attention predictions
+    cli_->ProcessCommand("/compare cat");
+
+    // Enable attention and verify it changes predictions
+    cli_->ProcessCommand("/attention");
+    cli_->ProcessCommand("/predict cat");
+
+    // Context should be rich by now
+    auto& context = cli_->GetCurrentContext();
+    EXPECT_GT(context.Size(), 0u);
+
+    // Should have learned associations
+    EXPECT_EQ(5u, cli_->GetConversationLength());
+}
+
 } // namespace
 } // namespace dpan

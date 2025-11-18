@@ -147,11 +147,22 @@ void DPANCli::PrintWelcome() {
 }
 
 void DPANCli::ProcessCommand(const std::string& input) {
+        // Check if input is empty or whitespace-only
         if (input.empty()) return;
 
+        // Trim whitespace and check if anything remains
+        auto start = input.find_first_not_of(" \t\n\r");
+        if (start == std::string::npos) {
+            // Input is all whitespace
+            return;
+        }
+
         // Check if it's a command (starts with /)
-        if (input[0] == '/') {
-            HandleCommand(input.substr(1));
+        if (input[start] == '/') {
+            // Extract command after first non-whitespace character
+            auto end = input.find_last_not_of(" \t\n\r");
+            std::string trimmed = input.substr(start, end - start + 1);
+            HandleCommand(trimmed.substr(1));
         } else {
             // It's conversational input - learn from it
             HandleConversation(input);
