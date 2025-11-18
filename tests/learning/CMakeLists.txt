@@ -82,10 +82,34 @@ target_link_libraries(context_aware_attention_test
     GTest::gtest_main
 )
 
+# Multi-head attention test
+add_executable(multi_head_attention_test
+    multi_head_attention_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/multi_head_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/context_aware_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
+    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+)
+
+target_include_directories(multi_head_attention_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/tests/learning
+)
+
+target_link_libraries(multi_head_attention_test
+    dpan_core
+    dpan_storage
+    GTest::gtest_main
+)
+
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(attention_utils_test)
 gtest_discover_tests(basic_attention_test)
 gtest_discover_tests(pattern_importance_test)
 gtest_discover_tests(context_aware_attention_test)
+gtest_discover_tests(multi_head_attention_test)
 
