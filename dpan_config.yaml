@@ -1,0 +1,119 @@
+# DPAN CLI Configuration File
+# This file controls all aspects of the DPAN CLI behavior
+# Copy this file to customize your settings
+
+# === Interface Settings ===
+interface:
+  # Command prompt string
+  prompt: "dpan> "
+
+  # Enable colored terminal output
+  colors_enabled: true
+
+  # Show verbose debug output
+  verbose: false
+
+  # Path to session database file
+  session_file: "dpan_session.db"
+
+# === Learning Settings ===
+learning:
+  # Enable active learning mode (DPAN asks questions when uncertain)
+  active_learning: false
+
+  # Enable attention-enhanced predictions
+  attention_enabled: false
+
+# === Pattern Engine Configuration ===
+pattern_engine:
+  # Similarity metric: "context", "cosine", or "euclidean"
+  similarity_metric: "context"
+
+  # Enable automatic pattern refinement
+  enable_auto_refinement: true
+
+  # Enable pattern indexing for faster lookups
+  enable_indexing: true
+
+  # Feature vector dimension
+  feature_dimension: 64
+
+  # Minimum pattern size in bytes
+  min_pattern_size: 1
+
+  # Maximum pattern size in bytes
+  max_pattern_size: 1000
+
+  # Similarity threshold for pattern matching (0.0-1.0)
+  similarity_threshold: 0.60
+
+  # Strong match threshold (0.0-1.0)
+  strong_match_threshold: 0.75
+
+# === Association Learning Configuration ===
+association:
+  # Enable automatic maintenance (decay, competition, normalization)
+  enable_auto_maintenance: true
+
+  # Minimum co-occurrences required to form association
+  min_co_occurrences: 2
+
+  # Decay rate for association strength
+  decay_rate: 0.01
+
+  # Time window for co-occurrence tracking (seconds)
+  window_size_seconds: 300
+
+# === Attention Mechanism Configuration ===
+attention:
+  # Number of attention heads (multi-head attention)
+  num_heads: 4
+
+  # Temperature for softmax normalization (higher = more uniform)
+  temperature: 1.0
+
+  # Use context similarity in attention scoring
+  use_context: true
+
+  # Use pattern importance weighting
+  use_importance: true
+
+  # Attention type: "dot_product", "additive", or "multiplicative"
+  attention_type: "dot_product"
+
+  # Weight for association strength (should sum to 1.0 with attention_weight)
+  association_weight: 0.6
+
+  # Weight for attention score
+  attention_weight: 0.4
+
+  # Enable caching of attention computations
+  enable_caching: true
+
+  # Maximum number of cached attention computations (LRU)
+  cache_size: 1000
+
+  # Enable debug logging for attention mechanism
+  debug_logging: false
+
+# === Context Tracking Configuration ===
+context:
+  # Decay rate for context topics (0.0-1.0)
+  decay_rate: 0.10
+
+  # Decay interval in seconds
+  decay_interval: 30.0
+
+  # Threshold below which topics are removed (0.0-1.0)
+  removal_threshold: 0.05
+
+  # Maximum number of topics to track
+  max_topics: 50
+
+# === Performance Tuning ===
+performance:
+  # Form associations every N inputs (after initial batch)
+  association_batch_interval: 10
+
+  # Always form associations during first N inputs
+  association_batch_initial: 100

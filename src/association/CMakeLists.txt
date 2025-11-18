@@ -18,6 +18,7 @@ add_library(dpan_association
 
 target_include_directories(dpan_association PUBLIC
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
 )
 
 target_link_libraries(dpan_association PUBLIC

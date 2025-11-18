@@ -57,3 +57,11 @@ tests/benchmarks/stress_tests
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime data files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.db.associations
+*.db.mappings

@@ -16,6 +16,9 @@
 
 namespace dpan {
 
+// Forward declaration for attention mechanism integration
+class AttentionMechanism;
+
 /// AssociationLearningSystem: Unified system for learning and managing associations
 ///
 /// This system integrates all association learning components into a cohesive whole:
@@ -226,6 +229,28 @@ public:
         const ContextVector* context = nullptr
     ) const;
 
+    /// Predict with attention-weighted scoring
+    ///
+    /// Combines association strengths with attention weights for improved predictions.
+    /// When attention mechanism is set, combines scores using configurable weights:
+    /// - final_score = association_weight * assoc_strength + attention_weight * attention
+    ///
+    /// When attention mechanism is nullptr, falls back to PredictWithConfidence().
+    ///
+    /// @param source Source pattern to predict from
+    /// @param k Number of top predictions to return
+    /// @param context Context vector for context-sensitive prediction
+    /// @return Vector of (pattern, combined_score) pairs, sorted by score (descending)
+    ///
+    /// @note Requires SetAttentionMechanism() to be called with valid pointer for attention weighting
+    /// @note Falls back to association-only prediction when attention is nullptr
+    /// @note Combination weights are controlled by attention mechanism's configuration
+    std::vector<std::pair<PatternID, float>> PredictWithAttention(
+        PatternID source,
+        size_t k = 5,
+        const ContextVector& context = ContextVector()
+    ) const;
+
     /// Propagate activation through association network
     /// @param source Starting pattern
     /// @param initial_activation Initial activation level
@@ -298,6 +323,23 @@ public:
     Config GetConfig() const;
 
     // ========================================================================
+    // Attention Mechanism Integration
+    // ========================================================================
+
+    /// Set attention mechanism for attention-weighted predictions
+    /// @param attention Pointer to attention mechanism (nullptr to disable)
+    ///
+    /// When attention mechanism is set:
+    /// - Predict() and PredictWithConfidence() use attention-weighted scoring
+    /// - Combines association strengths with attention scores
+    /// - No performance impact when attention is nullptr (backwards compatible)
+    void SetAttentionMechanism(AttentionMechanism* attention);
+
+    /// Get current attention mechanism
+    /// @return Pointer to attention mechanism (nullptr if not set)
+    AttentionMechanism* GetAttentionMechanism() const;
+
+    // ========================================================================
     // Persistence
     // ========================================================================
 
@@ -321,6 +363,11 @@ private:
     CoOccurrenceTracker tracker_;
     AssociationFormationRules formation_rules_;
     ReinforcementManager reinforcement_mgr_;
+
+    // Optional attention mechanism for attention-weighted predictions
+    // nullptr by default (backwards compatible, no performance impact)
+    AttentionMechanism* attention_mechanism_;
+    mutable std::mutex attention_mutex_;
 
     // Activation history for temporal learning
     std::deque<std::pair<Timestamp, PatternID>> activation_history_;

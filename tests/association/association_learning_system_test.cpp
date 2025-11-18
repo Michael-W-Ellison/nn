@@ -1,5 +1,6 @@
 // File: tests/association/association_learning_system_test.cpp
 #include "association/association_learning_system.hpp"
+#include "learning/attention_mechanism.hpp"
 #include "core/pattern_node.hpp"
 #include "storage/memory_backend.hpp"
 #include <gtest/gtest.h>
@@ -8,6 +9,113 @@
 
 namespace dpan {
 namespace {
+
+// ============================================================================
+// Mock Attention Mechanism for Testing
+// ============================================================================
+
+class MockAttentionMechanism : public AttentionMechanism {
+public:
+    MockAttentionMechanism() {
+        config_.association_weight = 0.6f;
+        config_.attention_weight = 0.4f;
+        config_.temperature = 1.0f;
+        pattern_db_ = nullptr;
+    }
+
+    std::map<PatternID, float> ComputeAttention(
+        PatternID query,
+        const std::vector<PatternID>& candidates,
+        const ContextVector& context) override {
+
+        // Simple mock: assign uniform weights
+        std::map<PatternID, float> weights;
+        float uniform_weight = candidates.empty() ? 0.0f : 1.0f / candidates.size();
+
+        for (const auto& candidate : candidates) {
+            weights[candidate] = uniform_weight;
+        }
+
+        return weights;
+    }
+
+    std::vector<AttentionScore> ComputeDetailedAttention(
+        PatternID query,
+        const std::vector<PatternID>& candidates,
+        const ContextVector& context) override {
+
+        std::vector<AttentionScore> scores;
+        float uniform_weight = candidates.empty() ? 0.0f : 1.0f / candidates.size();
+
+        for (const auto& candidate : candidates) {
+            scores.emplace_back(candidate, uniform_weight, uniform_weight);
+        }
+
+        return scores;
+    }
+
+    std::vector<std::pair<PatternID, float>> ApplyAttention(
+        PatternID query,
+        const std::vector<PatternID>& predictions,
+        const ContextVector& context) override {
+
+        // Combine association scores with attention weights
+        auto attention_weights = ComputeAttention(query, predictions, context);
+
+        std::vector<std::pair<PatternID, float>> combined;
+
+        for (const auto& pred : predictions) {
+            // Use stored association strength
+            float assoc_strength = association_strengths_.count(pred) > 0
+                ? association_strengths_[pred]
+                : 0.5f;
+
+            float attention_weight = attention_weights[pred];
+
+            // Combine using configured weights
+            float combined_score = config_.association_weight * assoc_strength +
+                                   config_.attention_weight * attention_weight;
+
+            combined.emplace_back(pred, combined_score);
+        }
+
+        return combined;
+    }
+
+    void SetPatternDatabase(PatternDatabase* db) override {
+        pattern_db_ = db;
+    }
+
+    const AttentionConfig& GetConfig() const override {
+        return config_;
+    }
+
+    void SetConfig(const AttentionConfig& config) override {
+        config_ = config;
+    }
+
+    void ClearCache() override {
+        // No-op for mock
+    }
+
+    std::map<std::string, float> GetStatistics() const override {
+        return {};
+    }
+
+    // Test helper: set association strengths for testing
+    void SetAssociationStrength(PatternID pattern, float strength) {
+        association_strengths_[pattern] = strength;
+    }
+
+private:
+    AttentionConfig config_;
+    PatternDatabase* pattern_db_;
+    std::map<PatternID, float> association_strengths_;
+};
+
+// ============================================================================
+// Test Helpers
+// ============================================================================
 
 // Helper function to create test pattern
 PatternID CreateTestPattern(const std::string& label = "") {
@@ -618,6 +726,355 @@ TEST(AssociationLearningSystemTest, LargeScaleAssociations) {
     // Test prediction still works
     auto predictions = system.Predict(patterns[0], 5);
     EXPECT_FALSE(predictions.empty());
+}
+
+// ============================================================================
+// Attention Mechanism Integration Tests
+// ============================================================================
+
+TEST(AssociationLearningSystemTest, AttentionMechanismDefaultsToNull) {
+    AssociationLearningSystem system;
+
+    // By default, attention mechanism should be nullptr
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+}
+
+TEST(AssociationLearningSystemTest, SetAttentionMechanism) {
+    AssociationLearningSystem system;
+
+    // Use a dummy pointer value (not dereferenced, just stored and retrieved)
+    // This is safe because we never actually use the pointer
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Set attention mechanism
+    system.SetAttentionMechanism(dummy_ptr);
+
+    // Verify it's set
+    EXPECT_EQ(dummy_ptr, system.GetAttentionMechanism());
+
+    // Clean up by setting back to nullptr
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, AttentionMechanismCanBeDisabled) {
+    AssociationLearningSystem system;
+
+    // Use a dummy pointer value
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Set attention mechanism
+    system.SetAttentionMechanism(dummy_ptr);
+    EXPECT_NE(nullptr, system.GetAttentionMechanism());
+
+    // Disable by setting to nullptr
+    system.SetAttentionMechanism(nullptr);
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+}
+
+TEST(AssociationLearningSystemTest, BackwardsCompatibleWithoutAttention) {
+    // Test that system works normally without attention mechanism
+    AssociationLearningSystem system;
+
+    // Verify no attention mechanism
+    EXPECT_EQ(nullptr, system.GetAttentionMechanism());
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+
+    // Record activations (should work without attention)
+    system.RecordPatternActivation(p1);
+    system.RecordPatternActivation(p2);
+
+    // Create association
+    AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+
+    // Predictions should work without attention
+    auto predictions = system.Predict(p1, 5);
+    EXPECT_FALSE(predictions.empty());
+
+    // PredictWithConfidence should also work
+    auto predictions_with_conf = system.PredictWithConfidence(p1, 5);
+    EXPECT_FALSE(predictions_with_conf.empty());
+}
+
+TEST(AssociationLearningSystemTest, ThreadSafeAttentionAccess) {
+    AssociationLearningSystem system;
+
+    // Use dummy pointer value
+    auto* dummy_ptr = reinterpret_cast<AttentionMechanism*>(0x12345678);
+
+    // Test concurrent access (should not crash)
+    std::thread writer([&system, dummy_ptr]() {
+        for (int i = 0; i < 100; ++i) {
+            system.SetAttentionMechanism(dummy_ptr);
+            system.SetAttentionMechanism(nullptr);
+        }
+    });
+
+    std::thread reader([&system]() {
+        for (int i = 0; i < 100; ++i) {
+            [[maybe_unused]] auto* attn = system.GetAttentionMechanism();
+        }
+    });
+
+    writer.join();
+    reader.join();
+
+    // If we got here without crashing, thread safety works
+    SUCCEED();
+
+    // Ensure we end in a clean state
+    system.SetAttentionMechanism(nullptr);
+}
+
+// ============================================================================
+// PredictWithAttention Tests
+// ============================================================================
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionFallbackWhenNoAttention) {
+    // Test that PredictWithAttention falls back to PredictWithConfidence
+    // when no attention mechanism is set
+    AssociationLearningSystem system;
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+    PatternID p3 = CreateTestPattern();
+
+    // Create associations
+    AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
+    AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.6f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+
+    ContextVector context;
+
+    // Get predictions with attention (should fall back)
+    auto attention_predictions = system.PredictWithAttention(p1, 5, context);
+
+    // Get predictions with confidence (direct call)
+    auto confidence_predictions = system.PredictWithConfidence(p1, 5, &context);
+
+    // Should be identical
+    ASSERT_EQ(attention_predictions.size(), confidence_predictions.size());
+    for (size_t i = 0; i < attention_predictions.size(); ++i) {
+        EXPECT_EQ(attention_predictions[i].first, confidence_predictions[i].first);
+        EXPECT_FLOAT_EQ(attention_predictions[i].second, confidence_predictions[i].second);
+    }
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionUsesAttentionMechanism) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    // Set the mock attention mechanism
+    system.SetAttentionMechanism(&mock_attention);
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+    PatternID p3 = CreateTestPattern();
+
+    // Create associations with different strengths
+    AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.9f);
+    AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.3f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+
+    // Set association strengths in mock
+    mock_attention.SetAssociationStrength(p2, 0.9f);
+    mock_attention.SetAssociationStrength(p3, 0.3f);
+
+    ContextVector context;
+
+    // Get predictions with attention
+    auto predictions = system.PredictWithAttention(p1, 5, context);
+
+    // Should return predictions
+    EXPECT_FALSE(predictions.empty());
+    EXPECT_LE(predictions.size(), 2u);  // Only 2 associations
+
+    // Predictions should be sorted by combined score
+    for (size_t i = 1; i < predictions.size(); ++i) {
+        EXPECT_GE(predictions[i-1].second, predictions[i].second);
+    }
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionCombinesScoresCorrectly) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    // Configure combination weights
+    AttentionConfig config;
+    config.association_weight = 0.7f;
+    config.attention_weight = 0.3f;
+    mock_attention.SetConfig(config);
+
+    system.SetAttentionMechanism(&mock_attention);
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+
+    // Create association
+    AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+
+    // Set association strength in mock
+    mock_attention.SetAssociationStrength(p2, 0.8f);
+
+    ContextVector context;
+
+    // Get predictions
+    auto predictions = system.PredictWithAttention(p1, 1, context);
+
+    ASSERT_EQ(predictions.size(), 1u);
+
+    // Expected combined score: 0.7 * 0.8 + 0.3 * 1.0 = 0.56 + 0.30 = 0.86
+    // (attention weight is 1.0 for single candidate in uniform distribution)
+    float expected_score = 0.7f * 0.8f + 0.3f * 1.0f;
+    EXPECT_NEAR(predictions[0].second, expected_score, 0.01f);
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionUsesContext) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    system.SetAttentionMechanism(&mock_attention);
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+    PatternID p3 = CreateTestPattern();
+
+    // Create associations
+    AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
+    AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.6f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+
+    // Set association strengths
+    mock_attention.SetAssociationStrength(p2, 0.8f);
+    mock_attention.SetAssociationStrength(p3, 0.6f);
+
+    // Create context (just using empty context for this test)
+    ContextVector context;
+
+    // Should not crash and should return predictions
+    auto predictions = system.PredictWithAttention(p1, 5, context);
+
+    EXPECT_FALSE(predictions.empty());
+    EXPECT_LE(predictions.size(), 2u);
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionReturnsRankedPredictions) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    system.SetAttentionMechanism(&mock_attention);
+
+    PatternID p1 = CreateTestPattern();
+    std::vector<PatternID> targets;
+    for (int i = 0; i < 5; ++i) {
+        targets.push_back(CreateTestPattern());
+    }
+
+    // Create associations with varying strengths
+    float strengths[] = {0.9f, 0.7f, 0.5f, 0.3f, 0.1f};
+    for (size_t i = 0; i < targets.size(); ++i) {
+        AssociationEdge edge(p1, targets[i], AssociationType::CAUSAL, strengths[i]);
+        const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+        mock_attention.SetAssociationStrength(targets[i], strengths[i]);
+    }
+
+    ContextVector context;
+
+    // Get top-3 predictions
+    auto predictions = system.PredictWithAttention(p1, 3, context);
+
+    EXPECT_EQ(predictions.size(), 3u);
+
+    // Should be sorted by combined score (descending)
+    for (size_t i = 1; i < predictions.size(); ++i) {
+        EXPECT_GE(predictions[i-1].second, predictions[i].second);
+    }
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionEmptyWhenNoAssociations) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    system.SetAttentionMechanism(&mock_attention);
+
+    PatternID p1 = CreateTestPattern();
+
+    ContextVector context;
+
+    // No associations, should return empty
+    auto predictions = system.PredictWithAttention(p1, 5, context);
+
+    EXPECT_TRUE(predictions.empty());
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
+}
+
+TEST(AssociationLearningSystemTest, PredictWithAttentionConfigurableWeights) {
+    AssociationLearningSystem system;
+    MockAttentionMechanism mock_attention;
+
+    PatternID p1 = CreateTestPattern();
+    PatternID p2 = CreateTestPattern();
+
+    AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
+    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+
+    mock_attention.SetAssociationStrength(p2, 0.8f);
+
+    ContextVector context;
+
+    // Test with different weight configurations
+    {
+        // Pure association (attention weight = 0)
+        AttentionConfig config;
+        config.association_weight = 1.0f;
+        config.attention_weight = 0.0f;
+        mock_attention.SetConfig(config);
+
+        system.SetAttentionMechanism(&mock_attention);
+        auto predictions = system.PredictWithAttention(p1, 1, context);
+
+        ASSERT_EQ(predictions.size(), 1u);
+        // Should be close to pure association strength
+        EXPECT_NEAR(predictions[0].second, 0.8f, 0.01f);
+    }
+
+    {
+        // Balanced combination
+        AttentionConfig config;
+        config.association_weight = 0.5f;
+        config.attention_weight = 0.5f;
+        mock_attention.SetConfig(config);
+
+        system.SetAttentionMechanism(&mock_attention);
+        auto predictions = system.PredictWithAttention(p1, 1, context);
+
+        ASSERT_EQ(predictions.size(), 1u);
+        // Should be: 0.5 * 0.8 + 0.5 * 1.0 = 0.9
+        EXPECT_NEAR(predictions[0].second, 0.9f, 0.01f);
+    }
+
+    // Clean up
+    system.SetAttentionMechanism(nullptr);
 }
 
 } // namespace

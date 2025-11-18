@@ -1,5 +1,6 @@
 // File: src/association/association_learning_system.cpp
 #include "association/association_learning_system.hpp"
+#include "learning/attention_mechanism.hpp"
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -20,6 +21,7 @@ AssociationLearningSystem::AssociationLearningSystem(const Config& config)
       tracker_(config.co_occurrence),
       formation_rules_(config.formation),
       reinforcement_mgr_(config.reinforcement),
+      attention_mechanism_(nullptr),  // Default to nullptr (backwards compatible)
       last_decay_(Timestamp::Now()),
       last_competition_(Timestamp::Now()),
       last_normalization_(Timestamp::Now()),
@@ -327,6 +329,67 @@ std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithC
     return predictions;
 }
 
+std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithAttention(
+    PatternID source,
+    size_t k,
+    const ContextVector& context
+) const {
+    // Get the attention mechanism (thread-safe)
+    AttentionMechanism* attention = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(attention_mutex_);
+        attention = attention_mechanism_;
+    }
+
+    // If no attention mechanism is set, fall back to PredictWithConfidence
+    if (attention == nullptr) {
+        return PredictWithConfidence(source, k, &context);
+    }
+
+    // Get outgoing associations from the source pattern
+    auto associations = matrix_.GetOutgoingAssociations(source);
+
+    if (associations.empty()) {
+        return {};  // No associations, no predictions
+    }
+
+    // Extract candidate patterns and their association strengths
+    std::vector<PatternID> candidates;
+    std::map<PatternID, float> association_strengths;
+    candidates.reserve(associations.size());
+
+    for (const auto* edge : associations) {
+        PatternID target = edge->GetTarget();
+        float strength = edge->GetContextualStrength(context);
+
+        candidates.push_back(target);
+        association_strengths[target] = strength;
+    }
+
+    // Use attention mechanism to combine association scores with attention weights
+    // ApplyAttention handles the combination logic using configured weights
+    auto weighted_predictions = attention->ApplyAttention(source, candidates, context);
+
+    // Sort by combined score (descending)
+    std::sort(weighted_predictions.begin(), weighted_predictions.end(),
+        [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+
+    // Return top-k predictions
+    if (weighted_predictions.size() > k) {
+        weighted_predictions.resize(k);
+    }
+
+    // Update statistics
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.predictions_count++;
+    }
+
+    return weighted_predictions;
+}
+
 std::vector<AssociationMatrix::ActivationResult> AssociationLearningSystem::PropagateActivation(
     PatternID source,
     float initial_activation,
@@ -406,6 +469,20 @@ void AssociationLearningSystem::SetConfig(const Config& config) {
 AssociationLearningSystem::Config AssociationLearningSystem::GetConfig() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
     return config_;
+}
+
+// ============================================================================
+// Attention Mechanism Integration
+// ============================================================================
+
+void AssociationLearningSystem::SetAttentionMechanism(AttentionMechanism* attention) {
+    std::lock_guard<std::mutex> lock(attention_mutex_);
+    attention_mechanism_ = attention;
+}
+
+AttentionMechanism* AssociationLearningSystem::GetAttentionMechanism() const {
+    std::lock_guard<std::mutex> lock(attention_mutex_);
+    return attention_mechanism_;
 }
 
 // ============================================================================
