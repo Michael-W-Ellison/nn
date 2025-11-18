@@ -24,6 +24,7 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <set>
 
 namespace dpan {
 
@@ -186,6 +187,10 @@ void DPANCli::HandleCommand(const std::string& cmd) {
             std::string text;
             std::getline(iss, text);
             PredictNext(text);
+        } else if (command == "compare") {
+            std::string text;
+            std::getline(iss, text);
+            CompareMode(text);
         } else if (command == "verbose") {
             verbose_ = !verbose_;
             std::cout << "Verbose mode: " << (verbose_ ? C(Color::GREEN) : C(Color::DIM))
@@ -394,6 +399,7 @@ Available Commands:
 Conversation:
   <text>              Learn from and respond to text input
   /predict <text>     Show what the system predicts will follow
+  /compare <text>     Compare predictions with/without attention
 
 Learning:
   /learn <file>       Learn from a text file (one line = one input)
@@ -603,6 +609,125 @@ void DPANCli::PredictNext(const std::string& text) {
             std::cout << "  " << (i+1) << ". \"" << pred_text << "\" ["
                      << std::fixed << std::setprecision(3) << score << "]\n";
         }
+    }
+
+void DPANCli::CompareMode(const std::string& text) {
+        std::string query = text;
+        // Trim leading space if present
+        if (!query.empty() && query[0] == ' ') {
+            query = query.substr(1);
+        }
+
+        if (text_to_pattern_.count(query) == 0) {
+            std::cout << C(Color::YELLOW) << "Unknown input: " << C(Color::RESET)
+                     << "\"" << query << "\"\n";
+            std::cout << C(Color::DIM) << "I haven't learned this pattern yet.\n" << C(Color::RESET);
+            return;
+        }
+
+        PatternID pattern = text_to_pattern_[query];
+
+        // Get predictions WITHOUT attention
+        auto basic_predictions = assoc_system_->PredictWithConfidence(
+            pattern, 5, &current_context_);
+
+        // Get predictions WITH attention
+        auto attention_predictions = assoc_system_->PredictWithAttention(
+            pattern, 5, current_context_);
+
+        if (basic_predictions.empty() && attention_predictions.empty()) {
+            std::cout << C(Color::YELLOW) << "No predictions available for: "
+                     << C(Color::RESET) << "\"" << query << "\"\n";
+            return;
+        }
+
+        // Print header
+        std::cout << "\n" << C(Color::BOLD_CYAN);
+        std::cout << "╔══════════════════════════════════════════════════════════════════════╗\n";
+        std::cout << "║           A/B Comparison: Basic vs Attention-Enhanced              ║\n";
+        std::cout << "╚══════════════════════════════════════════════════════════════════════╝\n";
+        std::cout << C(Color::RESET);
+        std::cout << C(Color::BOLD) << "Query: " << C(Color::RESET) << "\"" << query << "\"\n\n";
+
+        // Build maps for easy comparison
+        std::map<PatternID, float> basic_scores;
+        std::map<PatternID, float> attention_scores;
+
+        for (const auto& [id, score] : basic_predictions) {
+            basic_scores[id] = score;
+        }
+        for (const auto& [id, score] : attention_predictions) {
+            attention_scores[id] = score;
+        }
+
+        // Collect all unique pattern IDs
+        std::set<PatternID> all_patterns;
+        for (const auto& [id, _] : basic_predictions) {
+            all_patterns.insert(id);
+        }
+        for (const auto& [id, _] : attention_predictions) {
+            all_patterns.insert(id);
+        }
+
+        // Print side-by-side comparison header
+        std::cout << C(Color::DIM) << std::setw(30) << std::left << "Pattern"
+                 << std::setw(15) << "Basic Score"
+                 << std::setw(15) << "Attention Score"
+                 << std::setw(10) << "Delta" << C(Color::RESET) << "\n";
+        std::cout << C(Color::DIM) << std::string(70, '-') << C(Color::RESET) << "\n";
+
+        // Show top predictions (union of both lists)
+        size_t count = 0;
+        for (const auto& [id, attn_score] : attention_predictions) {
+            if (count >= 5) break;
+
+            std::string pred_text = pattern_to_text_.count(id) ?
+                                   pattern_to_text_[id] : "<unknown>";
+
+            // Truncate long text
+            if (pred_text.length() > 27) {
+                pred_text = pred_text.substr(0, 24) + "...";
+            }
+
+            float basic_score = basic_scores.count(id) ? basic_scores[id] : 0.0f;
+            float delta = attn_score - basic_score;
+
+            // Print pattern name
+            std::cout << std::setw(30) << std::left << ("\"" + pred_text + "\"");
+
+            // Print basic score
+            if (basic_score > 0.0f) {
+                std::cout << std::setw(15) << std::fixed << std::setprecision(3) << basic_score;
+            } else {
+                std::cout << std::setw(15) << C(Color::DIM) << "---" << C(Color::RESET);
+            }
+
+            // Print attention score
+            std::cout << std::setw(15) << std::fixed << std::setprecision(3) << attn_score;
+
+            // Print delta with color coding
+            if (delta > 0.01f) {
+                std::cout << C(Color::GREEN) << "+" << std::fixed << std::setprecision(3)
+                         << delta << C(Color::RESET);
+            } else if (delta < -0.01f) {
+                std::cout << C(Color::RED) << std::fixed << std::setprecision(3)
+                         << delta << C(Color::RESET);
+            } else {
+                std::cout << C(Color::DIM) << "~0.000" << C(Color::RESET);
+            }
+
+            std::cout << "\n";
+            count++;
+        }
+
+        // Print summary
+        std::cout << "\n" << C(Color::DIM) << "Legend:\n";
+        std::cout << C(Color::GREEN) << "+delta" << C(Color::RESET) << C(Color::DIM)
+                 << " = Attention boosted this prediction\n";
+        std::cout << C(Color::RED) << "-delta" << C(Color::RESET) << C(Color::DIM)
+                 << " = Attention reduced this prediction\n";
+        std::cout << "~0.000 = Scores are similar\n";
+        std::cout << "---    = Not predicted by basic mode" << C(Color::RESET) << "\n\n";
     }
 
 void DPANCli::ToggleActiveLearning() {

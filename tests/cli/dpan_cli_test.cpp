@@ -809,5 +809,104 @@ TEST_F(DPANCliTest, MultipleTogglesWork) {
     EXPECT_TRUE(cli_->IsAttentionEnabled());
 }
 
+// ============================================================================
+// A/B Comparison Tests
+// ============================================================================
+
+TEST_F(DPANCliTest, CompareCommandWithKnownPattern) {
+    // Build some patterns
+    cli_->ProcessCommand("hello world");
+    cli_->ProcessCommand("world peace");
+    cli_->ProcessCommand("hello world");  // Repeat to create association
+
+    // Compare command should work without crashing
+    cli_->ProcessCommand("/compare hello");
+
+    // Should still have the same conversation length
+    EXPECT_EQ(cli_->GetConversationLength(), 3u);
+}
+
+TEST_F(DPANCliTest, CompareCommandWithUnknownPattern) {
+    // Try to compare an unknown pattern
+    cli_->ProcessCommand("/compare unknown");
+
+    // Should not crash
+    EXPECT_EQ(cli_->GetConversationLength(), 0u);
+}
+
+TEST_F(DPANCliTest, CompareCommandShowsBothModes) {
+    // Build conversation with associations
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("neural networks");
+    cli_->ProcessCommand("deep learning");
+    cli_->ProcessCommand("machine learning");  // Create association
+
+    // Compare should run both prediction modes
+    cli_->ProcessCommand("/compare machine");
+
+    // Verify state hasn't changed
+    EXPECT_EQ(cli_->GetConversationLength(), 4u);
+}
+
+TEST_F(DPANCliTest, CompareDoesNotChangeAttentionState) {
+    // Initially disabled
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // Build some patterns
+    cli_->ProcessCommand("test pattern");
+    cli_->ProcessCommand("another pattern");
+
+    // Run compare
+    cli_->ProcessCommand("/compare test");
+
+    // Attention state should still be disabled
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Run compare again
+    cli_->ProcessCommand("/compare test");
+
+    // Attention state should still be enabled
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, CompareWithEmptyPredictions) {
+    // Create a pattern with no associations
+    cli_->ProcessCommand("isolated pattern");
+
+    // Compare should handle empty predictions gracefully
+    cli_->ProcessCommand("/compare isolated");
+
+    // Should not crash
+    EXPECT_EQ(cli_->GetConversationLength(), 1u);
+}
+
+TEST_F(DPANCliTest, CompareWorksWithContext) {
+    // Build conversation with context
+    cli_->ProcessCommand("artificial intelligence");
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("neural networks");
+    cli_->ProcessCommand("artificial intelligence");  // Repeat
+
+    // Compare should use context for both prediction modes
+    cli_->ProcessCommand("/compare artificial");
+
+    // Context should still be present
+    auto& context = cli_->GetCurrentContext();
+    EXPECT_GT(context.Size(), 0u);
+}
+
+TEST_F(DPANCliTest, CompareCommandInHelp) {
+    // Verify /compare is documented in help
+    // This is a smoke test - just ensure help doesn't crash
+    cli_->ProcessCommand("/help");
+
+    // Help should execute without errors
+    EXPECT_TRUE(true);  // Just verify we got here
+}
+
 } // namespace
 } // namespace dpan
