@@ -12,6 +12,7 @@
 
 #include "dpan_cli.hpp"
 #include "storage/memory_backend.hpp"
+#include "learning/basic_attention.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -31,6 +32,8 @@ DPANCli::DPANCli() {
     InitializeAssociations();
     last_interaction_time_ = std::chrono::steady_clock::now();
 }
+
+DPANCli::~DPANCli() = default;
 
 void DPANCli::Run() {
     PrintWelcome();
@@ -111,6 +114,19 @@ void DPANCli::InitializeAssociations() {
     assoc_config.prune_threshold = 0.1f;
 
     assoc_system_ = std::make_unique<AssociationLearningSystem>(assoc_config);
+
+    // Initialize attention mechanism
+    AttentionConfig attention_config;
+    attention_config.temperature = 1.0f;
+    attention_config.association_weight = 0.6f;  // 60% association strength
+    attention_config.attention_weight = 0.4f;    // 40% attention weight
+    attention_config.enable_caching = true;
+
+    attention_mechanism_ = std::make_unique<dpan::attention::BasicAttentionMechanism>(attention_config);
+    attention_mechanism_->SetPatternDatabase(storage_.get());
+
+    // Set attention mechanism on association system (disabled by default)
+    assoc_system_->SetAttentionMechanism(attention_mechanism_.get());
 }
 
 void DPANCli::PrintWelcome() {
@@ -156,6 +172,8 @@ void DPANCli::HandleCommand(const std::string& cmd) {
             LearnFromFile(filepath);
         } else if (command == "active") {
             ToggleActiveLearning();
+        } else if (command == "attention") {
+            ToggleAttention();
         } else if (command == "save") {
             SaveSession();
         } else if (command == "load") {
@@ -251,10 +269,20 @@ void DPANCli::HandleConversation(const std::string& text) {
     }
 
 void DPANCli::GenerateResponse(PatternID input_pattern) {
-        // Use associations to predict next patterns
-        auto predictions = assoc_system_->Predict(input_pattern, 3);
+        // Use associations to predict next patterns (with or without attention)
+        std::vector<std::pair<PatternID, float>> predictions_with_scores;
 
-        if (predictions.empty()) {
+        if (attention_enabled_) {
+            // Use attention-enhanced predictions with current context
+            predictions_with_scores = assoc_system_->PredictWithAttention(
+                input_pattern, 3, current_context_);
+        } else {
+            // Use basic predictions with confidence scores
+            predictions_with_scores = assoc_system_->PredictWithConfidence(
+                input_pattern, 3, &current_context_);
+        }
+
+        if (predictions_with_scores.empty()) {
             std::cout << C(Color::CYAN) << "→ " << C(Color::DIM)
                      << "[Learning... I don't have enough context yet to respond.]\n" << C(Color::RESET);
             return;
@@ -262,17 +290,15 @@ void DPANCli::GenerateResponse(PatternID input_pattern) {
 
         // Try to generate text response from predicted patterns
         std::vector<std::string> response_candidates;
-        for (auto pred : predictions) {
-            if (pattern_to_text_.count(pred)) {
-                response_candidates.push_back(pattern_to_text_[pred]);
+        for (const auto& [pattern_id, score] : predictions_with_scores) {
+            if (pattern_to_text_.count(pattern_id)) {
+                response_candidates.push_back(pattern_to_text_[pattern_id]);
             }
         }
 
         if (!response_candidates.empty()) {
-            // Get association strengths
-            const auto& matrix = assoc_system_->GetAssociationMatrix();
-            auto* edge = matrix.GetAssociation(input_pattern, predictions[0]);
-            float confidence = edge ? edge->GetStrength() : 0.0f;
+            // Use the confidence score from prediction
+            float confidence = predictions_with_scores[0].second;
 
             std::cout << C(Color::CYAN) << "→ " << C(Color::BOLD_MAGENTA)
                      << response_candidates[0] << C(Color::RESET);
@@ -291,7 +317,7 @@ void DPANCli::GenerateResponse(PatternID input_pattern) {
             }
         } else {
             std::cout << C(Color::CYAN) << "→ " << C(Color::DIM)
-                     << "[I predicted " << predictions.size()
+                     << "[I predicted " << predictions_with_scores.size()
                      << " pattern(s), but haven't learned text for them yet.]\n" << C(Color::RESET);
         }
     }
@@ -372,6 +398,7 @@ Conversation:
 Learning:
   /learn <file>       Learn from a text file (one line = one input)
   /active             Toggle active learning mode (DPAN asks questions)
+  /attention          Toggle attention-enhanced predictions
 
 Information:
   /stats              Show learning statistics
@@ -547,27 +574,34 @@ void DPANCli::PredictNext(const std::string& text) {
         }
 
         PatternID pattern = text_to_pattern_[query];
-        auto predictions = assoc_system_->Predict(pattern, 5, &current_context_);
 
-        if (predictions.empty()) {
+        // Use attention-enhanced predictions if enabled
+        std::vector<std::pair<PatternID, float>> predictions_with_scores;
+        if (attention_enabled_) {
+            predictions_with_scores = assoc_system_->PredictWithAttention(
+                pattern, 5, current_context_);
+        } else {
+            predictions_with_scores = assoc_system_->PredictWithConfidence(
+                pattern, 5, &current_context_);
+        }
+
+        if (predictions_with_scores.empty()) {
             std::cout << C(Color::YELLOW) << "No predictions available for: "
                      << C(Color::RESET) << "\"" << query << "\"\n";
             return;
         }
 
-        std::cout << "\n" << C(Color::BOLD) << "Predictions for \"" << query << "\":\n"
+        std::cout << "\n" << C(Color::BOLD) << "Predictions for \"" << query << "\""
+                 << (attention_enabled_ ? " (attention-enhanced)" : "") << ":\n"
                  << C(Color::RESET);
 
-        const auto& matrix = assoc_system_->GetAssociationMatrix();
-        for (size_t i = 0; i < predictions.size(); ++i) {
-            auto* edge = matrix.GetAssociation(pattern, predictions[i]);
-            float strength = edge ? edge->GetStrength() : 0.0f;
-
-            std::string pred_text = pattern_to_text_.count(predictions[i]) ?
-                                   pattern_to_text_[predictions[i]] : "<unknown>";
+        for (size_t i = 0; i < predictions_with_scores.size(); ++i) {
+            const auto& [pred_id, score] = predictions_with_scores[i];
+            std::string pred_text = pattern_to_text_.count(pred_id) ?
+                                   pattern_to_text_[pred_id] : "<unknown>";
 
             std::cout << "  " << (i+1) << ". \"" << pred_text << "\" ["
-                     << std::fixed << std::setprecision(3) << strength << "]\n";
+                     << std::fixed << std::setprecision(3) << score << "]\n";
         }
     }
 
@@ -579,6 +613,18 @@ void DPANCli::ToggleActiveLearning() {
 
         if (active_learning_mode_) {
             std::cout << C(Color::DIM) << "DPAN will now ask for clarification when uncertain.\n"
+                     << C(Color::RESET);
+        }
+    }
+
+void DPANCli::ToggleAttention() {
+        attention_enabled_ = !attention_enabled_;
+        std::cout << "Attention-enhanced predictions: " << (attention_enabled_ ?
+                 C(Color::BOLD_GREEN) : C(Color::DIM))
+                 << (attention_enabled_ ? "ON" : "OFF") << C(Color::RESET) << "\n";
+
+        if (attention_enabled_) {
+            std::cout << C(Color::DIM) << "Using context-aware attention for improved predictions.\n"
                      << C(Color::RESET);
         }
     }

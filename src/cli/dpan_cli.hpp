@@ -18,6 +18,9 @@
 
 namespace dpan {
 
+// Forward declarations
+class AttentionMechanism;
+
 /// ANSI color codes for terminal output
 namespace Color {
     // Reset
@@ -59,6 +62,7 @@ namespace Color {
 class DPANCli {
 public:
     DPANCli();
+    ~DPANCli();
 
     /// Main run loop - interactive mode
     void Run();
@@ -72,6 +76,7 @@ public:
     size_t GetConversationLength() const { return conversation_history_.size(); }
     size_t GetVocabularySize() const { return text_to_pattern_.size(); }
     bool IsActiveLearningEnabled() const { return active_learning_mode_; }
+    bool IsAttentionEnabled() const { return attention_enabled_; }
     bool IsVerboseEnabled() const { return verbose_; }
 
     /// Get pattern for text (for testing)
@@ -94,9 +99,11 @@ private:
     std::unique_ptr<PatternEngine> engine_;
     std::unique_ptr<AssociationLearningSystem> assoc_system_;
     std::shared_ptr<PersistentBackend> storage_;
+    std::unique_ptr<AttentionMechanism> attention_mechanism_;
 
     bool running_ = true;
     bool active_learning_mode_ = false;
+    bool attention_enabled_ = false;  // Enable attention-based predictions
     bool verbose_ = false;
     bool colors_enabled_ = true;  // Enable colors by default
     std::string prompt_ = "dpan> ";
@@ -131,6 +138,7 @@ private:
     void PredictNext(const std::string& text);
     void LearnFromFile(const std::string& filepath);
     void ToggleActiveLearning();
+    void ToggleAttention();
     void SaveSession();
     void LoadSession();
     void LoadSessionIfExists();

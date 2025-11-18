@@ -685,5 +685,129 @@ TEST_F(DPANCliTest, ContextTopicsAreLimited) {
     EXPECT_LE(context.Size(), 15u);  // Reasonable upper bound
 }
 
+// ============================================================================
+// Attention Integration Tests
+// ============================================================================
+
+TEST_F(DPANCliTest, AttentionDefaultsToDisabled) {
+    // Attention should be disabled by default
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, ToggleAttentionCommand) {
+    // Initially disabled
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // Toggle on
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Toggle off
+    cli_->ProcessCommand("/attention");
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, AttentionUsedInPredictions) {
+    // Build up some conversation history
+    cli_->ProcessCommand("machine learning");
+    cli_->ProcessCommand("neural networks");
+    cli_->ProcessCommand("deep learning");
+    cli_->ProcessCommand("machine learning");  // Repeat to create association
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+
+    // Process another input - should use attention-enhanced predictions
+    cli_->ProcessCommand("machine learning");
+
+    // No way to directly verify attention was used, but at least ensure it doesn't crash
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, AttentionFallbackWhenDisabled) {
+    // Build up some conversation history
+    cli_->ProcessCommand("hello world");
+    cli_->ProcessCommand("hello again");
+
+    // Ensure attention is disabled
+    EXPECT_FALSE(cli_->IsAttentionEnabled());
+
+    // Process input - should use basic predictions
+    cli_->ProcessCommand("hello world");
+
+    // Should still work fine
+    EXPECT_EQ(cli_->GetConversationLength(), 3u);
+}
+
+TEST_F(DPANCliTest, AttentionWithContextTracking) {
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+
+    // Build conversation with context
+    cli_->ProcessCommand("artificial intelligence research");
+    cli_->ProcessCommand("machine learning algorithms");
+    cli_->ProcessCommand("neural network architecture");
+
+    // Context should be accumulated
+    auto& context = cli_->GetCurrentContext();
+    EXPECT_GT(context.Size(), 0u);
+
+    // Attention should use this context for predictions
+    cli_->ProcessCommand("artificial intelligence research");
+
+    // Verify still enabled and working
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, AttentionDoesNotBreakExistingBehavior) {
+    // Test that enabling/disabling attention doesn't break normal operation
+
+    // Normal operation
+    cli_->ProcessCommand("test input");
+    EXPECT_EQ(cli_->GetConversationLength(), 1u);
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+
+    // Continue normal operation
+    cli_->ProcessCommand("another test");
+    EXPECT_EQ(cli_->GetConversationLength(), 2u);
+
+    // Disable attention
+    cli_->ProcessCommand("/attention");
+
+    // Still works
+    cli_->ProcessCommand("final test");
+    EXPECT_EQ(cli_->GetConversationLength(), 3u);
+}
+
+TEST_F(DPANCliTest, PredictCommandWithAttention) {
+    // Build some patterns
+    cli_->ProcessCommand("hello world");
+    cli_->ProcessCommand("world peace");
+    cli_->ProcessCommand("hello world");  // Repeat
+
+    // Enable attention
+    cli_->ProcessCommand("/attention");
+
+    // Use predict command - should work with attention
+    cli_->ProcessCommand("/predict hello");
+
+    // Should not crash and attention should still be enabled
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
+TEST_F(DPANCliTest, MultipleTogglesWork) {
+    // Toggle multiple times
+    for (int i = 0; i < 5; ++i) {
+        cli_->ProcessCommand("/attention");
+        EXPECT_EQ(cli_->IsAttentionEnabled(), (i % 2 == 0));
+    }
+
+    // Final state should be ON (started at 0, toggled 5 times)
+    EXPECT_TRUE(cli_->IsAttentionEnabled());
+}
+
 } // namespace
 } // namespace dpan
