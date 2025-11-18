@@ -306,7 +306,47 @@ bool IsValid(float value);
 /// @endcode
 float SafeDivide(float numerator, float denominator, float fallback = 0.0f);
 
+// ============================================================================
+// Template Implementations
+// ============================================================================
+
+/// Template implementation for map-based softmax
+template<typename KeyType>
+std::map<KeyType, float> Softmax(
+    const std::map<KeyType, float>& scores,
+    float temperature) {
+
+    if (scores.empty()) {
+        return {};
+    }
+
+    // Extract values into vector for processing
+    std::vector<float> values;
+    values.reserve(scores.size());
+
+    for (const auto& [key, score] : scores) {
+        values.push_back(score);
+    }
+
+    // Apply vector softmax
+    auto weights = Softmax(values, temperature);
+
+    // Map weights back to keys
+    std::map<KeyType, float> result;
+    auto key_it = scores.begin();
+    auto weight_it = weights.begin();
+
+    while (key_it != scores.end() && weight_it != weights.end()) {
+        result[key_it->first] = *weight_it;
+        ++key_it;
+        ++weight_it;
+    }
+
+    return result;
+}
+
 } // namespace attention
 } // namespace dpan
 
 #endif // DPAN_LEARNING_ATTENTION_UTILS_HPP
+
