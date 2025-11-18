@@ -10,6 +10,8 @@
 
 #include "learning/attention_utils.hpp"
 #include "core/types.hpp"
+#include "core/pattern_node.hpp"
+#include "core/pattern_data.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
 #include <limits>
@@ -496,6 +498,255 @@ TEST_F(AttentionUtilsTest, SoftmaxDotProductPipeline) {
     // First key should have highest weight (most similar to query)
     EXPECT_GT(weights[0], weights[1]);
     EXPECT_GT(weights[0], weights[2]);
+}
+
+// ============================================================================
+// Feature Extraction Tests
+// ============================================================================
+
+TEST_F(AttentionUtilsTest, GetFeatureDimensionBasic) {
+    size_t base_dim = 128;
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = true;
+    config.include_age = false;
+    config.include_type = false;
+
+    size_t total = GetFeatureDimension(base_dim, config);
+
+    // 128 + confidence(1) + access_count(1) = 130
+    EXPECT_EQ(total, 130u);
+}
+
+TEST_F(AttentionUtilsTest, GetFeatureDimensionAllFeatures) {
+    size_t base_dim = 64;
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = true;
+    config.include_age = true;
+    config.include_type = true;
+
+    size_t total = GetFeatureDimension(base_dim, config);
+
+    // 64 + confidence(1) + access(1) + age(1) + type(3) = 70
+    EXPECT_EQ(total, 70u);
+}
+
+TEST_F(AttentionUtilsTest, GetFeatureDimensionNoMetadata) {
+    size_t base_dim = 100;
+
+    FeatureExtractionConfig config;
+    config.include_confidence = false;
+    config.include_access_count = false;
+    config.include_age = false;
+    config.include_type = false;
+
+    size_t total = GetFeatureDimension(base_dim, config);
+
+    // Only base features
+    EXPECT_EQ(total, 100u);
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesBasic) {
+    // Create a simple pattern node with known properties
+    PatternID id = PatternID::Generate();
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f, 2.0f, 3.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternNode node(id, data, PatternType::ATOMIC);
+    node.SetConfidenceScore(0.75f);
+    node.IncrementAccessCount(100);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = true;
+    config.include_age = false;
+    config.include_type = false;
+    config.max_access_count = 1000;
+
+    auto features = ExtractFeatures(node, config);
+
+    // Should have: base(3) + confidence(1) + access(1) = 5
+    ASSERT_EQ(features.size(), 5u);
+
+    // Check base features
+    EXPECT_NEAR(features[0], 1.0f, kTolerance);
+    EXPECT_NEAR(features[1], 2.0f, kTolerance);
+    EXPECT_NEAR(features[2], 3.0f, kTolerance);
+
+    // Check confidence
+    EXPECT_NEAR(features[3], 0.75f, kTolerance);
+
+    // Check normalized access count: 100/1000 = 0.1
+    EXPECT_NEAR(features[4], 0.1f, kTolerance);
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesWithType) {
+    PatternID id = PatternID::Generate();
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f, 2.0f}),
+        DataModality::NUMERIC
+    );
+
+    // Test ATOMIC type
+    PatternNode atomic_node(id, data, PatternType::ATOMIC);
+    atomic_node.SetConfidenceScore(0.5f);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = false;
+    config.include_age = false;
+    config.include_type = true;
+
+    auto features = ExtractFeatures(atomic_node, config);
+
+    // base(2) + confidence(1) + type(3) = 6
+    ASSERT_EQ(features.size(), 6u);
+
+    // Check one-hot encoding for ATOMIC
+    EXPECT_NEAR(features[3], 1.0f, kTolerance);  // ATOMIC = 1
+    EXPECT_NEAR(features[4], 0.0f, kTolerance);  // COMPOSITE = 0
+    EXPECT_NEAR(features[5], 0.0f, kTolerance);  // META = 0
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesCompositeType) {
+    PatternID id = PatternID::Generate();
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternNode composite_node(id, data, PatternType::COMPOSITE);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = false;
+    config.include_access_count = false;
+    config.include_age = false;
+    config.include_type = true;
+
+    auto features = ExtractFeatures(composite_node, config);
+
+    // base(1) + type(3) = 4
+    ASSERT_EQ(features.size(), 4u);
+
+    // Check one-hot encoding for COMPOSITE
+    EXPECT_NEAR(features[1], 0.0f, kTolerance);  // ATOMIC = 0
+    EXPECT_NEAR(features[2], 1.0f, kTolerance);  // COMPOSITE = 1
+    EXPECT_NEAR(features[3], 0.0f, kTolerance);  // META = 0
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesAccessCountClamping) {
+    PatternID id = PatternID::Generate();
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternNode node(id, data, PatternType::ATOMIC);
+    node.IncrementAccessCount(20000);  // Exceeds max_access_count
+
+    FeatureExtractionConfig config;
+    config.include_confidence = false;
+    config.include_access_count = true;
+    config.max_access_count = 10000;
+
+    auto features = ExtractFeatures(node, config);
+
+    // base(1) + access(1) = 2
+    ASSERT_EQ(features.size(), 2u);
+
+    // Should be clamped to 1.0
+    EXPECT_NEAR(features[1], 1.0f, kTolerance);
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesConfidenceClamping) {
+    PatternID id = PatternID::Generate();
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternNode node(id, data, PatternType::ATOMIC);
+    // Manually set confidence beyond normal range (shouldn't happen, but test robustness)
+    node.SetConfidenceScore(1.5f);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = false;
+
+    auto features = ExtractFeatures(node, config);
+
+    // Should be clamped to 1.0
+    EXPECT_LE(features[1], 1.0f);
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesNoMetadata) {
+    PatternID id = PatternID::Generate();
+    std::vector<float> base_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+    PatternData data = PatternData::FromFeatures(
+        FeatureVector(base_data),
+        DataModality::NUMERIC
+    );
+
+    PatternNode node(id, data, PatternType::ATOMIC);
+    node.SetConfidenceScore(0.9f);
+    node.IncrementAccessCount(500);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = false;
+    config.include_access_count = false;
+    config.include_age = false;
+    config.include_type = false;
+
+    auto features = ExtractFeatures(node, config);
+
+    // Only base features
+    ASSERT_EQ(features.size(), 5u);
+
+    // All metadata should be excluded
+    for (size_t i = 0; i < features.size(); ++i) {
+        EXPECT_NEAR(features[i], base_data[i], kTolerance);
+    }
+}
+
+TEST_F(AttentionUtilsTest, ExtractFeaturesConsistentDimensions) {
+    // Create two different patterns
+    PatternID id1 = PatternID::Generate();
+    PatternID id2 = PatternID::Generate();
+
+    PatternData data1 = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{1.0f, 2.0f, 3.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternData data2 = PatternData::FromFeatures(
+        FeatureVector(std::vector<float>{4.0f, 5.0f, 6.0f}),
+        DataModality::NUMERIC
+    );
+
+    PatternNode node1(id1, data1, PatternType::ATOMIC);
+    PatternNode node2(id2, data2, PatternType::COMPOSITE);
+
+    node1.SetConfidenceScore(0.3f);
+    node2.SetConfidenceScore(0.8f);
+
+    FeatureExtractionConfig config;
+    config.include_confidence = true;
+    config.include_access_count = true;
+    config.include_type = true;
+
+    auto features1 = ExtractFeatures(node1, config);
+    auto features2 = ExtractFeatures(node2, config);
+
+    // Both should have same dimensionality
+    EXPECT_EQ(features1.size(), features2.size());
+
+    // base(3) + confidence(1) + access(1) + type(3) = 8
+    EXPECT_EQ(features1.size(), 8u);
 }
 
 // Main function

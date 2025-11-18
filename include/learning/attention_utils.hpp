@@ -19,8 +19,16 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <cstdint>
 
 namespace dpan {
+
+// Forward declarations
+class PatternNode;
+class PatternDatabase;
+class PatternID;
+enum class PatternType : uint8_t;
+
 namespace attention {
 
 /// Apply softmax normalization to convert scores to probability distribution
@@ -305,6 +313,116 @@ bool IsValid(float value);
 ///   float safe = SafeDivide(10.0, 0.0, 1.0);  // safe = 1.0 (fallback)
 /// @endcode
 float SafeDivide(float numerator, float denominator, float fallback = 0.0f);
+
+// ============================================================================
+// Feature Extraction
+// ============================================================================
+
+/// Configuration for feature extraction from patterns
+struct FeatureExtractionConfig {
+    /// Include pattern confidence as a feature
+    bool include_confidence = true;
+
+    /// Include normalized access count as a feature
+    bool include_access_count = true;
+
+    /// Include pattern age (time since creation) as a feature
+    bool include_age = false;
+
+    /// Include pattern type encoding as features
+    bool include_type = false;
+
+    /// Maximum access count for normalization (counts above this are clamped)
+    uint32_t max_access_count = 10000;
+
+    /// Maximum age in seconds for normalization
+    float max_age_seconds = 86400.0f;  // 24 hours
+};
+
+/// Extract feature vector from PatternNode for attention computation
+///
+/// Creates a unified feature representation suitable for attention mechanisms.
+/// The feature vector combines:
+/// 1. Base features from the pattern's data (always included)
+/// 2. Optional metadata features (confidence, access count, age, type)
+///
+/// **Feature Vector Structure:**
+/// - [0..N-1]: Base pattern features from PatternData
+/// - [N]: Confidence score (if include_confidence = true)
+/// - [N+1]: Normalized access count (if include_access_count = true)
+/// - [N+2]: Normalized age (if include_age = true)
+/// - [N+3..N+5]: One-hot pattern type encoding (if include_type = true)
+///   - [N+3]: 1.0 if ATOMIC, 0.0 otherwise
+///   - [N+4]: 1.0 if COMPOSITE, 0.0 otherwise
+///   - [N+5]: 1.0 if META, 0.0 otherwise
+///
+/// **Normalization:**
+/// - Confidence: Already in [0, 1]
+/// - Access count: count / max_access_count, clamped to [0, 1]
+/// - Age: age_seconds / max_age_seconds, clamped to [0, 1]
+/// - Type: One-hot encoding (exactly one dimension = 1.0)
+///
+/// @param node Pattern node to extract features from
+/// @param config Feature extraction configuration
+/// @return Feature vector suitable for attention computation
+///
+/// @note If pattern data is empty, returns metadata features only
+/// @note All patterns get consistent feature dimensionality with same config
+/// @note Thread-safe (reads node data only)
+///
+/// Example:
+/// @code
+///   FeatureExtractionConfig config;
+///   config.include_confidence = true;
+///   config.include_access_count = true;
+///
+///   auto features = ExtractFeatures(pattern_node, config);
+///   // features = [base_features..., confidence, normalized_access_count]
+/// @endcode
+std::vector<float> ExtractFeatures(
+    const PatternNode& node,
+    const FeatureExtractionConfig& config = {}
+);
+
+/// Extract features from a pattern by ID
+///
+/// Convenience overload that retrieves the pattern from database first.
+///
+/// @param pattern_id ID of pattern to extract features from
+/// @param db Pattern database
+/// @param config Feature extraction configuration
+/// @return Feature vector, or empty vector if pattern not found
+///
+/// @note Returns empty vector if pattern doesn't exist in database
+std::vector<float> ExtractFeatures(
+    PatternID pattern_id,
+    PatternDatabase* db,
+    const FeatureExtractionConfig& config = {}
+);
+
+/// Compute feature dimensionality for a given configuration
+///
+/// Calculates the expected feature vector size given a base dimension
+/// and feature extraction configuration.
+///
+/// @param base_dimension Dimension of base pattern features
+/// @param config Feature extraction configuration
+/// @return Total feature vector dimension
+///
+/// Example:
+/// @code
+///   size_t base_dim = 128;
+///   FeatureExtractionConfig config;
+///   config.include_confidence = true;
+///   config.include_access_count = true;
+///
+///   size_t total_dim = GetFeatureDimension(base_dim, config);
+///   // total_dim = 128 + 1 + 1 = 130
+/// @endcode
+size_t GetFeatureDimension(
+    size_t base_dimension,
+    const FeatureExtractionConfig& config
+);
 
 // ============================================================================
 // Template Implementations

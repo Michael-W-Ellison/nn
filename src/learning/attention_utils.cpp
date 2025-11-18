@@ -8,6 +8,9 @@
 // - Optimized for performance with minimal allocations
 
 #include "learning/attention_utils.hpp"
+#include "core/pattern_node.hpp"
+#include "core/pattern_data.hpp"
+#include "storage/pattern_database.hpp"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -261,6 +264,118 @@ float SafeDivide(float numerator, float denominator, float fallback) {
     }
 
     return result;
+}
+
+// ============================================================================
+// Feature Extraction
+// ============================================================================
+
+/// Extract features from PatternNode
+std::vector<float> ExtractFeatures(
+    const PatternNode& node,
+    const FeatureExtractionConfig& config) {
+
+    std::vector<float> features;
+
+    // 1. Extract base features from pattern data
+    const auto& pattern_data = node.GetData();
+    auto base_features = pattern_data.GetFeatures();
+
+    // Copy base features to result
+    const auto& base_data = base_features.Data();
+    features.reserve(
+        base_data.size() +
+        (config.include_confidence ? 1 : 0) +
+        (config.include_access_count ? 1 : 0) +
+        (config.include_age ? 1 : 0) +
+        (config.include_type ? 3 : 0)
+    );
+
+    features.insert(features.end(), base_data.begin(), base_data.end());
+
+    // 2. Add confidence score if requested
+    if (config.include_confidence) {
+        float confidence = node.GetConfidenceScore();
+        // Confidence should already be in [0, 1] but clamp to be safe
+        features.push_back(Clamp(confidence, 0.0f, 1.0f));
+    }
+
+    // 3. Add normalized access count if requested
+    if (config.include_access_count) {
+        uint32_t access_count = node.GetAccessCount();
+        float normalized_count = static_cast<float>(access_count) /
+                                static_cast<float>(config.max_access_count);
+        // Clamp to [0, 1]
+        features.push_back(Clamp(normalized_count, 0.0f, 1.0f));
+    }
+
+    // 4. Add normalized age if requested
+    if (config.include_age) {
+        auto age = node.GetAge();
+        // Convert microseconds to seconds
+        float age_seconds = static_cast<float>(age.count()) / 1000000.0f;
+        float normalized_age = age_seconds / config.max_age_seconds;
+        // Clamp to [0, 1]
+        features.push_back(Clamp(normalized_age, 0.0f, 1.0f));
+    }
+
+    // 5. Add pattern type encoding if requested (one-hot)
+    if (config.include_type) {
+        PatternType type = node.GetType();
+
+        // One-hot encoding: [ATOMIC, COMPOSITE, META]
+        features.push_back(type == PatternType::ATOMIC ? 1.0f : 0.0f);
+        features.push_back(type == PatternType::COMPOSITE ? 1.0f : 0.0f);
+        features.push_back(type == PatternType::META ? 1.0f : 0.0f);
+    }
+
+    return features;
+}
+
+/// Extract features from pattern by ID
+std::vector<float> ExtractFeatures(
+    PatternID pattern_id,
+    PatternDatabase* db,
+    const FeatureExtractionConfig& config) {
+
+    if (!db) {
+        return {};
+    }
+
+    // Retrieve pattern from database
+    auto pattern_opt = db->Retrieve(pattern_id);
+    if (!pattern_opt) {
+        return {};  // Pattern not found
+    }
+
+    // Extract features from retrieved pattern
+    return ExtractFeatures(*pattern_opt, config);
+}
+
+/// Compute feature dimensionality
+size_t GetFeatureDimension(
+    size_t base_dimension,
+    const FeatureExtractionConfig& config) {
+
+    size_t total = base_dimension;
+
+    if (config.include_confidence) {
+        total += 1;
+    }
+
+    if (config.include_access_count) {
+        total += 1;
+    }
+
+    if (config.include_age) {
+        total += 1;
+    }
+
+    if (config.include_type) {
+        total += 3;  // One-hot encoding for 3 pattern types
+    }
+
+    return total;
 }
 
 } // namespace attention
