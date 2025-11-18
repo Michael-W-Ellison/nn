@@ -10,9 +10,7 @@
 // - Pattern inspection and statistics
 // - Session persistence
 
-#include "core/pattern_engine.hpp"
-#include "association/association_learning_system.hpp"
-#include "storage/persistent_backend.hpp"
+#include "dpan_cli.hpp"
 #include "storage/memory_backend.hpp"
 #include <iostream>
 #include <string>
@@ -21,100 +19,99 @@
 #include <vector>
 #include <algorithm>
 #include <iomanip>
-#include <map>
 #include <filesystem>
 #include <chrono>
 #include <thread>
 
-using namespace dpan;
+namespace dpan {
 
-/// CLI State and Configuration
-class DPANCli {
-public:
-    DPANCli() {
-        InitializeEngine();
-        InitializeAssociations();
-    }
+DPANCli::DPANCli() {
+    InitializeEngine();
+    InitializeAssociations();
+}
 
-    void Run() {
-        PrintWelcome();
+void DPANCli::Run() {
+    PrintWelcome();
 
-        std::string line;
-        while (running_) {
-            std::cout << prompt_;
-            std::getline(std::cin, line);
+    std::string line;
+    while (running_) {
+        std::cout << prompt_;
+        std::getline(std::cin, line);
 
-            if (std::cin.eof() || line == "exit" || line == "quit") {
-                break;
-            }
-
-            ProcessCommand(line);
+        if (std::cin.eof() || line == "exit" || line == "quit") {
+            break;
         }
 
-        Shutdown();
+        ProcessCommand(line);
     }
 
-private:
-    // Engine and system state
-    std::unique_ptr<PatternEngine> engine_;
-    std::unique_ptr<AssociationLearningSystem> assoc_system_;
-    std::shared_ptr<PersistentBackend> storage_;
+    Shutdown();
+}
 
-    bool running_ = true;
-    bool active_learning_mode_ = false;
-    bool verbose_ = false;
-    std::string prompt_ = "dpan> ";
-    std::string session_file_ = "dpan_session.db";
-
-    // Learning state
-    size_t total_inputs_ = 0;
-    size_t patterns_learned_ = 0;
-    std::vector<PatternID> conversation_history_;
-    std::map<std::string, PatternID> text_to_pattern_;
-    std::map<PatternID, std::string> pattern_to_text_;
-
-    void InitializeEngine() {
-        // Use persistent storage for learning sessions
-        PersistentBackend::Config storage_config;
-        storage_config.db_path = session_file_;
-        storage_ = std::make_shared<PersistentBackend>(storage_config);
-
-        PatternEngine::Config engine_config;
-        engine_config.similarity_metric = "context";
-        engine_config.enable_auto_refinement = true;
-        engine_config.enable_indexing = true;
-
-        // Configure for text/sequence learning
-        engine_config.extraction_config.modality = DataModality::TEXT;
-        engine_config.extraction_config.min_pattern_size = 1;
-        engine_config.extraction_config.max_pattern_size = 1000;
-        engine_config.extraction_config.feature_dimension = 64;
-
-        // Lower thresholds for better learning
-        engine_config.matching_config.similarity_threshold = 0.60f;
-        engine_config.matching_config.strong_match_threshold = 0.75f;
-
-        engine_ = std::make_unique<PatternEngine>(engine_config);
+std::optional<PatternID> DPANCli::GetPatternForText(const std::string& text) const {
+    auto it = text_to_pattern_.find(text);
+    if (it != text_to_pattern_.end()) {
+        return it->second;
     }
+    return std::nullopt;
+}
 
-    void InitializeAssociations() {
-        AssociationLearningSystem::Config assoc_config;
-
-        // Configure for conversation learning
-        assoc_config.co_occurrence.window_size = std::chrono::seconds(30);
-
-        assoc_config.formation.min_co_occurrences = 2;
-        assoc_config.formation.initial_strength = 0.3f;
-
-        assoc_config.competition.competition_factor = 0.3f;
-
-        assoc_config.enable_auto_maintenance = true;
-        assoc_config.prune_threshold = 0.1f;
-
-        assoc_system_ = std::make_unique<AssociationLearningSystem>(assoc_config);
+std::optional<std::string> DPANCli::GetTextForPattern(PatternID pattern_id) const {
+    auto it = pattern_to_text_.find(pattern_id);
+    if (it != pattern_to_text_.end()) {
+        return it->second;
     }
+    return std::nullopt;
+}
 
-    void PrintWelcome() {
+void DPANCli::InitializeClean() {
+    InitializeEngine();
+    InitializeAssociations();
+    // Don't load previous session
+}
+
+void DPANCli::InitializeEngine() {
+    // Use persistent storage for learning sessions
+    PersistentBackend::Config storage_config;
+    storage_config.db_path = session_file_;
+    storage_ = std::make_shared<PersistentBackend>(storage_config);
+
+    PatternEngine::Config engine_config;
+    engine_config.similarity_metric = "context";
+    engine_config.enable_auto_refinement = true;
+    engine_config.enable_indexing = true;
+
+    // Configure for text/sequence learning
+    engine_config.extraction_config.modality = DataModality::TEXT;
+    engine_config.extraction_config.min_pattern_size = 1;
+    engine_config.extraction_config.max_pattern_size = 1000;
+    engine_config.extraction_config.feature_dimension = 64;
+
+    // Lower thresholds for better learning
+    engine_config.matching_config.similarity_threshold = 0.60f;
+    engine_config.matching_config.strong_match_threshold = 0.75f;
+
+    engine_ = std::make_unique<PatternEngine>(engine_config);
+}
+
+void DPANCli::InitializeAssociations() {
+    AssociationLearningSystem::Config assoc_config;
+
+    // Configure for conversation learning
+    assoc_config.co_occurrence.window_size = std::chrono::seconds(30);
+
+    assoc_config.formation.min_co_occurrences = 2;
+    assoc_config.formation.initial_strength = 0.3f;
+
+    assoc_config.competition.competition_factor = 0.3f;
+
+    assoc_config.enable_auto_maintenance = true;
+    assoc_config.prune_threshold = 0.1f;
+
+    assoc_system_ = std::make_unique<AssociationLearningSystem>(assoc_config);
+}
+
+void DPANCli::PrintWelcome() {
         std::cout << R"(
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
@@ -129,10 +126,10 @@ Type 'help' for available commands, or just start talking!
 The system will learn from everything you say.
 
 )";
-        LoadSessionIfExists();
-    }
+    LoadSessionIfExists();
+}
 
-    void ProcessCommand(const std::string& input) {
+void DPANCli::ProcessCommand(const std::string& input) {
         if (input.empty()) return;
 
         // Check if it's a command (starts with /)
@@ -144,7 +141,7 @@ The system will learn from everything you say.
         }
     }
 
-    void HandleCommand(const std::string& cmd) {
+void DPANCli::HandleCommand(const std::string& cmd) {
         std::istringstream iss(cmd);
         std::string command;
         iss >> command;
@@ -184,7 +181,7 @@ The system will learn from everything you say.
         }
     }
 
-    void HandleConversation(const std::string& text) {
+void DPANCli::HandleConversation(const std::string& text) {
         total_inputs_++;
 
         if (verbose_) {
@@ -242,7 +239,7 @@ The system will learn from everything you say.
         }
     }
 
-    void GenerateResponse(PatternID input_pattern) {
+void DPANCli::GenerateResponse(PatternID input_pattern) {
         // Use associations to predict next patterns
         auto predictions = assoc_system_->Predict(input_pattern, 3);
 
@@ -285,7 +282,7 @@ The system will learn from everything you say.
         }
     }
 
-    bool ShouldRequestMoreData(const PatternEngine::ProcessResult& result) {
+bool DPANCli::ShouldRequestMoreData(const PatternEngine::ProcessResult& result) {
         // Request more data if:
         // 1. No patterns were created or activated
         // 2. Low confidence matches
@@ -305,12 +302,12 @@ The system will learn from everything you say.
         return false;
     }
 
-    void RequestMoreData(const std::string& context) {
+void DPANCli::RequestMoreData(const std::string& context) {
         std::cout << "\n[ACTIVE LEARNING] I'm not confident about that. ";
         std::cout << "Can you tell me more or rephrase?\n";
     }
 
-    void LearnFromFile(const std::string& filepath) {
+void DPANCli::LearnFromFile(const std::string& filepath) {
         if (!std::filesystem::exists(filepath)) {
             std::cout << "Error: File not found: " << filepath << "\n";
             return;
@@ -344,7 +341,7 @@ The system will learn from everything you say.
         std::cout << "  Patterns created: " << patterns_learned_ << "\n";
     }
 
-    void ShowHelp() {
+void DPANCli::ShowHelp() {
         std::cout << R"(
 Available Commands:
 ===================
@@ -382,7 +379,7 @@ Examples:
 )";
     }
 
-    void ShowStatistics() {
+void DPANCli::ShowStatistics() {
         auto stats = engine_->GetStatistics();
         auto storage_stats = storage_->GetStats();
 
@@ -418,7 +415,7 @@ Examples:
         std::cout << "  Active learning: " << (active_learning_mode_ ? "ON" : "OFF") << "\n\n";
     }
 
-    void ShowPatterns() {
+void DPANCli::ShowPatterns() {
         std::cout << "\nLearned Patterns (text mappings):\n";
         std::cout << "================================\n\n";
 
@@ -458,7 +455,7 @@ Examples:
         }
     }
 
-    void ShowAssociations() {
+void DPANCli::ShowAssociations() {
         auto stats = assoc_system_->GetStatistics();
         const auto& matrix = assoc_system_->GetAssociationMatrix();
 
@@ -511,7 +508,7 @@ Examples:
         }
     }
 
-    void PredictNext(const std::string& text) {
+void DPANCli::PredictNext(const std::string& text) {
         std::string query = text;
         // Trim leading space if present
         if (!query.empty() && query[0] == ' ') {
@@ -547,7 +544,7 @@ Examples:
         }
     }
 
-    void ToggleActiveLearning() {
+void DPANCli::ToggleActiveLearning() {
         active_learning_mode_ = !active_learning_mode_;
         std::cout << "Active learning mode: "
                  << (active_learning_mode_ ? "ON" : "OFF") << "\n";
@@ -557,7 +554,7 @@ Examples:
         }
     }
 
-    void SaveSession() {
+void DPANCli::SaveSession() {
         std::cout << "Saving session to " << session_file_ << "...\n";
 
         // Storage is already persistent, but save associations
@@ -587,11 +584,11 @@ Examples:
         std::cout << "✓ Saved " << count << " text mappings\n";
     }
 
-    void LoadSession() {
+void DPANCli::LoadSession() {
         LoadSessionIfExists();
     }
 
-    void LoadSessionIfExists() {
+void DPANCli::LoadSessionIfExists() {
         if (!std::filesystem::exists(session_file_)) {
             std::cout << "No previous session found. Starting fresh.\n";
             return;
@@ -637,7 +634,7 @@ Examples:
         std::cout << "Session loaded: " << stats.total_patterns << " patterns\n\n";
     }
 
-    void ResetSession() {
+void DPANCli::ResetSession() {
         std::cout << "Are you sure you want to reset? This will erase all learning. (y/N): ";
         std::string confirm;
         std::getline(std::cin, confirm);
@@ -667,7 +664,7 @@ Examples:
         std::cout << "✓ Session reset. Starting fresh.\n";
     }
 
-    void Shutdown() {
+void DPANCli::Shutdown() {
         std::cout << "\nShutting down...\n";
         SaveSession();
 
@@ -678,16 +675,18 @@ Examples:
         std::cout << "\nThank you for teaching me! Goodbye.\n";
     }
 
-    std::vector<uint8_t> TextToBytes(const std::string& text) {
-        return std::vector<uint8_t>(text.begin(), text.end());
-    }
-};
+std::vector<uint8_t> DPANCli::TextToBytes(const std::string& text) {
+    return std::vector<uint8_t>(text.begin(), text.end());
+}
 
+} // namespace dpan
+
+#ifndef DPAN_CLI_TEST_BUILD
 int main(int argc, char** argv) {
     std::cout << "Initializing DPAN...\n";
 
     try {
-        DPANCli cli;
+        dpan::DPANCli cli;
         cli.Run();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << "\n";
@@ -696,3 +695,4 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+#endif

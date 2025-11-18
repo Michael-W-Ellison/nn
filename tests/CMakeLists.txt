@@ -10,6 +10,7 @@ add_subdirectory(association)
 add_subdirectory(memory)
 add_subdirectory(integration)
 add_subdirectory(benchmarks)
+add_subdirectory(cli)
 
 # Edge case tests (added for TDD analysis)
 add_executable(edge_case_tests edge_case_tests.cpp)
