@@ -32,8 +32,57 @@ void PatternID::Serialize(std::ostream& out) const {
 }
 
 PatternID PatternID::Deserialize(std::istream& in) {
-    ValueType value;
+    ValueType value = kInvalidID;
     in.read(reinterpret_cast<char*>(&value), sizeof(value));
+    if (!in) {
+        return PatternID();
+    }
+    ReserveThrough(value);
+    return PatternID(value);
+}
+
+void PatternID::ReserveThrough(ValueType id) {
+    if (id == kInvalidID) {
+        return;
+    }
+    ValueType next = next_id_.load(std::memory_order_relaxed);
+    while (next <= id &&
+           !next_id_.compare_exchange_weak(next, id + 1, std::memory_order_relaxed)) {
+    }
+}
+
+std::optional<PatternID> PatternID::FromString(const std::string& text) {
+    std::string hex = text;
+    const std::string prefix = "PatternID(";
+    if (hex.compare(0, prefix.size(), prefix) == 0) {
+        if (hex.size() <= prefix.size() + 1 || hex.back() != ')') {
+            return std::nullopt;
+        }
+        hex = hex.substr(prefix.size(), hex.size() - prefix.size() - 1);
+    }
+    if (hex.empty() || hex.size() > 16) {
+        return std::nullopt;
+    }
+
+    ValueType value = 0;
+    for (char c : hex) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else {
+            return std::nullopt;
+        }
+        value = (value << 4) | static_cast<ValueType>(digit);
+    }
+
+    if (value == kInvalidID) {
+        return std::nullopt;
+    }
+    ReserveThrough(value);
     return PatternID(value);
 }
 

@@ -4,6 +4,7 @@
 #include "core/types.hpp"
 #include "association/association_matrix.hpp"  // For PatternPairHash
 #include <deque>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,7 +19,7 @@ namespace dpan {
 /// - Co-occurrence probabilities
 /// - Chi-squared significance testing
 ///
-/// Thread-safety: Not thread-safe. External synchronization required.
+/// Thread-safety: All public methods are thread-safe (internal shared_mutex).
 class CoOccurrenceTracker {
 public:
     /// Configuration for co-occurrence tracking
@@ -100,16 +101,16 @@ public:
     // ========================================================================
 
     /// Get total number of recorded activations
-    size_t GetActivationCount() const { return activations_.size(); }
+    size_t GetActivationCount() const;
 
     /// Get number of unique patterns seen
-    size_t GetUniquePatternCount() const { return pattern_counts_.size(); }
+    size_t GetUniquePatternCount() const;
 
     /// Get total number of windows processed
-    uint64_t GetTotalWindows() const { return total_windows_; }
+    uint64_t GetTotalWindows() const;
 
     /// Get number of unique co-occurring pairs
-    size_t GetCoOccurrencePairCount() const { return co_occurrence_counts_.size(); }
+    size_t GetCoOccurrencePairCount() const;
 
     /// Get all tracked patterns (patterns that have been activated)
     /// @return Vector of pattern IDs that have been recorded
@@ -130,12 +131,37 @@ private:
     // Total number of windows processed
     uint64_t total_windows_{0};
 
-    // Helper methods
+    // Sliding window [latest_timestamp_ - window_size, latest_timestamp_]:
+    // activations_[window_begin_..] lie inside it, and window_counts_ holds
+    // the number of those activations per pattern (no zero entries).
+    std::unordered_map<PatternID, uint32_t> window_counts_;
+    size_t window_begin_{0};
+    Timestamp latest_timestamp_{};
+    bool has_latest_{false};
+
+    mutable std::shared_mutex mutex_;
+
+    // Helper methods (caller must hold mutex_)
     /// Get all patterns activated within time range
     std::vector<PatternID> GetPatternsInWindow(Timestamp start, Timestamp end) const;
 
     /// Update co-occurrence counts for patterns in same window
     void UpdateCoOccurrences(const std::vector<PatternID>& patterns_in_window);
+
+    /// Increment the co-occurrence count of an unordered pair
+    void IncrementPair(PatternID p1, PatternID p2);
+
+    /// Insert an activation keeping activations_ sorted and the window current
+    void InsertActivation(PatternID pattern, Timestamp timestamp);
+
+    /// Drop activations that fell out of the sliding window from window_counts_
+    void AdvanceWindow();
+
+    void DecrementWindowCount(PatternID pattern);
+
+    uint32_t GetCoOccurrenceCountUnlocked(PatternID p1, PatternID p2) const;
+    float GetChiSquaredUnlocked(PatternID p1, PatternID p2) const;
+    void PruneOldActivationsUnlocked(Timestamp cutoff_time);
 };
 
 } // namespace dpan

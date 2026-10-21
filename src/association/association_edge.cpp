@@ -32,7 +32,7 @@ AssociationEdge::AssociationEdge(AssociationEdge&& other) noexcept
       strength_(other.strength_.load(std::memory_order_relaxed)),
       co_occurrence_count_(other.co_occurrence_count_.load(std::memory_order_relaxed)),
       temporal_correlation_(other.temporal_correlation_.load(std::memory_order_relaxed)),
-      decay_rate_(other.decay_rate_),
+      decay_rate_(other.decay_rate_.load(std::memory_order_relaxed)),
       last_reinforcement_(other.last_reinforcement_.load(std::memory_order_relaxed)),
       context_profile_(std::move(other.context_profile_)),
       creation_time_(other.creation_time_)
@@ -49,7 +49,7 @@ AssociationEdge& AssociationEdge::operator=(AssociationEdge&& other) noexcept {
         strength_.store(other.strength_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         co_occurrence_count_.store(other.co_occurrence_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         temporal_correlation_.store(other.temporal_correlation_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        decay_rate_ = other.decay_rate_;
+        decay_rate_.store(other.decay_rate_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         last_reinforcement_.store(other.last_reinforcement_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         context_profile_ = std::move(other.context_profile_);
         creation_time_ = other.creation_time_;
@@ -104,7 +104,7 @@ void AssociationEdge::UpdateTemporalCorrelation(float new_observation, float lea
 // ============================================================================
 
 void AssociationEdge::SetDecayRate(float rate) {
-    decay_rate_ = std::max(0.0f, rate);
+    decay_rate_.store(std::max(0.0f, rate), std::memory_order_relaxed);
 }
 
 Timestamp AssociationEdge::GetLastReinforcement() const {
@@ -120,7 +120,7 @@ void AssociationEdge::RecordReinforcement() {
 void AssociationEdge::ApplyDecay(Timestamp::Duration elapsed_time) {
     // Exponential decay: s(t) = s(0) * exp(-d * t)
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed_time).count();
-    float decay_factor = std::exp(-decay_rate_ * seconds);
+    float decay_factor = std::exp(-decay_rate_.load(std::memory_order_relaxed) * seconds);
 
     float current = strength_.load(std::memory_order_relaxed);
     float decayed = current * decay_factor;
@@ -131,7 +131,7 @@ void AssociationEdge::ApplyDecay(Timestamp::Duration elapsed_time) {
 // Context Profile
 // ============================================================================
 
-const ContextVector& AssociationEdge::GetContextProfile() const {
+ContextVector AssociationEdge::GetContextProfile() const {
     std::lock_guard<std::mutex> lock(context_mutex_);
     return context_profile_;
 }
@@ -208,7 +208,8 @@ void AssociationEdge::Serialize(std::ostream& out) const {
     float temp_corr = temporal_correlation_.load(std::memory_order_relaxed);
     out.write(reinterpret_cast<const char*>(&temp_corr), sizeof(temp_corr));
 
-    out.write(reinterpret_cast<const char*>(&decay_rate_), sizeof(decay_rate_));
+    float decay_rate = decay_rate_.load(std::memory_order_relaxed);
+    out.write(reinterpret_cast<const char*>(&decay_rate), sizeof(decay_rate));
 
     uint64_t last_reinf = last_reinforcement_.load(std::memory_order_relaxed);
     out.write(reinterpret_cast<const char*>(&last_reinf), sizeof(last_reinf));
@@ -242,7 +243,9 @@ std::unique_ptr<AssociationEdge> AssociationEdge::Deserialize(std::istream& in) 
     in.read(reinterpret_cast<char*>(&temp_corr), sizeof(temp_corr));
     edge->temporal_correlation_.store(temp_corr, std::memory_order_relaxed);
 
-    in.read(reinterpret_cast<char*>(&edge->decay_rate_), sizeof(edge->decay_rate_));
+    float decay_rate;
+    in.read(reinterpret_cast<char*>(&decay_rate), sizeof(decay_rate));
+    edge->decay_rate_.store(decay_rate, std::memory_order_relaxed);
 
     uint64_t last_reinf;
     in.read(reinterpret_cast<char*>(&last_reinf), sizeof(last_reinf));
@@ -293,7 +296,7 @@ std::unique_ptr<AssociationEdge> AssociationEdge::Clone() const {
     cloned->temporal_correlation_.store(temporal_correlation_.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
     // Copy non-atomic values
-    cloned->decay_rate_ = decay_rate_;
+    cloned->decay_rate_.store(decay_rate_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     cloned->last_reinforcement_.store(last_reinforcement_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     cloned->creation_time_ = creation_time_;
 
@@ -302,6 +305,22 @@ std::unique_ptr<AssociationEdge> AssociationEdge::Clone() const {
     cloned->context_profile_ = context_profile_;
 
     return cloned;
+}
+
+void AssociationEdge::CopyStateFrom(const AssociationEdge& other) {
+    if (this == &other) {
+        return;
+    }
+
+    strength_.store(other.strength_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    co_occurrence_count_.store(other.co_occurrence_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temporal_correlation_.store(other.temporal_correlation_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    decay_rate_.store(other.decay_rate_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    last_reinforcement_.store(other.last_reinforcement_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    ContextVector context = other.GetContextProfile();
+    std::lock_guard<std::mutex> lock(context_mutex_);
+    context_profile_ = std::move(context);
 }
 
 // ============================================================================

@@ -64,6 +64,10 @@ public:
         std::string decay_function_type{"exponential"};
         float decay_constant{0.01f};
 
+        // Interference compares every pair of patterns, so it is limited to
+        // this many patterns per cycle (the most recently accessed)
+        size_t max_interference_patterns{2000};
+
         /**
          * @brief Validate configuration
          */
@@ -203,6 +207,28 @@ public:
     void ApplyForgetting();
 
     /**
+     * @brief Record an access to a pattern
+     *
+     * Access history drives utility scores (pruning, tier placement) and
+     * forgetting. Also counts as an operation for sleep consolidation.
+     */
+    void RecordPatternAccess(PatternID pattern, Timestamp timestamp = Timestamp::Now());
+
+    /**
+     * @brief Record an access to an association
+     */
+    void RecordAssociationAccess(PatternID source, PatternID target,
+                                 Timestamp timestamp = Timestamp::Now());
+
+    /**
+     * @brief Compute utility scores for all patterns in the database
+     *
+     * Uses recorded access statistics, each pattern's associations and its
+     * confidence score.
+     */
+    std::unordered_map<PatternID, float> ComputePatternUtilities() const;
+
+    /**
      * @brief Record an operation for activity monitoring
      *
      * Call this for significant operations (pattern access, etc.)
@@ -240,7 +266,16 @@ public:
     const UtilityCalculator& GetUtilityCalculator() const { return utility_calculator_; }
 
     /**
+     * @brief Get access tracker
+     */
+    AccessTracker& GetAccessTracker() { return access_tracker_; }
+    const AccessTracker& GetAccessTracker() const { return access_tracker_; }
+
+    /**
      * @brief Get tier manager
+     *
+     * The tier manager is created by Initialize(); tier transitions run once
+     * its tiers are set up with TierManager::Initialize().
      */
     TierManager& GetTierManager() { return *tier_manager_; }
     const TierManager& GetTierManager() const { return *tier_manager_; }
@@ -261,7 +296,10 @@ private:
     PatternDatabase* pattern_db_{nullptr};
     AssociationMatrix* assoc_matrix_{nullptr};
 
+    std::shared_ptr<SimilarityMetric> similarity_metric_;
+
     // Core subsystems
+    AccessTracker access_tracker_;
     UtilityCalculator utility_calculator_;
     std::unique_ptr<UtilityTracker> utility_tracker_;
     AdaptiveThresholdManager threshold_manager_;
@@ -285,6 +323,7 @@ private:
     Timestamp last_pruning_;
     Timestamp last_transition_;
     Timestamp last_consolidation_;
+    Timestamp last_forgetting_;
 
     // Helper methods
     void UpdateCachedStatistics();

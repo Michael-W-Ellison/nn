@@ -505,6 +505,7 @@ size_t TierManager::PerformTierTransitions(
         return 0;
     }
 
+    std::lock_guard<std::mutex> lock(transition_mutex_);
     size_t total_transitions = 0;
 
     // First enforce capacity limits
@@ -573,7 +574,10 @@ TierManager::TierStats TierManager::GetStats() const {
 
     stats.promotions_count = promotions_count_.load();
     stats.demotions_count = demotions_count_.load();
-    stats.last_transition = last_transition_;
+    {
+        std::lock_guard<std::mutex> lock(transition_mutex_);
+        stats.last_transition = last_transition_;
+    }
 
     return stats;
 }
@@ -608,7 +612,11 @@ void TierManager::StopBackgroundTransitions() {
         return;  // Not running
     }
 
-    running_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        running_.store(false);
+    }
+    wake_cv_.notify_all();
 
     if (background_thread_ && background_thread_->joinable()) {
         background_thread_->join();
@@ -621,26 +629,70 @@ bool TierManager::IsBackgroundRunning() const {
     return running_.load();
 }
 
+std::unordered_map<PatternID, float> TierManager::ComputeUtilities(
+    const UtilityCalculator& utility_calc,
+    const AccessTracker& access_tracker) {
+
+    std::vector<std::pair<PatternID, MemoryTier>> locations;
+    {
+        std::shared_lock<std::shared_mutex> lock(location_mutex_);
+        locations.assign(pattern_locations_.begin(), pattern_locations_.end());
+    }
+
+    std::unordered_map<PatternID, float> utilities;
+    utilities.reserve(locations.size());
+    const std::vector<AssociationEdge> no_associations;
+
+    for (const auto& [id, tier] : locations) {
+        IMemoryTier* source_tier = GetTier(tier);
+        if (!source_tier) {
+            continue;
+        }
+        auto pattern = source_tier->LoadPattern(id);
+        if (!pattern) {
+            continue;  // Removed concurrently
+        }
+        AccessStats stats = access_tracker.GetPatternStatsSnapshot(id).value_or(AccessStats{});
+        utilities[id] = utility_calc.CalculatePatternUtility(*pattern, stats, no_associations);
+    }
+
+    return utilities;
+}
+
+size_t TierManager::RunTransitionCycle(
+    const UtilityCalculator& utility_calc,
+    const AccessTracker& access_tracker) {
+
+    if (!IsInitialized()) {
+        return 0;
+    }
+    return PerformTierTransitions(ComputeUtilities(utility_calc, access_tracker));
+}
+
 void TierManager::BackgroundTransitionLoop(
     const UtilityCalculator* utility_calc,
     const AccessTracker* access_tracker) {
 
-    (void)utility_calc;      // TODO: Calculate utilities
-    (void)access_tracker;    // TODO: Get access stats
-
     while (running_.load()) {
-        // Sleep for interval
-        auto interval = std::chrono::duration<float>(config_.transition_interval_seconds);
-        auto interval_ms = std::chrono::duration_cast<std::chrono::milliseconds>(interval);
-        std::this_thread::sleep_for(interval_ms);
+        float interval_seconds;
+        {
+            std::lock_guard<std::mutex> lock(transition_mutex_);
+            interval_seconds = config_.transition_interval_seconds;
+        }
+        auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::duration<float>(interval_seconds));
+
+        // Sleep for the interval, waking early when stopped
+        {
+            std::unique_lock<std::mutex> lock(wake_mutex_);
+            wake_cv_.wait_for(lock, interval, [this] { return !running_.load(); });
+        }
 
         if (!running_.load()) {
             break;
         }
 
-        // TODO: Calculate utilities for all patterns
-        // TODO: Perform tier transitions
-        // For now, this is a placeholder
+        RunTransitionCycle(*utility_calc, *access_tracker);
     }
 }
 
@@ -653,6 +705,7 @@ void TierManager::SetConfig(const Config& config) {
         throw std::invalid_argument("Invalid TierManager configuration");
     }
 
+    std::lock_guard<std::mutex> lock(transition_mutex_);
     config_ = config;
 }
 

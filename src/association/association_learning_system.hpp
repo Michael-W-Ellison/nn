@@ -377,17 +377,29 @@ private:
     mutable Statistics stats_;
     mutable std::mutex stats_mutex_;
 
-    // Maintenance timestamps
+    // Maintenance timestamps (protected by maintenance_mutex_, which also
+    // serializes maintenance operations)
     Timestamp last_decay_;
     Timestamp last_competition_;
     Timestamp last_normalization_;
     Timestamp last_pruning_;
+    mutable std::mutex maintenance_mutex_;
+
+    // Serializes read-modify-write reinforcement of edges and access to
+    // reinforcement_mgr_ (whose statistics are not thread-safe)
+    mutable std::mutex reinforcement_mutex_;
 
     // Helper methods
     void UpdateActivationHistory(PatternID pattern, Timestamp timestamp);
-    void TrimActivationHistory();
+    void TrimActivationHistory(Timestamp::Duration window, size_t max_size);
     void UpdateStatistics() const;
     void CheckAutoMaintenance();
+
+    // Maintenance operations (caller must hold maintenance_mutex_)
+    void ApplyDecayLocked(Timestamp::Duration elapsed);
+    size_t ApplyCompetitionLocked();
+    size_t ApplyNormalizationLocked();
+    size_t PruneWeakAssociationsLocked(float min_strength);
 };
 
 } // namespace dpan

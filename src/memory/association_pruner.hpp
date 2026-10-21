@@ -225,6 +225,11 @@ private:
         const AssociationMatrix& assoc_matrix
     ) const;
 
+    /// Remove safe-to-prune, non-hub edges satisfying `matches`
+    /// (at most max_prune_batch)
+    template <typename Predicate>
+    size_t RemoveMatching(AssociationMatrix& assoc_matrix, Predicate matches);
+
     /// Perform BFS to find alternative path
     /// @param source Source pattern
     /// @param target Target pattern

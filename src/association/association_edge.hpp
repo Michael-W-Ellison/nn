@@ -114,7 +114,7 @@ public:
     // ========================================================================
 
     /// Get decay rate (strength loss per second)
-    float GetDecayRate() const { return decay_rate_; }
+    float GetDecayRate() const { return decay_rate_.load(std::memory_order_relaxed); }
 
     /// Set decay rate
     /// @param rate Decay rate (clamped to >= 0)
@@ -136,7 +136,7 @@ public:
     // ========================================================================
 
     /// Get context profile for this association
-    const ContextVector& GetContextProfile() const;
+    ContextVector GetContextProfile() const;
 
     /// Set context profile
     /// @param context New context profile
@@ -190,6 +190,12 @@ public:
     /// @return Unique pointer to cloned edge
     std::unique_ptr<AssociationEdge> Clone() const;
 
+    /// Copy strength, statistics, decay rate, reinforcement time and context
+    /// profile from another edge, keeping this object's identity (source,
+    /// target, type, creation time). Lets owners update an edge in place so
+    /// outstanding pointers to it stay valid.
+    void CopyStateFrom(const AssociationEdge& other);
+
     // ========================================================================
     // Comparison Operators
     // ========================================================================
@@ -214,7 +220,7 @@ private:
     std::atomic<float> temporal_correlation_{0.0f};
 
     // Decay parameters
-    float decay_rate_{0.01f};  // Strength loss per second
+    std::atomic<float> decay_rate_{0.01f};  // Strength loss per second
     mutable std::atomic<uint64_t> last_reinforcement_{0};  // Timestamp in microseconds
 
     // Context (protected by mutex)

@@ -1,6 +1,10 @@
 # Tests CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 
+# Included here so every test subdirectory inherits the module's variables
+# (gtest_discover_tests needs them in the calling directory's scope)
+include(GoogleTest)
+
 # Test subdirectories
 add_subdirectory(core)
 add_subdirectory(storage)

@@ -24,8 +24,11 @@ target_include_directories(dpan_memory PUBLIC
     ${CMAKE_SOURCE_DIR}/src
 )
 
+find_package(ZLIB REQUIRED)
+
 target_link_libraries(dpan_memory PUBLIC
     dpan_core
     dpan_association
     dpan_similarity
+    ZLIB::ZLIB
 )

@@ -123,19 +123,15 @@ void ReinforcementManager::ApplyDecayAll(
     Timestamp::Duration elapsed,
     bool auto_prune
 ) {
-    // We need to iterate over all patterns - use a workaround since there's no GetAllPatterns()
-    // We'll collect patterns from the outgoing index by trying GetOutgoingAssociations
-    // This is a limitation - we'd need to modify AssociationMatrix to expose all patterns
-    // For now, we'll use the existing ApplyDecayAll method from AssociationMatrix
-    // and then handle pruning separately if needed
-
-    // Use the matrix's built-in decay
-    matrix.ApplyDecayAll(elapsed);
-
-    // Count decays (approximate - we don't know exact count without iterating)
-    size_t approx_edges = matrix.GetAssociationCount();
-    for (size_t i = 0; i < approx_edges; ++i) {
-        RecordDecay();
+    // Decay every edge with this manager's decay rate, as ApplyDecay() does
+    for (const auto& [source, target] : matrix.GetAllAssociationKeys()) {
+        const auto* edge = matrix.GetAssociation(source, target);
+        if (!edge) {
+            continue;
+        }
+        auto updated = edge->Clone();
+        ApplyDecay(*updated, elapsed);
+        matrix.UpdateAssociation(source, target, *updated);
     }
 
     // If auto-pruning is enabled, prune weak associations
@@ -214,23 +210,35 @@ bool ReinforcementManager::ShouldPrune(const AssociationEdge& edge) const {
     return edge.GetStrength() < config_.prune_threshold;
 }
 
-size_t ReinforcementManager::CountPrunableEdges(const AssociationMatrix& /* matrix */) const {
-    // Note: This is a limitation of the current AssociationMatrix API
-    // Without a method to iterate over all edges, we cannot efficiently count prunable edges
-    // This would require AssociationMatrix to expose a GetAllEdges() or similar method
-    // For now, return 0 as a conservative estimate
-    // TODO: Update when AssociationMatrix provides iteration over all edges
-    return 0;
+size_t ReinforcementManager::CountPrunableEdges(const AssociationMatrix& matrix) const {
+    size_t count = 0;
+    for (const auto& [source, target] : matrix.GetAllAssociationKeys()) {
+        const auto* edge = matrix.GetAssociation(source, target);
+        if (edge && ShouldPrune(*edge)) {
+            count++;
+        }
+    }
+    return count;
 }
 
-size_t ReinforcementManager::PruneWeakAssociations(AssociationMatrix& /* matrix */) {
-    // Note: This is a limitation of the current AssociationMatrix API
-    // Without a method to iterate over all edges, we cannot efficiently prune weak associations
-    // This would require AssociationMatrix to expose a GetAllEdges() or similar method
-    // For now, return 0
-    // TODO: Update when AssociationMatrix provides iteration over all edges
-    RecordPruned(0);
-    return 0;
+size_t ReinforcementManager::PruneWeakAssociations(AssociationMatrix& matrix) {
+    std::vector<std::pair<PatternID, PatternID>> to_prune;
+    for (const auto& [source, target] : matrix.GetAllAssociationKeys()) {
+        const auto* edge = matrix.GetAssociation(source, target);
+        if (edge && ShouldPrune(*edge)) {
+            to_prune.emplace_back(source, target);
+        }
+    }
+
+    size_t pruned = 0;
+    for (const auto& [source, target] : to_prune) {
+        if (matrix.RemoveAssociation(source, target)) {
+            pruned++;
+        }
+    }
+
+    RecordPruned(pruned);
+    return pruned;
 }
 
 // ============================================================================

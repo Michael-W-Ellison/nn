@@ -57,7 +57,7 @@ std::vector<PatternMatcher::Match> PatternMatcher::FindMatches(const PatternData
     std::vector<Match> matches;
 
     // Get all pattern IDs from database
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
     // Compute similarity for each pattern
     for (const auto& pattern_id : all_ids) {

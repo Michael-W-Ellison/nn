@@ -32,6 +32,7 @@
 #include "memory/utility_calculator.hpp"
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <chrono>
 
@@ -177,9 +178,12 @@ public:
     /// @param pattern Pattern to find merge candidate for
     /// @param pattern_db Pattern database to search
     /// @return Pattern ID of merge candidate, or nullopt if none found
+    /// @param exclude Patterns that must not be chosen (e.g. other prune
+    ///        candidates)
     std::optional<PatternID> FindMergeCandidate(
         const PatternNode& pattern,
-        const PatternDatabase& pattern_db
+        PatternDatabase& pattern_db,
+        const std::unordered_set<PatternID>& exclude = {}
     ) const;
 
     /// Merge two patterns

@@ -88,7 +88,7 @@ std::vector<SearchResult> SimilaritySearch::SearchImpl(
     std::priority_queue<SearchResult> top_k;
 
     // Get all pattern IDs
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
     last_stats_.patterns_evaluated = all_ids.size();
 
     for (const auto& pattern_id : all_ids) {
@@ -189,7 +189,7 @@ void ApproximateSearch::BuildIndex() {
     }
 
     // Get all patterns and assign to buckets
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
     for (const auto& pattern_id : all_ids) {
         auto node_opt = database_->Retrieve(pattern_id);
@@ -332,7 +332,7 @@ std::vector<SearchResult> MultiMetricSearch::Search(const PatternData& query,
     // Compute combined similarity for all patterns
     std::priority_queue<SearchResult> top_k;
 
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
     for (const auto& pattern_id : all_ids) {
         auto node_opt = database_->Retrieve(pattern_id);

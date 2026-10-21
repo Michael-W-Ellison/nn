@@ -2,19 +2,80 @@
 //
 // Archive Tier Implementation (Compressed long-term storage)
 //
-// Uses file-based storage with compression for long-term archival.
+// Uses file-based storage with zlib compression for long-term archival.
 // Target latency: <10ms
 //
-// NOTE: Compression not yet implemented - placeholder for future enhancement
+// File format: "DPZ1" magic, uint64 uncompressed size, zlib stream.
+// Files without the magic are read as uncompressed (pre-compression format).
 
 #include "memory/memory_tier.hpp"
+#include <zlib.h>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <iterator>
 #include <shared_mutex>
+#include <sstream>
 #include <unordered_set>
 
 namespace dpan {
 namespace fs = std::filesystem;
+
+namespace {
+
+constexpr char kArchiveMagic[4] = {'D', 'P', 'Z', '1'};
+
+/// Compress serialized bytes and write them to `filepath`
+bool WriteCompressed(const fs::path& filepath, const std::string& raw) {
+    uLongf compressed_size = compressBound(static_cast<uLong>(raw.size()));
+    std::string compressed(compressed_size, '\0');
+    if (compress2(reinterpret_cast<Bytef*>(compressed.data()), &compressed_size,
+                  reinterpret_cast<const Bytef*>(raw.data()),
+                  static_cast<uLong>(raw.size()), Z_BEST_COMPRESSION) != Z_OK) {
+        return false;
+    }
+
+    std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    uint64_t raw_size = raw.size();
+    file.write(kArchiveMagic, sizeof(kArchiveMagic));
+    file.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
+    file.write(compressed.data(), static_cast<std::streamsize>(compressed_size));
+    return file.good();
+}
+
+/// Read `filepath` and return its decompressed bytes (std::nullopt on error)
+std::optional<std::string> ReadCompressed(const fs::path& filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    std::string contents((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+
+    constexpr size_t kHeaderSize = sizeof(kArchiveMagic) + sizeof(uint64_t);
+    if (contents.size() < kHeaderSize ||
+        std::memcmp(contents.data(), kArchiveMagic, sizeof(kArchiveMagic)) != 0) {
+        return contents;  // Uncompressed legacy file
+    }
+
+    uint64_t raw_size;
+    std::memcpy(&raw_size, contents.data() + sizeof(kArchiveMagic), sizeof(raw_size));
+
+    std::string raw(raw_size, '\0');
+    uLongf dest_size = static_cast<uLongf>(raw_size);
+    if (uncompress(reinterpret_cast<Bytef*>(raw.data()), &dest_size,
+                   reinterpret_cast<const Bytef*>(contents.data() + kHeaderSize),
+                   static_cast<uLong>(contents.size() - kHeaderSize)) != Z_OK ||
+        dest_size != raw_size) {
+        return std::nullopt;
+    }
+    return raw;
+}
+
+}  // namespace
 
 class ArchiveTier : public IMemoryTier {
 public:
@@ -33,13 +94,11 @@ public:
     bool StorePattern(const PatternNode& pattern) override {
         try {
             fs::path filepath = patterns_dir_ / (pattern.GetID().ToString() + ".arc");
-            std::ofstream file(filepath, std::ios::binary);
-            if (!file) {
+            std::ostringstream buffer(std::ios::binary);
+            pattern.Serialize(buffer);
+            if (!WriteCompressed(filepath, buffer.str())) {
                 return false;
             }
-
-            // TODO: Add compression here
-            pattern.Serialize(file);
 
             {
                 std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -60,13 +119,13 @@ public:
                 return std::nullopt;
             }
 
-            std::ifstream file(filepath, std::ios::binary);
-            if (!file) {
+            auto raw = ReadCompressed(filepath);
+            if (!raw) {
                 return std::nullopt;
             }
 
-            // TODO: Add decompression here
-            return PatternNode::Deserialize(file);
+            std::istringstream buffer(*raw, std::ios::binary);
+            return PatternNode::Deserialize(buffer);
         } catch (...) {
             return std::nullopt;
         }
@@ -104,13 +163,11 @@ public:
                                  edge.GetTarget().ToString() + ".arc";
             fs::path filepath = associations_dir_ / filename;
 
-            std::ofstream file(filepath, std::ios::binary);
-            if (!file) {
+            std::ostringstream buffer(std::ios::binary);
+            edge.Serialize(buffer);
+            if (!WriteCompressed(filepath, buffer.str())) {
                 return false;
             }
-
-            // TODO: Add compression here
-            edge.Serialize(file);
 
             {
                 std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -136,13 +193,13 @@ public:
                 return std::nullopt;
             }
 
-            std::ifstream file(filepath, std::ios::binary);
-            if (!file) {
+            auto raw = ReadCompressed(filepath);
+            if (!raw) {
                 return std::nullopt;
             }
 
-            // TODO: Add decompression here
-            auto edge_ptr = AssociationEdge::Deserialize(file);
+            std::istringstream buffer(*raw, std::ios::binary);
+            auto edge_ptr = AssociationEdge::Deserialize(buffer);
             if (edge_ptr) {
                 return std::move(*edge_ptr);
             }
@@ -312,34 +369,33 @@ private:
     mutable std::shared_mutex mutex_;
 
     void RebuildIndex() {
-        // TODO: Implement index rebuilding once PatternID::FromString() is available
-        // For now, indices are built incrementally as patterns are stored
+        // Recover indices from files written by previous instances
+        // (pattern files: "<id>.arc", association files: "<source>_<target>.arc")
         try {
-            // for (const auto& entry : fs::directory_iterator(patterns_dir_)) {
-            //     if (entry.is_regular_file() && entry.path().extension() == ".arc") {
-            //         std::string filename = entry.path().stem().string();
-            //         auto id = PatternID::FromString(filename);
-            //         if (id) {
-            //             pattern_index_.insert(*id);
-            //         }
-            //     }
-            // }
+            for (const auto& entry : fs::directory_iterator(patterns_dir_)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".arc") {
+                    auto id = PatternID::FromString(entry.path().stem().string());
+                    if (id) {
+                        pattern_index_.insert(*id);
+                    }
+                }
+            }
 
-            // for (const auto& entry : fs::directory_iterator(associations_dir_)) {
-            //     if (entry.is_regular_file() && entry.path().extension() == ".arc") {
-            //         std::string filename = entry.path().stem().string();
-            //         size_t underscore_pos = filename.find('_');
-            //         if (underscore_pos != std::string::npos) {
-            //             auto source = PatternID::FromString(filename.substr(0, underscore_pos));
-            //             auto target = PatternID::FromString(filename.substr(underscore_pos + 1));
-            //             if (source && target) {
-            //                 association_index_.insert(std::make_pair(*source, *target));
-            //             }
-            //         }
-            //     }
-            // }
-        } catch (...) {
-            // Best effort
+            for (const auto& entry : fs::directory_iterator(associations_dir_)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".arc") {
+                    std::string filename = entry.path().stem().string();
+                    size_t underscore_pos = filename.find('_');
+                    if (underscore_pos != std::string::npos) {
+                        auto source = PatternID::FromString(filename.substr(0, underscore_pos));
+                        auto target = PatternID::FromString(filename.substr(underscore_pos + 1));
+                        if (source && target) {
+                            association_index_.insert(std::make_pair(*source, *target));
+                        }
+                    }
+                }
+            }
+        } catch (const fs::filesystem_error&) {
+            // Best effort: unreadable directories leave the index partial
         }
     }
 };

@@ -178,16 +178,9 @@ float UtilityCalculator::CalculateAssociationScore(
 }
 
 float UtilityCalculator::CalculateConfidenceScore(const PatternNode& pattern) const {
-    // C(p) = pattern confidence
-    // For now, use a default value since PatternNode doesn't have confidence yet
-    // In future, this could be based on:
-    // - Pattern match quality
-    // - Number of successful predictions
-    // - Validation metrics
-
-    // Default confidence of 0.5 for all patterns
-    // TODO: Integrate with pattern quality metrics from Phase 1
-    return 0.5f;
+    // C(p) = pattern confidence, maintained on the node by pattern
+    // refinement/matching (defaults to 0.5 for new patterns)
+    return std::clamp(pattern.GetConfidenceScore(), 0.0f, 1.0f);
 }
 
 // ============================================================================
@@ -287,6 +280,27 @@ const AccessStats* AccessTracker::GetPatternStats(PatternID pattern) const {
     }
 
     return &it->second;
+}
+
+std::optional<AccessStats> AccessTracker::GetPatternStatsSnapshot(PatternID pattern) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    auto it = pattern_stats_.find(pattern);
+    if (it == pattern_stats_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::optional<AccessStats> AccessTracker::GetAssociationStatsSnapshot(
+    PatternID source, PatternID target) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    auto it = association_stats_.find(std::make_pair(source, target));
+    if (it == association_stats_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 const AccessStats* AccessTracker::GetAssociationStats(PatternID source, PatternID target) const {

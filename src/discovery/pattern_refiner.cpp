@@ -440,20 +440,12 @@ float PatternRefiner::ComputeDistance(const PatternData& data1, const PatternDat
 }
 
 PatternID PatternRefiner::GenerateNewPatternID() const {
-    // Get all existing pattern IDs
-    auto all_ids = database_->FindAll();
-
-    if (all_ids.empty()) {
-        return PatternID(1);
+    // Process-wide unique IDs; skip any ID already stored explicitly
+    PatternID id = PatternID::Generate();
+    while (database_->Exists(id)) {
+        id = PatternID::Generate();
     }
-
-    // Find maximum ID
-    uint64_t max_id = 0;
-    for (const auto& id : all_ids) {
-        max_id = std::max(max_id, id.value());
-    }
-
-    return PatternID(max_id + 1);
+    return id;
 }
 
 } // namespace dpan

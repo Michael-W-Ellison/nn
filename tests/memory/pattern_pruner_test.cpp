@@ -635,6 +635,7 @@ TEST_F(PatternPrunerTest, PrunePatterns_MixedUtilities) {
     PatternPruner::Config config;
     config.utility_threshold = 0.3f;
     config.min_pattern_age = std::chrono::milliseconds(10);
+    config.enable_merging = false;  // Test patterns are identical; test pruning only
     PatternPruner pruner(config);
 
     std::unordered_map<PatternID, float> utilities;

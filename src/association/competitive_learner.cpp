@@ -219,13 +219,7 @@ size_t ApplyCompetitionAll(
     AssociationMatrix& matrix,
     const Config& config
 ) {
-    // Note: This is limited by the AssociationMatrix API
-    // Without a method to get all unique patterns, we cannot efficiently
-    // apply competition to all patterns in the matrix
-    // This would require AssociationMatrix to expose a GetAllPatterns() method
-    // For now, return 0
-    // TODO: Update when AssociationMatrix provides pattern iteration
-    return 0;
+    return ApplyCompetitionBatch(matrix, matrix.GetAllPatterns(), config);
 }
 
 // ============================================================================

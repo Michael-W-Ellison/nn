@@ -3,6 +3,7 @@
 // Implementation of Pattern Pruner
 
 #include "memory/pattern_pruner.hpp"
+#include <limits>
 #include "similarity/similarity_metric.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -72,6 +73,9 @@ PatternPruner::PruneResult PatternPruner::PrunePatterns(
         candidates.resize(config_.max_prune_batch);
     }
 
+    // Patterns about to be pruned are not valid merge targets
+    std::unordered_set<PatternID> candidate_set(candidates.begin(), candidates.end());
+
     // Process each candidate
     for (const auto& pattern_id : candidates) {
         // Get utility
@@ -95,7 +99,7 @@ PatternPruner::PruneResult PatternPruner::PrunePatterns(
         // Try to merge if enabled
         bool merged = false;
         if (config_.enable_merging) {
-            auto merge_candidate = FindMergeCandidate(pattern, pattern_db);
+            auto merge_candidate = FindMergeCandidate(pattern, pattern_db, candidate_set);
             if (merge_candidate) {
                 if (MergePatterns(pattern_id, *merge_candidate, pattern_db, assoc_matrix)) {
                     result.merged_patterns.emplace_back(pattern_id, *merge_candidate);
@@ -232,14 +236,41 @@ bool PatternPruner::HasStrongAssociations(
 
 std::optional<PatternID> PatternPruner::FindMergeCandidate(
     const PatternNode& pattern,
-    const PatternDatabase& pattern_db) const {
+    PatternDatabase& pattern_db,
+    const std::unordered_set<PatternID>& exclude) const {
 
-    // Note: QuerySimilar is not implemented in PatternDatabase yet
-    // For now, return nullopt (no merge candidate found)
-    // TODO: Implement similarity search when QuerySimilar is available
-    (void)pattern;
-    (void)pattern_db;
-    return std::nullopt;
+    // Linear scan for the most similar pattern (cosine similarity of
+    // features) at or above the merge threshold
+    FeatureVector features = pattern.GetData().GetFeatures();
+    if (features.Dimension() == 0) {
+        return std::nullopt;
+    }
+
+    QueryOptions all = QueryOptions::Unlimited();
+
+    std::optional<PatternID> best;
+    float best_similarity = config_.merge_similarity_threshold;
+
+    for (const auto& other_id : pattern_db.FindAll(all)) {
+        if (other_id == pattern.GetID() || exclude.count(other_id) > 0) {
+            continue;
+        }
+        auto other = pattern_db.Retrieve(other_id);
+        if (!other) {
+            continue;
+        }
+        FeatureVector other_features = other->GetData().GetFeatures();
+        if (other_features.Dimension() != features.Dimension()) {
+            continue;
+        }
+        float similarity = features.CosineSimilarity(other_features);
+        if (similarity >= best_similarity) {
+            best_similarity = similarity;
+            best = other_id;
+        }
+    }
+
+    return best;
 }
 
 bool PatternPruner::MergePatterns(

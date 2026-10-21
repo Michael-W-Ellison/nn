@@ -27,6 +27,8 @@
 #include <thread>
 #include <atomic>
 #include <shared_mutex>
+#include <mutex>
+#include <condition_variable>
 #include <optional>
 
 namespace dpan {
@@ -115,6 +117,28 @@ public:
     /// @param utilities Map of pattern ID to utility score
     /// @return Number of patterns transitioned
     size_t PerformTierTransitions(const std::unordered_map<PatternID, float>& utilities);
+
+    /// Compute utility scores for every pattern managed by the tiers
+    ///
+    /// Patterns without access statistics are scored with empty statistics
+    /// (never accessed), so they become candidates for demotion.
+    ///
+    /// @param utility_calc Utility calculator for scoring patterns
+    /// @param access_tracker Access tracker for statistics
+    /// @return Map of pattern ID to utility score
+    std::unordered_map<PatternID, float> ComputeUtilities(
+        const UtilityCalculator& utility_calc,
+        const AccessTracker& access_tracker
+    );
+
+    /// Compute utilities and perform tier transitions once (the work done by
+    /// each background cycle)
+    ///
+    /// @return Number of patterns transitioned
+    size_t RunTransitionCycle(
+        const UtilityCalculator& utility_calc,
+        const AccessTracker& access_tracker
+    );
 
     /// Manually promote a pattern to a higher tier
     ///
@@ -219,9 +243,14 @@ private:
     std::atomic<size_t> demotions_count_{0};
     Timestamp last_transition_;
 
+    // Serializes transition cycles and guards config_ and last_transition_
+    mutable std::mutex transition_mutex_;
+
     // Background thread
     std::unique_ptr<std::thread> background_thread_;
     std::atomic<bool> running_{false};
+    std::mutex wake_mutex_;
+    std::condition_variable wake_cv_;
 
     // Helper methods
     IMemoryTier* GetTier(MemoryTier tier);

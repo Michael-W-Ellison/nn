@@ -269,7 +269,7 @@ TEST(ReinforcementManagerTest, ApplyDecayAll) {
     EXPECT_LT(edge2->GetStrength(), 0.8f);
 }
 
-TEST(ReinforcementManagerTest, DISABLED_ApplyDecayAllWithAutoPrune) {
+TEST(ReinforcementManagerTest, ApplyDecayAllWithAutoPrune) {
     ReinforcementManager::Config config;
     config.prune_threshold = 0.5f;
     config.decay_rate = 0.5f;  // High decay rate
@@ -398,7 +398,7 @@ TEST(ReinforcementManagerTest, ShouldPrune) {
     EXPECT_FALSE(manager.ShouldPrune(strong_edge));
 }
 
-TEST(ReinforcementManagerTest, DISABLED_CountPrunableEdges) {
+TEST(ReinforcementManagerTest, CountPrunableEdges) {
     ReinforcementManager::Config config;
     config.prune_threshold = 0.3f;
     ReinforcementManager manager(config);
@@ -418,7 +418,7 @@ TEST(ReinforcementManagerTest, DISABLED_CountPrunableEdges) {
     EXPECT_EQ(2u, count);
 }
 
-TEST(ReinforcementManagerTest, DISABLED_PruneWeakAssociations) {
+TEST(ReinforcementManagerTest, PruneWeakAssociations) {
     ReinforcementManager::Config config;
     config.prune_threshold = 0.3f;
     ReinforcementManager manager(config);

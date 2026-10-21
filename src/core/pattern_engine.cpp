@@ -227,7 +227,7 @@ std::vector<PatternNode> PatternEngine::GetPatternsBatch(
 }
 
 std::vector<PatternID> PatternEngine::GetAllPatternIDs() const {
-    return database_->FindAll();
+    return database_->FindAll(QueryOptions::Unlimited());
 }
 
 // ============================================================================
@@ -242,7 +242,7 @@ std::vector<SearchResult> PatternEngine::FindSimilarPatterns(
     if (!similarity_search_) {
         // Fallback to brute-force search if indexing disabled
         std::vector<SearchResult> results;
-        auto all_ids = database_->FindAll();
+        auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
         for (const auto& id : all_ids) {
             auto pattern_opt = database_->Retrieve(id);
@@ -344,7 +344,7 @@ bool PatternEngine::DeletePattern(PatternID id) {
 PatternEngine::Statistics PatternEngine::GetStatistics() const {
     Statistics stats;
 
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
     stats.total_patterns = all_ids.size();
 
     float total_confidence = 0.0f;
@@ -404,7 +404,7 @@ void PatternEngine::RunMaintenance() {
         return;
     }
 
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
     // Check for patterns that need splitting
     std::vector<PatternID> to_split;
