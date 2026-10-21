@@ -114,7 +114,7 @@ size_t Sequential::ParameterCount() const {
 }
 
 float Sequential::TrainBatch(const Matrix& input, const Matrix& target, const Loss& loss,
-                             Optimizer& optimizer) {
+                             Optimizer& optimizer, float gradient_clip_norm) {
     if (layers_.empty()) {
         throw std::logic_error("Sequential::TrainBatch: model has no layers");
     }
@@ -122,7 +122,11 @@ float Sequential::TrainBatch(const Matrix& input, const Matrix& target, const Lo
     Matrix prediction = Forward(input, true);
     float value = loss.Value(prediction, target);
     Backward(loss.Gradient(prediction, target));
-    optimizer.Step(Parameters());
+    auto parameters = Parameters();
+    if (gradient_clip_norm > 0.0f) {
+        ClipGradientNorm(parameters, gradient_clip_norm);
+    }
+    optimizer.Step(parameters);
     return value;
 }
 
@@ -165,7 +169,10 @@ Sequential::History Sequential::Fit(const Matrix& input, const Matrix& target, c
     float best_loss = std::numeric_limits<float>::infinity();
     size_t epochs_without_improvement = 0;
 
+    const float base_rate = optimizer.LearningRate();
+
     for (size_t epoch = 0; epoch < options.epochs; ++epoch) {
+        history.learning_rate.push_back(optimizer.LearningRate());
         if (options.shuffle) {
             std::shuffle(train_indices.begin(), train_indices.end(), rng);
         }
@@ -175,7 +182,7 @@ Sequential::History Sequential::Fit(const Matrix& input, const Matrix& target, c
             size_t end = std::min(start + options.batch_size, train_count);
             std::vector<size_t> batch(train_indices.begin() + start, train_indices.begin() + end);
             float batch_loss = TrainBatch(input.SelectRows(batch), target.SelectRows(batch), loss,
-                                          optimizer);
+                                          optimizer, options.gradient_clip_norm);
             epoch_loss += static_cast<double>(batch_loss) * static_cast<double>(end - start);
         }
 
@@ -189,6 +196,12 @@ Sequential::History Sequential::Fit(const Matrix& input, const Matrix& target, c
             history.validation_loss.push_back(validation_loss);
         }
         history.epochs_run = epoch + 1;
+
+        if (options.learning_rate_schedule) {
+            float monitored = validation_count > 0 ? validation_loss : train_loss;
+            optimizer.SetLearningRate(options.learning_rate_schedule->NextRate(
+                epoch + 1, base_rate, optimizer.LearningRate(), monitored));
+        }
 
         if (options.on_epoch_end && !options.on_epoch_end(epoch, train_loss, validation_loss)) {
             history.stopped_early = true;
