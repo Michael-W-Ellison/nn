@@ -118,13 +118,15 @@ std::vector<float> output = model.Predict({1.0f, 0.0f});
 - `docs/DPAN_CLI_Guide.md`, `QUICK_START_CLI.md` — the interactive CLI
 - `docs/DPAN_Design_Document.md` — architecture and design
 
-The `*_REPORT.md` and `*_ANALYSIS.md` files in the repository root are
-historical snapshots from November 2025 and do not describe the current state.
+Status reports and analyses written during development are kept in
+`docs/history/` as snapshots; they do not describe the current state.
 
 ## Known limitations
 
-- `PatternMatcher::Config::use_fast_search` is unused; matching is an exact
-  scan. `ApproximateSearch` (LSH) is available separately.
+- Approximate search (`PatternMatcher` fast search, `ApproximateSearch`)
+  retrieves candidates by angle between feature vectors (random-hyperplane
+  LSH) and can miss matches; it is used by the matcher only for databases of
+  at least `fast_search_min_patterns` (default 10,000) patterns.
 - Interference between patterns is O(n²) per maintenance pass and is limited
   to `MemoryManager::Config::max_interference_patterns` patterns.
 - Some heuristics are simplified (temporal variance estimate, pattern

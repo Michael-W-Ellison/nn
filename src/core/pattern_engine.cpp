@@ -149,6 +149,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
                     PatternType::ATOMIC,
                     decision.confidence
                 );
+                matcher_->NotifyPatternChanged(new_id);
                 result.created_patterns.push_back(new_id);
                 break;
             }
@@ -179,6 +180,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
                 if (!merge_candidates.empty() && config_.enable_auto_refinement) {
                     auto merge_result = refiner_->MergePatterns(merge_candidates);
                     if (merge_result.success) {
+                        matcher_->InvalidateIndex();
                         result.created_patterns.push_back(merge_result.merged_id);
                         // Mark originals as updated (merged away)
                         for (const auto& id : merge_candidates) {
@@ -218,6 +220,7 @@ std::vector<PatternID> PatternEngine::DiscoverPatterns(
     // Create patterns for all extracted data
     for (const auto& pattern_data : extracted_patterns) {
         PatternID id = creator_->CreatePattern(pattern_data);
+        matcher_->NotifyPatternChanged(id);
         discovered.push_back(id);
     }
 
@@ -318,6 +321,7 @@ PatternID PatternEngine::CreatePattern(
     float confidence) {
 
     PatternID id = creator_->CreatePattern(data, PatternType::ATOMIC, confidence);
+    matcher_->NotifyPatternChanged(id);
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -332,6 +336,7 @@ PatternID PatternEngine::CreateCompositePattern(
     const PatternData& data) {
 
     PatternID id = creator_->CreateCompositePattern(sub_patterns, data);
+    matcher_->NotifyPatternChanged(id);
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -348,6 +353,7 @@ bool PatternEngine::UpdatePattern(
     bool success = refiner_->UpdatePattern(id, new_data);
 
     if (success) {
+        matcher_->NotifyPatternChanged(id);
         std::lock_guard<std::mutex> lock(stats_mutex_);
         total_patterns_updated_++;
     }
@@ -356,7 +362,11 @@ bool PatternEngine::UpdatePattern(
 }
 
 bool PatternEngine::DeletePattern(PatternID id) {
-    return database_->Delete(id);
+    bool deleted = database_->Delete(id);
+    if (deleted) {
+        matcher_->NotifyPatternRemoved(id);
+    }
+    return deleted;
 }
 
 // ============================================================================
@@ -450,6 +460,9 @@ void PatternEngine::RunMaintenance() {
             }
         }
     }
+
+    // Splits and merges replace patterns
+    matcher_->InvalidateIndex();
 }
 
 // ============================================================================
@@ -465,8 +478,12 @@ bool PatternEngine::SaveSnapshot(const std::string& path) {
 
 bool PatternEngine::LoadSnapshot(const std::string& path) {
     // Replaces the current patterns; similarity search reads the database
-    // directly, so no index needs rebuilding
-    return database_->RestoreSnapshot(path);
+    // directly, the matcher's fast-search index is rebuilt
+    bool restored = database_->RestoreSnapshot(path);
+    if (restored) {
+        matcher_->RebuildIndex();
+    }
+    return restored;
 }
 
 } // namespace dpan

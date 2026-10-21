@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace dpan {
 
@@ -43,7 +44,103 @@ void PatternMatcher::SetConfig(const Config& config) {
     if (config.strong_match_threshold < config.weak_match_threshold) {
         throw std::invalid_argument("strong_match_threshold must be >= weak_match_threshold");
     }
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        const auto& old_index = config_.fast_search_index;
+        const auto& new_index = config.fast_search_index;
+        if (old_index.num_tables != new_index.num_tables ||
+            old_index.bits_per_table != new_index.bits_per_table ||
+            old_index.multi_probe != new_index.multi_probe || old_index.seed != new_index.seed) {
+            index_.reset();  // Rebuilt with the new parameters on next use
+            index_valid_ = false;
+        }
+    }
     config_ = config;
+}
+
+// ============================================================================
+// Fast-search index
+// ============================================================================
+
+void PatternMatcher::SyncIndex() const {
+    if (!index_) {
+        index_ = std::make_unique<LshIndex>(config_.fast_search_index);
+        index_valid_ = false;
+    }
+
+    auto ids = database_->FindAll(QueryOptions::Unlimited());
+
+    if (!index_valid_) {
+        index_->Clear();
+        for (const auto& id : ids) {
+            if (auto node = database_->Retrieve(id)) {
+                index_->Insert(id, node->GetData().GetFeatures());
+            }
+        }
+        index_valid_ = true;
+        return;
+    }
+
+    // Incremental: index new IDs, drop IDs no longer in the database
+    std::unordered_set<PatternID> current(ids.begin(), ids.end());
+    for (const auto& id : ids) {
+        if (!index_->Contains(id)) {
+            if (auto node = database_->Retrieve(id)) {
+                index_->Insert(id, node->GetData().GetFeatures());
+            }
+        }
+    }
+    for (const auto& id : index_->Ids()) {
+        if (current.count(id) == 0) {
+            index_->Remove(id);
+        }
+    }
+}
+
+bool PatternMatcher::IsUsingFastSearch() const {
+    return config_.use_fast_search && database_->Count() >= config_.fast_search_min_patterns;
+}
+
+std::vector<PatternID> PatternMatcher::CandidateIds(const PatternData& candidate) const {
+    if (!IsUsingFastSearch()) {
+        return database_->FindAll(QueryOptions::Unlimited());
+    }
+
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    if (!index_ || !index_valid_ || reconcile_pending_ || index_->Size() != database_->Count()) {
+        SyncIndex();
+        reconcile_pending_ = false;
+    }
+    return index_->Candidates(candidate.GetFeatures());
+}
+
+void PatternMatcher::NotifyPatternChanged(PatternID id) {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    if (!index_ || !index_valid_) {
+        return;  // Built from the database on first fast search
+    }
+    if (auto node = database_->Retrieve(id)) {
+        index_->Insert(id, node->GetData().GetFeatures());
+    } else {
+        index_->Remove(id);
+    }
+}
+
+void PatternMatcher::NotifyPatternRemoved(PatternID id) {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    if (index_) {
+        index_->Remove(id);
+    }
+}
+
+void PatternMatcher::InvalidateIndex() {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    reconcile_pending_ = true;
+}
+
+void PatternMatcher::RebuildIndex() {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    index_valid_ = false;
 }
 
 void PatternMatcher::SetMetric(std::shared_ptr<SimilarityMetric> metric) {
@@ -56,8 +153,8 @@ void PatternMatcher::SetMetric(std::shared_ptr<SimilarityMetric> metric) {
 std::vector<PatternMatcher::Match> PatternMatcher::FindMatches(const PatternData& candidate) const {
     std::vector<Match> matches;
 
-    // Get all pattern IDs from database
-    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
+    // Every pattern, or approximate-search candidates for large databases
+    auto all_ids = CandidateIds(candidate);
 
     // Compute similarity for each pattern
     for (const auto& pattern_id : all_ids) {

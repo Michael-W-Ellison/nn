@@ -3,8 +3,10 @@
 
 #include "core/pattern_node.hpp"
 #include "similarity/similarity_metric.hpp"
+#include "similarity/lsh_index.hpp"
 #include "storage/pattern_database.hpp"
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,10 +25,18 @@ public:
         /// Maximum number of matches to return
         size_t max_matches{10};
 
-        /// Reserved; currently unused. FindMatches() always performs an exact
-        /// scan. For approximate (LSH) search over large databases use
-        /// ApproximateSearch from similarity/similarity_search.hpp.
+        /// Use approximate search (LSH candidates re-ranked with the metric)
+        /// once the database holds at least fast_search_min_patterns
+        /// patterns; below that, FindMatches() scans every pattern.
+        /// Approximate search can miss matches whose features point in a
+        /// different direction than the candidate's (recall < 100%).
         bool use_fast_search{true};
+
+        /// Database size at which approximate search starts being used
+        size_t fast_search_min_patterns{10000};
+
+        /// Hash index parameters for approximate search
+        LshIndex::Config fast_search_index;
 
         /// Threshold for "strong match" (update existing pattern)
         float strong_match_threshold{0.85f};
@@ -108,10 +118,50 @@ public:
     /// Set similarity metric
     void SetMetric(std::shared_ptr<SimilarityMetric> metric);
 
+    // ------------------------------------------------------------------
+    // Fast-search index maintenance
+    //
+    // The index follows the database automatically when the pattern count
+    // changes (patterns are added or removed). Call these for changes the
+    // count does not reveal: a pattern's features were updated, or patterns
+    // were replaced one-for-one outside this matcher. PatternEngine calls
+    // them for its own operations.
+    // ------------------------------------------------------------------
+
+    /// Index (or re-index) a pattern after it was stored or updated
+    void NotifyPatternChanged(PatternID id);
+
+    /// Drop a deleted pattern from the index
+    void NotifyPatternRemoved(PatternID id);
+
+    /// Reconcile indexed IDs with the database on the next fast search
+    /// (after patterns were replaced, e.g. merged or split)
+    void InvalidateIndex();
+
+    /// Re-index every pattern on the next fast search (after bulk changes
+    /// such as restoring a snapshot)
+    void RebuildIndex();
+
+    /// True when FindMatches() currently uses approximate search
+    bool IsUsingFastSearch() const;
+
 private:
     std::shared_ptr<PatternDatabase> database_;
     std::shared_ptr<SimilarityMetric> metric_;
     Config config_;
+
+    // Approximate search state (index_ is internally synchronized;
+    // sync_mutex_ serializes reconciliation with the database)
+    mutable std::unique_ptr<LshIndex> index_;
+    mutable std::mutex sync_mutex_;
+    mutable bool index_valid_{false};       // false: full rebuild needed
+    mutable bool reconcile_pending_{false};  // true: incremental ID sync needed
+
+    /// Bring index_ in line with the database's pattern IDs
+    void SyncIndex() const;
+
+    /// Candidate IDs for a query: all patterns, or LSH candidates
+    std::vector<PatternID> CandidateIds(const PatternData& candidate) const;
 
     /// Compute confidence score for a match
     float ComputeConfidence(float similarity, const PatternNode& node) const;

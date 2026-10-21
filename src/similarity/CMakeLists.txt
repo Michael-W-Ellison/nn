@@ -9,6 +9,7 @@ add_library(dpan_similarity
     statistical_similarity.cpp
     contextual_similarity.cpp
     similarity_search.cpp
+    lsh_index.cpp
 )
 
 target_include_directories(dpan_similarity PUBLIC

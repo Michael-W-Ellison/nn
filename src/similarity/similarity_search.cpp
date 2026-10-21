@@ -165,43 +165,56 @@ void SimilaritySearch::UpdateStats(const std::vector<SearchResult>& results) con
 // ApproximateSearch Implementation
 // ============================================================================
 
+namespace {
+
+LshIndex::Config ConfigForBuckets(size_t num_buckets) {
+    LshIndex::Config config;
+    size_t bits = 1;
+    while (bits < 64 && (size_t{1} << bits) < num_buckets) {
+        bits++;
+    }
+    config.bits_per_table = bits;
+    return config;
+}
+
+}  // namespace
+
 ApproximateSearch::ApproximateSearch(std::shared_ptr<PatternDatabase> database,
                                      std::shared_ptr<SimilarityMetric> metric,
                                      size_t num_buckets)
-    : database_(database), metric_(metric), num_buckets_(num_buckets) {
+    : ApproximateSearch(std::move(database), std::move(metric), ConfigForBuckets(num_buckets)) {}
+
+ApproximateSearch::ApproximateSearch(std::shared_ptr<PatternDatabase> database,
+                                     std::shared_ptr<SimilarityMetric> metric,
+                                     const LshIndex::Config& index_config)
+    : database_(std::move(database)), metric_(std::move(metric)), index_(index_config) {
     if (!database_) {
         throw std::invalid_argument("Database cannot be null");
     }
     if (!metric_) {
         throw std::invalid_argument("Metric cannot be null");
     }
-    if (num_buckets_ == 0) {
-        num_buckets_ = 1;
-    }
-
-    buckets_.resize(num_buckets_);
 }
 
 void ApproximateSearch::BuildIndex() {
-    // Clear existing buckets
-    for (auto& bucket : buckets_) {
-        bucket.clear();
+    index_.Clear();
+    for (const auto& pattern_id : database_->FindAll(QueryOptions::Unlimited())) {
+        Insert(pattern_id);
     }
-
-    // Get all patterns and assign to buckets
-    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
-
-    for (const auto& pattern_id : all_ids) {
-        auto node_opt = database_->Retrieve(pattern_id);
-        if (!node_opt) {
-            continue;
-        }
-
-        size_t bucket_id = ComputeBucket(node_opt->GetData().GetFeatures());
-        buckets_[bucket_id].push_back(pattern_id);
-    }
-
     index_built_ = true;
+}
+
+bool ApproximateSearch::Insert(PatternID id) {
+    auto node = database_->Retrieve(id);
+    if (!node) {
+        return false;
+    }
+    index_.Insert(id, node->GetData().GetFeatures());
+    return true;
+}
+
+bool ApproximateSearch::Remove(PatternID id) {
+    return index_.Remove(id);
 }
 
 std::vector<SearchResult> ApproximateSearch::Search(const PatternData& query,
@@ -210,25 +223,18 @@ std::vector<SearchResult> ApproximateSearch::Search(const PatternData& query,
         throw std::runtime_error("Index not built. Call BuildIndex() first.");
     }
 
-    // Compute query bucket
-    size_t query_bucket = ComputeBucket(query.GetFeatures());
-
-    // Search in the query bucket and neighboring buckets
+    // Rank LSH candidates with the actual metric
     std::priority_queue<SearchResult> top_k;
-
-    // Search in query bucket
-    for (const auto& pattern_id : buckets_[query_bucket]) {
+    for (const auto& pattern_id : index_.Candidates(query.GetFeatures())) {
         auto node_opt = database_->Retrieve(pattern_id);
         if (!node_opt) {
-            continue;
+            continue;  // Removed from the database since indexing
         }
-
         if (config.filter && !config.filter(*node_opt)) {
             continue;
         }
 
         float similarity = metric_->Compute(query, node_opt->GetData());
-
         if (similarity >= config.min_similarity) {
             top_k.emplace(pattern_id, similarity);
             if (top_k.size() > config.max_results) {
@@ -237,65 +243,14 @@ std::vector<SearchResult> ApproximateSearch::Search(const PatternData& query,
         }
     }
 
-    // Also search neighboring buckets for better recall
-    std::vector<size_t> neighbor_buckets;
-    if (query_bucket > 0) {
-        neighbor_buckets.push_back(query_bucket - 1);
-    }
-    if (query_bucket < num_buckets_ - 1) {
-        neighbor_buckets.push_back(query_bucket + 1);
-    }
-
-    for (size_t bucket_id : neighbor_buckets) {
-        for (const auto& pattern_id : buckets_[bucket_id]) {
-            auto node_opt = database_->Retrieve(pattern_id);
-            if (!node_opt) {
-                continue;
-            }
-
-            if (config.filter && !config.filter(*node_opt)) {
-                continue;
-            }
-
-            float similarity = metric_->Compute(query, node_opt->GetData());
-
-            if (similarity >= config.min_similarity) {
-                top_k.emplace(pattern_id, similarity);
-                if (top_k.size() > config.max_results) {
-                    top_k.pop();
-                }
-            }
-        }
-    }
-
-    // Extract and sort results
     std::vector<SearchResult> results;
     results.reserve(top_k.size());
-
     while (!top_k.empty()) {
         results.push_back(top_k.top());
         top_k.pop();
     }
-
     std::reverse(results.begin(), results.end());
-
     return results;
-}
-
-size_t ApproximateSearch::ComputeBucket(const FeatureVector& features) const {
-    if (features.Dimension() == 0) {
-        return 0;
-    }
-
-    // Simple hash function: sum of feature values mod num_buckets
-    float sum = 0.0f;
-    for (size_t i = 0; i < features.Dimension(); ++i) {
-        sum += features[i];
-    }
-
-    // Use absolute value and modulo to get bucket ID
-    size_t bucket_id = static_cast<size_t>(std::abs(sum)) % num_buckets_;
-    return bucket_id;
 }
 
 // ============================================================================

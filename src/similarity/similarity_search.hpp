@@ -4,6 +4,8 @@
 #include "similarity_metric.hpp"
 #include "storage/pattern_database.hpp"
 #include "core/pattern_node.hpp"
+#include "similarity/lsh_index.hpp"
+#include <atomic>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -137,44 +139,53 @@ private:
     void UpdateStats(const std::vector<SearchResult>& results) const;
 };
 
-/// Approximate Nearest Neighbor Search (simplified version)
+/// Approximate nearest-neighbour search
 ///
-/// Uses a simple bucketing strategy for faster approximate search.
-/// Useful for large-scale pattern collections where exact search is too slow.
+/// Retrieves candidates from an LshIndex (random-hyperplane hashing of the
+/// pattern features, i.e. approximate cosine neighbours) and ranks them with
+/// the configured metric. Much faster than exact search on large databases;
+/// patterns that hash far from the query are missed (recall < 100%).
+///
+/// The index is built by BuildIndex(); keep it current with Insert()/Remove()
+/// when patterns change, or call BuildIndex() again.
 class ApproximateSearch {
 public:
-    /// Constructor
-    /// @param database Pattern database to search
-    /// @param metric Similarity metric to use
-    /// @param num_buckets Number of buckets for hashing
+    /// @param num_buckets Approximate buckets per hash table; sets
+    ///        bits_per_table = ceil(log2(num_buckets)) with default tables
     explicit ApproximateSearch(std::shared_ptr<PatternDatabase> database,
                               std::shared_ptr<SimilarityMetric> metric,
                               size_t num_buckets = 100);
 
-    /// Build index for approximate search
+    ApproximateSearch(std::shared_ptr<PatternDatabase> database,
+                      std::shared_ptr<SimilarityMetric> metric,
+                      const LshIndex::Config& index_config);
+
+    /// Index every pattern in the database (replaces the current index)
     void BuildIndex();
 
+    /// Add or re-index one pattern (reads it from the database)
+    /// @return false if the pattern is not in the database
+    bool Insert(PatternID id);
+
+    /// Remove one pattern from the index
+    bool Remove(PatternID id);
+
     /// Approximate search
-    /// @param query Query pattern
-    /// @param config Search configuration
-    /// @return Approximate search results
+    /// @throws std::runtime_error if BuildIndex() has not been called
     std::vector<SearchResult> Search(const PatternData& query,
                                      const SearchConfig& config = SearchConfig::Default()) const;
 
     /// Check if index is built
-    bool IsIndexBuilt() const { return index_built_; }
+    bool IsIndexBuilt() const { return index_built_.load(); }
+
+    /// Number of indexed patterns
+    size_t IndexedCount() const { return index_.Size(); }
 
 private:
     std::shared_ptr<PatternDatabase> database_;
     std::shared_ptr<SimilarityMetric> metric_;
-    size_t num_buckets_;
-    bool index_built_{false};
-
-    /// Bucket index: bucket_id -> pattern_ids
-    std::vector<std::vector<PatternID>> buckets_;
-
-    /// Compute bucket ID for a pattern
-    size_t ComputeBucket(const FeatureVector& features) const;
+    LshIndex index_;
+    std::atomic<bool> index_built_{false};
 };
 
 /// Multi-metric search

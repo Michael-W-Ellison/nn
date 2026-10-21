@@ -3,6 +3,8 @@
 #include "storage/memory_backend.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
+#include <random>
+#include "similarity/geometric_similarity.hpp"
 
 namespace dpan {
 namespace {
@@ -354,6 +356,135 @@ TEST(PatternMatcherTest, UseFastSearchOption) {
     PatternData query = PatternData::FromFeatures(query_features, DataModality::NUMERIC);
 
     EXPECT_NO_THROW(matcher.FindMatches(query));
+}
+
+// ============================================================================
+// Fast (approximate) search
+// ============================================================================
+
+PatternID StoreFeatures(PatternDatabase& db, const std::vector<float>& values) {
+    PatternNode node(PatternID::Generate(),
+                     PatternData::FromFeatures(FeatureVector(values), DataModality::NUMERIC),
+                     PatternType::ATOMIC);
+    PatternID id = node.GetID();
+    db.Store(node);
+    return id;
+}
+
+std::vector<float> RandomValues(std::mt19937& rng, size_t dimension) {
+    std::normal_distribution<float> gaussian(0.0f, 1.0f);
+    std::vector<float> values(dimension);
+    for (auto& v : values) {
+        v = gaussian(rng);
+    }
+    return values;
+}
+
+TEST(PatternMatcherFastSearchTest, SwitchesToApproximateSearchAtThreshold) {
+    auto db = std::make_shared<MemoryBackend>(MemoryBackend::Config{});
+    PatternMatcher::Config config;
+    config.fast_search_min_patterns = 5;
+    PatternMatcher matcher(db, std::make_shared<CosineSimilarity>(), config);
+
+    std::mt19937 rng(1);
+    for (int i = 0; i < 4; ++i) {
+        StoreFeatures(*db, RandomValues(rng, 8));
+    }
+    EXPECT_FALSE(matcher.IsUsingFastSearch());
+    StoreFeatures(*db, RandomValues(rng, 8));
+    EXPECT_TRUE(matcher.IsUsingFastSearch());
+
+    config.use_fast_search = false;
+    matcher.SetConfig(config);
+    EXPECT_FALSE(matcher.IsUsingFastSearch());
+}
+
+TEST(PatternMatcherFastSearchTest, FindsMatchesAndFollowsDatabaseChanges) {
+    auto db = std::make_shared<MemoryBackend>(MemoryBackend::Config{});
+    PatternMatcher::Config config;
+    config.fast_search_min_patterns = 100;
+    config.similarity_threshold = 0.9f;
+    config.weak_match_threshold = 0.9f;
+    config.strong_match_threshold = 0.95f;
+    PatternMatcher matcher(db, std::make_shared<CosineSimilarity>(), config);
+
+    std::mt19937 rng(2);
+    std::vector<std::vector<float>> stored;
+    std::vector<PatternID> ids;
+    for (int i = 0; i < 3000; ++i) {
+        stored.push_back(RandomValues(rng, 16));
+        ids.push_back(StoreFeatures(*db, stored.back()));
+    }
+    ASSERT_TRUE(matcher.IsUsingFastSearch());
+
+    auto query = PatternData::FromFeatures(FeatureVector(stored[10]), DataModality::NUMERIC);
+    auto matches = matcher.FindMatches(query);
+    ASSERT_FALSE(matches.empty());
+    EXPECT_EQ(ids[10], matches[0].id);
+    EXPECT_NEAR(1.0f, matches[0].similarity, 1e-5f);
+
+    // Added directly to the database: picked up through the count change
+    PatternID duplicate = StoreFeatures(*db, stored[10]);
+    matches = matcher.FindMatches(query);
+    ASSERT_GE(matches.size(), 2u);
+    EXPECT_TRUE(matches[0].id == duplicate || matches[1].id == duplicate);
+
+    // Deleted directly from the database: dropped from results
+    db->Delete(duplicate);
+    db->Delete(ids[10]);
+    matches = matcher.FindMatches(query);
+    for (const auto& match : matches) {
+        EXPECT_NE(ids[10], match.id);
+        EXPECT_NE(duplicate, match.id);
+    }
+
+    // Feature update without a count change needs a notification
+    auto node = db->Retrieve(ids[20]);
+    ASSERT_TRUE(node.has_value());
+    PatternNode updated(ids[20], PatternData::FromFeatures(FeatureVector(stored[10]), DataModality::NUMERIC),
+                        PatternType::ATOMIC);
+    db->Update(updated);
+    matcher.NotifyPatternChanged(ids[20]);
+    matches = matcher.FindMatches(query);
+    ASSERT_FALSE(matches.empty());
+    EXPECT_EQ(ids[20], matches[0].id);
+}
+
+TEST(PatternMatcherFastSearchTest, AgreesWithExactSearchOnNearDuplicates) {
+    auto db = std::make_shared<MemoryBackend>(MemoryBackend::Config{});
+    std::mt19937 rng(4);
+    std::normal_distribution<float> noise(0.0f, 0.02f);
+    std::vector<std::vector<float>> stored;
+    for (int i = 0; i < 2000; ++i) {
+        stored.push_back(RandomValues(rng, 12));
+        StoreFeatures(*db, stored.back());
+    }
+
+    PatternMatcher::Config exact_config;
+    exact_config.use_fast_search = false;
+    exact_config.max_matches = 1;
+    PatternMatcher exact(db, std::make_shared<CosineSimilarity>(), exact_config);
+
+    PatternMatcher::Config fast_config = exact_config;
+    fast_config.use_fast_search = true;
+    fast_config.fast_search_min_patterns = 1;
+    PatternMatcher fast(db, std::make_shared<CosineSimilarity>(), fast_config);
+
+    size_t agree = 0;
+    const size_t queries = 100;
+    for (size_t q = 0; q < queries; ++q) {
+        std::vector<float> values = stored[(q * 13) % stored.size()];
+        for (auto& v : values) {
+            v += noise(rng);
+        }
+        auto query = PatternData::FromFeatures(FeatureVector(values), DataModality::NUMERIC);
+        auto expected = exact.FindMatches(query);
+        auto actual = fast.FindMatches(query);
+        if (!expected.empty() && !actual.empty() && expected[0].id == actual[0].id) {
+            agree++;
+        }
+    }
+    EXPECT_GE(agree, 97u);
 }
 
 } // namespace
