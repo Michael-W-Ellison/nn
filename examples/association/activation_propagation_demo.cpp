@@ -47,7 +47,7 @@ void PrintPropagationResults(const std::vector<AssociationMatrix::ActivationResu
         int bar_length = static_cast<int>(activation * 40);
         std::cout << "[";
         for (int i = 0; i < 40; ++i) {
-            std::cout << (i < bar_length ? '█' : '░');
+            std::cout << (i < bar_length ? "█" : "░");
         }
         std::cout << "]" << std::endl;
     }

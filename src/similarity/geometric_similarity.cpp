@@ -326,4 +326,30 @@ float ProcrusteSimilarity::ComputeFromFeatures(const FeatureVector& a, const Fea
     return 1.0f / (1.0f + distance);
 }
 
+// ============================================================================
+// Cosine and Euclidean Similarity
+// ============================================================================
+
+float CosineSimilarity::Compute(const PatternData& a, const PatternData& b) const {
+    return ComputeFromFeatures(a.GetFeatures(), b.GetFeatures());
+}
+
+float CosineSimilarity::ComputeFromFeatures(const FeatureVector& a, const FeatureVector& b) const {
+    if (a.Dimension() != b.Dimension() || a.Dimension() == 0) {
+        return 0.0f;
+    }
+    return std::clamp(a.CosineSimilarity(b), 0.0f, 1.0f);
+}
+
+float EuclideanSimilarity::Compute(const PatternData& a, const PatternData& b) const {
+    return ComputeFromFeatures(a.GetFeatures(), b.GetFeatures());
+}
+
+float EuclideanSimilarity::ComputeFromFeatures(const FeatureVector& a, const FeatureVector& b) const {
+    if (a.Dimension() != b.Dimension()) {
+        return 0.0f;
+    }
+    return 1.0f / (1.0f + a.EuclideanDistance(b));
+}
+
 } // namespace dpan

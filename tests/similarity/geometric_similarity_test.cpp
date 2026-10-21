@@ -428,5 +428,33 @@ TEST(GeometricSimilarityTest, DifferentMetricsProduceDifferentResults) {
     EXPECT_GT(modified_sim, hausdorff_sim);
 }
 
+TEST(CosineSimilarityTest, ComputesAngleBasedSimilarity) {
+    CosineSimilarity metric;
+    FeatureVector a(std::vector<float>{1.0f, 0.0f});
+    FeatureVector b(std::vector<float>{3.0f, 0.0f});
+    FeatureVector c(std::vector<float>{0.0f, 2.0f});
+    FeatureVector d(std::vector<float>{-1.0f, 0.0f});
+
+    EXPECT_NEAR(1.0f, metric.ComputeFromFeatures(a, b), 1e-6f);  // Same direction
+    EXPECT_NEAR(0.0f, metric.ComputeFromFeatures(a, c), 1e-6f);  // Orthogonal
+    EXPECT_NEAR(0.0f, metric.ComputeFromFeatures(a, d), 1e-6f);  // Opposite: clamped
+    EXPECT_EQ(0.0f, metric.ComputeFromFeatures(a, FeatureVector(std::vector<float>{1.0f})));
+    EXPECT_EQ("Cosine", metric.GetName());
+}
+
+TEST(EuclideanSimilarityTest, DecreasesWithDistance) {
+    EuclideanSimilarity metric;
+    FeatureVector a(std::vector<float>{0.0f, 0.0f});
+    FeatureVector b(std::vector<float>{3.0f, 4.0f});
+
+    EXPECT_FLOAT_EQ(1.0f, metric.ComputeFromFeatures(a, a));
+    EXPECT_FLOAT_EQ(1.0f / 6.0f, metric.ComputeFromFeatures(a, b));  // distance 5
+    EXPECT_EQ(0.0f, metric.ComputeFromFeatures(a, FeatureVector(std::vector<float>{1.0f})));
+
+    PatternData pa = PatternData::FromFeatures(a, DataModality::NUMERIC);
+    PatternData pb = PatternData::FromFeatures(b, DataModality::NUMERIC);
+    EXPECT_FLOAT_EQ(1.0f / 6.0f, metric.Compute(pa, pb));
+}
+
 } // namespace
 } // namespace dpan

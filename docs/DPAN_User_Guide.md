@@ -1401,7 +1401,7 @@ public:
         }
 
         // Form associations
-        system_->FormNewAssociations(*engine_->GetDatabase());
+        system_->FormNewAssociations(engine_->GetDatabase());
         std::cout << "Training complete" << std::endl;
     }
 
@@ -1512,7 +1512,7 @@ public:
             }
         }
 
-        system_->FormNewAssociations(*engine_->GetDatabase());
+        system_->FormNewAssociations(engine_->GetDatabase());
     }
 
     std::optional<int> PredictNext(int current) {

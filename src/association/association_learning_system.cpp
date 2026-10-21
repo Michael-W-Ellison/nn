@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <unordered_set>
 
 namespace dpan {
 
@@ -49,6 +50,9 @@ void AssociationLearningSystem::RecordPatternActivation(
     // Record in co-occurrence tracker
     tracker_.RecordActivation(pattern, now);
 
+    // Associations into this pattern learn the context it occurred in
+    UpdateContextProfiles({pattern}, context, now);
+
     // Update activation history
     UpdateActivationHistory(pattern, now);
 
@@ -64,7 +68,9 @@ void AssociationLearningSystem::RecordPatternActivations(
 
     // Record all activations
     tracker_.RecordActivations(patterns, now);
-    
+
+    UpdateContextProfiles(patterns, context, now);
+
     for (const auto& pattern : patterns) {
         UpdateActivationHistory(pattern, now);
     }
@@ -77,7 +83,7 @@ void AssociationLearningSystem::RecordPatternActivations(
 // Association Formation
 // ============================================================================
 
-size_t AssociationLearningSystem::FormNewAssociations(const PatternDatabase& pattern_db) {
+size_t AssociationLearningSystem::FormNewAssociations(PatternDatabase& pattern_db) {
     size_t formed_count = 0;
 
     // Get all patterns that have been tracked in co-occurrence tracker
@@ -93,18 +99,31 @@ size_t AssociationLearningSystem::FormNewAssociations(const PatternDatabase& pat
 
 size_t AssociationLearningSystem::FormAssociationsForPattern(
     PatternID pattern,
-    const PatternDatabase& pattern_db
+    PatternDatabase& pattern_db
 ) {
     size_t formed_count = 0;
 
-    uint32_t min_co_occurrences;
+    AssociationFormationRules rules;
+    bool require_significance;
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
-        min_co_occurrences = config_.formation.min_co_occurrences;
+        rules = formation_rules_;
+        require_significance = config_.require_significance;
     }
+    uint32_t min_co_occurrences = rules.GetConfig().min_co_occurrences;
 
     // Get co-occurring patterns
     auto co_occurring = tracker_.GetCoOccurringPatterns(pattern, min_co_occurrences);
+    if (co_occurring.empty()) {
+        return 0;
+    }
+
+    auto source_node = pattern_db.Retrieve(pattern);
+    std::vector<std::pair<Timestamp, PatternID>> history;
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        history.assign(activation_history_.begin(), activation_history_.end());
+    }
 
     for (const auto& [target, count] : co_occurring) {
         // Skip if association already exists
@@ -112,16 +131,29 @@ size_t AssociationLearningSystem::FormAssociationsForPattern(
             continue;
         }
 
-        // Get co-occurrence count
-        uint32_t co_occ_count = tracker_.GetCoOccurrenceCount(pattern, target);
-        
-        if (co_occ_count >= min_co_occurrences) {
-            // Create new association with default type and initial strength
-            AssociationEdge edge(pattern, target, AssociationType::CATEGORICAL, 0.5f);
+        if (count < min_co_occurrences) {
+            continue;
+        }
+        if (require_significance && !rules.ShouldFormAssociation(tracker_, pattern, target)) {
+            continue;
+        }
 
-            if (matrix_.AddAssociation(edge)) {
-                formed_count++;
+        // Classify from pattern data when both patterns are stored
+        AssociationType type = AssociationType::CATEGORICAL;
+        if (source_node) {
+            if (auto target_node = pattern_db.Retrieve(target)) {
+                type = rules.ClassifyAssociationType(*source_node, *target_node, history);
             }
+        }
+
+        float strength = rules.CalculateInitialStrength(tracker_, pattern, target, type);
+        AssociationEdge edge(pattern, target, type, strength);
+        for (uint32_t i = 0; i < count; ++i) {
+            edge.IncrementCoOccurrence();
+        }
+
+        if (matrix_.AddAssociation(edge)) {
+            formed_count++;
         }
     }
 
@@ -582,6 +614,52 @@ bool AssociationLearningSystem::Load(const std::string& filepath) {
 // ============================================================================
 // Private Helper Methods
 // ============================================================================
+
+void AssociationLearningSystem::UpdateContextProfiles(
+    const std::vector<PatternID>& activated,
+    const ContextVector& context,
+    Timestamp timestamp) {
+
+    if (context.IsEmpty()) {
+        return;
+    }
+
+    Timestamp::Duration window;
+    float learning_rate;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        window = config_.activation_window;
+        learning_rate = config_.reinforcement.learning_rate;
+    }
+
+    // Sources: patterns active in the window before this activation, plus the
+    // other patterns activated together with it
+    std::unordered_set<PatternID> sources(activated.begin(), activated.end());
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        Timestamp cutoff = timestamp - window;
+        for (auto it = activation_history_.rbegin();
+             it != activation_history_.rend() && !(it->first < cutoff); ++it) {
+            sources.insert(it->second);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(reinforcement_mutex_);
+    for (const auto& target : activated) {
+        for (const auto& source : sources) {
+            if (source == target) {
+                continue;
+            }
+            const auto* edge = matrix_.GetAssociation(source, target);
+            if (!edge) {
+                continue;
+            }
+            auto updated = edge->Clone();
+            updated->UpdateContextProfile(context, learning_rate);
+            matrix_.UpdateAssociation(source, target, *updated);
+        }
+    }
+}
 
 void AssociationLearningSystem::UpdateActivationHistory(PatternID pattern, Timestamp timestamp) {
     Timestamp::Duration window;

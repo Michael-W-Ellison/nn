@@ -76,6 +76,11 @@ public:
 
         /// Enable automatic maintenance (decay, competition, normalization, pruning)
         bool enable_auto_maintenance{true};
+
+        /// Also require a significant chi-squared test (formation rules) to
+        /// form an association. Off by default: with few or perfectly
+        /// correlated observations the test has no contrasting data.
+        bool require_significance{false};
     };
 
     // ========================================================================
@@ -100,7 +105,11 @@ public:
     // ========================================================================
 
     /// Record single pattern activation
-    /// Updates co-occurrence statistics and activation history
+    /// Updates co-occurrence statistics and activation history. A non-empty
+    /// context is learned into the context profiles of existing associations
+    /// from recently active patterns into this one (rate:
+    /// config.reinforcement.learning_rate), which context-sensitive
+    /// predictions use.
     /// @param pattern Pattern that was activated
     /// @param context Optional context vector for context-sensitive learning
     void RecordPatternActivation(
@@ -122,10 +131,15 @@ public:
     // ========================================================================
 
     /// Trigger association formation based on co-occurrence statistics
-    /// Analyzes tracked co-occurrences and creates new associations
+    /// Analyzes tracked co-occurrences and creates new associations.
+    /// Pairs need config.formation.min_co_occurrences co-occurrences (and a
+    /// significant chi-squared test when config.require_significance is set).
+    /// The association type is classified from the patterns' data when both
+    /// are in pattern_db (CATEGORICAL otherwise) and the initial strength is
+    /// computed from co-occurrence probability and significance.
     /// @param pattern_db Pattern database for accessing pattern details
     /// @return Number of new associations formed
-    size_t FormNewAssociations(const PatternDatabase& pattern_db);
+    size_t FormNewAssociations(PatternDatabase& pattern_db);
 
     /// Form associations for specific pattern
     /// @param pattern Source pattern
@@ -133,7 +147,7 @@ public:
     /// @return Number of new associations formed
     size_t FormAssociationsForPattern(
         PatternID pattern,
-        const PatternDatabase& pattern_db
+        PatternDatabase& pattern_db
     );
 
     // ========================================================================
@@ -391,6 +405,8 @@ private:
 
     // Helper methods
     void UpdateActivationHistory(PatternID pattern, Timestamp timestamp);
+    void UpdateContextProfiles(const std::vector<PatternID>& activated,
+                               const ContextVector& context, Timestamp timestamp);
     void TrimActivationHistory(Timestamp::Duration window, size_t max_size);
     void UpdateStatistics() const;
     void CheckAutoMaintenance();

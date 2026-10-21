@@ -18,6 +18,7 @@ add_library(dpan_learning
 target_include_directories(dpan_learning PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
 target_link_libraries(dpan_learning PUBLIC

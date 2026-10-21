@@ -535,7 +535,9 @@ struct PatternEngine::Config {
     PatternMatcher::Config matching_config;
 
     // Similarity metric selection
-    std::string similarity_metric{"context"};  // "context", "cosine", "euclidean"
+    std::string similarity_metric{"context"};  // "context", "cosine", "euclidean", "hausdorff",
+                                               // "chamfer", "temporal", "histogram", "spectral";
+                                               // other names throw std::invalid_argument
 
     // Engine options
     bool enable_auto_refinement{true};
@@ -882,10 +884,15 @@ system.RecordPatternActivations(activated);
 ### Association Formation
 
 #### FormNewAssociations
-Analyze co-occurrences and create associations.
+Analyze co-occurrences and create associations. A pair needs
+`config.formation.min_co_occurrences` co-occurrences (and a significant
+chi-squared test when `config.require_significance` is true). The type is
+classified from pattern data when both patterns are in `pattern_db`
+(CATEGORICAL otherwise); the initial strength comes from co-occurrence
+probability and significance.
 
 ```cpp
-size_t FormNewAssociations(const PatternDatabase& pattern_db);
+size_t FormNewAssociations(PatternDatabase& pattern_db);
 ```
 
 **Usage:**

@@ -1155,5 +1155,75 @@ TEST(AssociationLearningSystemTest, ConcurrentReinforceAndPredict) {
     EXPECT_EQ(90u, system.GetAssociationCount());
 }
 
+TEST(AssociationLearningSystemTest, StreamingActivationsFormSignificantAssociations) {
+    AssociationLearningSystem::Config config;
+    config.co_occurrence.window_size = std::chrono::milliseconds(30);
+    config.formation.min_co_occurrences = 3;
+    config.require_significance = true;
+    config.enable_auto_maintenance = false;
+    AssociationLearningSystem system(config);
+
+    MemoryBackend db(MemoryBackend::Config{});
+    PatternID a = CreateTestPattern();
+    PatternID b = CreateTestPattern();
+    PatternID c = CreateTestPattern();
+
+    // A is followed by B within the window; C appears on its own
+    for (int episode = 0; episode < 6; ++episode) {
+        system.RecordPatternActivation(a);
+        system.RecordPatternActivation(b);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        system.RecordPatternActivation(c);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    }
+
+    EXPECT_GT(system.FormNewAssociations(db), 0u);
+
+    const auto* edge = system.GetAssociationMatrix().GetAssociation(b, a);
+    if (!edge) {
+        edge = system.GetAssociationMatrix().GetAssociation(a, b);
+    }
+    ASSERT_NE(nullptr, edge);
+    EXPECT_EQ(6u, edge->GetCoOccurrenceCount());
+    EXPECT_GT(edge->GetStrength(), 0.0f);
+
+    EXPECT_FALSE(system.GetAssociationMatrix().HasAssociation(a, c));
+    EXPECT_FALSE(system.GetAssociationMatrix().HasAssociation(c, a));
+}
+
+TEST(AssociationLearningSystemTest, ActivationContextIsLearnedByAssociations) {
+    AssociationLearningSystem::Config config;
+    config.enable_auto_maintenance = false;
+    config.reinforcement.learning_rate = 0.5f;
+    AssociationLearningSystem system(config);
+    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+
+    PatternID a = CreateTestPattern();
+    PatternID b = CreateTestPattern();
+    matrix.AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.6f));
+
+    ContextVector kitchen;
+    kitchen.Set("kitchen", 1.0f);
+    ContextVector garage;
+    garage.Set("garage", 1.0f);
+
+    for (int i = 0; i < 5; ++i) {
+        system.RecordPatternActivation(a, kitchen);
+        system.RecordPatternActivation(b, kitchen);
+    }
+
+    const auto* edge = matrix.GetAssociation(a, b);
+    ASSERT_NE(nullptr, edge);
+    EXPECT_FALSE(edge->GetContextProfile().IsEmpty());
+    EXPECT_GT(edge->GetContextualStrength(kitchen), edge->GetContextualStrength(garage));
+
+    // Context-sensitive prediction prefers the matching context
+    auto in_kitchen = system.PredictWithConfidence(a, 1, &kitchen);
+    auto in_garage = system.PredictWithConfidence(a, 1, &garage);
+    ASSERT_EQ(1u, in_kitchen.size());
+    ASSERT_EQ(1u, in_garage.size());
+    EXPECT_GT(in_kitchen[0].second, in_garage[0].second);
+}
+
 } // namespace
 } // namespace dpan

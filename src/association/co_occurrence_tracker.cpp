@@ -51,6 +51,10 @@ void CoOccurrenceTracker::RecordActivation(PatternID pattern, Timestamp timestam
     InsertActivation(pattern, timestamp);
     pattern_counts_[pattern]++;
 
+    // Each single activation is one observation window (the window ending
+    // at it), so probabilities and significance tests work for streams
+    total_windows_++;
+
     // Prune old activations (older than 2x window size to save memory)
     PruneOldActivationsUnlocked(latest_timestamp_ - (config_.window_size * 2));
 }

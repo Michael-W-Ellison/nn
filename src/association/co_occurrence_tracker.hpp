@@ -46,6 +46,8 @@ public:
     // ========================================================================
 
     /// Record single pattern activation at given time
+    /// Counts as one observation window: co-occurrences with every other
+    /// pattern activated in [timestamp - window_size, timestamp]
     /// @param pattern Pattern that was activated
     /// @param timestamp Activation time (defaults to now)
     void RecordActivation(PatternID pattern, Timestamp timestamp = Timestamp::Now());

@@ -12,7 +12,8 @@ add_library(dpan_similarity
 )
 
 target_include_directories(dpan_similarity PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
 # Link to core and storage libraries

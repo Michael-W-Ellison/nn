@@ -83,15 +83,35 @@ std::shared_ptr<SimilarityMetric> PatternEngine::CreateSimilarityMetric(
         return std::make_shared<HistogramSimilarity>();
     } else if (metric_name == "spectral") {
         return std::make_shared<SpectralSimilarity>();
-    } else {
-        // Default to context vector similarity
-        return std::make_shared<ContextVectorSimilarity>();
+    } else if (metric_name == "cosine") {
+        return std::make_shared<CosineSimilarity>();
+    } else if (metric_name == "euclidean") {
+        return std::make_shared<EuclideanSimilarity>();
     }
+
+    throw std::invalid_argument(
+        "Unknown similarity metric '" + metric_name + "' (supported: context, cosine, "
+        "euclidean, hausdorff, chamfer, temporal, histogram, spectral)");
 }
 
 // ============================================================================
 // High-Level API
 // ============================================================================
+
+std::vector<PatternData> PatternEngine::ExtractForModality(
+    const std::vector<uint8_t>& raw_input,
+    DataModality modality) const {
+
+    if (modality == extractor_->GetConfig().modality) {
+        return extractor_->Extract(raw_input);
+    }
+
+    // Different modality than configured: extract with an adjusted copy of
+    // the extraction config (the shared extractor is left unchanged)
+    PatternExtractor::Config config = extractor_->GetConfig();
+    config.modality = modality;
+    return PatternExtractor(config).Extract(raw_input);
+}
 
 PatternEngine::ProcessResult PatternEngine::ProcessInput(
     const std::vector<uint8_t>& raw_input,
@@ -105,7 +125,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
     result.updated_patterns.clear();
 
     // Step 1: Extract patterns from raw input
-    auto extracted_patterns = extractor_->Extract(raw_input);
+    auto extracted_patterns = ExtractForModality(raw_input, modality);
 
     if (extracted_patterns.empty()) {
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -191,7 +211,7 @@ std::vector<PatternID> PatternEngine::DiscoverPatterns(
     std::vector<PatternID> discovered;
 
     // Extract patterns from raw input
-    auto extracted_patterns = extractor_->Extract(raw_input);
+    auto extracted_patterns = ExtractForModality(raw_input, modality);
 
     // Create patterns for all extracted data
     for (const auto& pattern_data : extracted_patterns) {

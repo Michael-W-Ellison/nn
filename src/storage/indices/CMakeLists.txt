@@ -7,7 +7,8 @@ add_library(dpan_indices
 )
 
 target_include_directories(dpan_indices PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
 # Link to core library
