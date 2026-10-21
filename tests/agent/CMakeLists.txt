@@ -1,0 +1,9 @@
+# Agent module tests
+
+add_executable(agent_environment_test environment_test.cpp)
+target_link_libraries(agent_environment_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_environment_test)
+
+add_executable(agent_encoders_test encoders_test.cpp)
+target_link_libraries(agent_encoders_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_encoders_test)

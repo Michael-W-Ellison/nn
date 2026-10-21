@@ -173,4 +173,40 @@ integration test with a fixed seed and a fake clock.
 | Phase | State |
 |---|---|
 | 0. Groundwork | Complete. Clock (`core/clock.hpp`), little-endian serialization (`core/binary_io.hpp`) with byte-level fixtures, optimizer `SaveState`/`LoadState`, `ClipGradientNorm`, learning-rate schedules, `AssociationLearningSystem::AddAssociation`/`SetAssociationStrength`/`RemoveAssociation`, CMake options `DPAN_WITH_SQLITE` and `DPAN_WITH_ZLIB`. |
-| 1–8 | Not started |
+| 1. Spec and encoders | Complete. `src/agent/environment.hpp` (spec, `Value`, validation), `src/agent/encoders.hpp` (encoders, `ObservationEncoder`). Notes below. |
+| 2–8 | Not started |
+
+### Phase 1 implementation notes
+
+Decisions made where sections 1–2 do not specify:
+
+- Every channel's encoding ends with a missing indicator: 1 when the
+  channel is absent, the fraction of NaN elements for NUMERIC and
+  TIME_SERIES vectors, else 0.
+- CATEGORICAL with known categories has an extra "unknown category" slot.
+  A known category may also be given by its index (a number).
+- Open-vocabulary categories and text are hashed with FNV-1a plus a
+  splitmix64 finalizer (not `std::hash`), so buckets are the same on every
+  platform. The learned embedding layers after them belong to the agent's
+  network (Phase 2); encoders report the width to use (`EmbeddingSize()`:
+  8 for categories, 32 for text).
+- TIME_SERIES: each observation adds one value per series. Per series:
+  16 standardized values (padded with the oldest value), 15 differences,
+  and the window's mean, standard deviation, minimum and maximum; then the
+  window fill fraction. A missing value repeats the previous one.
+  `ResetEpisode()` clears the windows.
+- IMAGE: the pixel range divisor (1, 255, 65535 or the maximum) is inferred
+  from the largest pixel seen. Images are converted to the spec's channel
+  count and resampled to 16×16 by area averaging. All images of a channel
+  must have the same size (declared or inferred from the first one).
+- `Encode()` on an encoder is const and returns the encoding the value
+  will have once learned from, so prediction-time encoding changes no
+  state. `ObservationEncoder::Encode` validates the whole observation
+  before learning anything from it.
+- An `ObservationEncoder` is not ready (returns no fused vector) until the
+  sizes of NUMERIC and TIME_SERIES channels declared with size 0 have been
+  seen.
+- CLASS outputs may leave their class list empty (learned from labels);
+  ACTION outputs must list their actions. OUTCOME feedback may train CLASS
+  or ACTION outputs.
+- Encoder state is not yet saved (Phase 5).

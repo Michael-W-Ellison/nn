@@ -52,6 +52,7 @@ add_subdirectory(src/association)
 add_subdirectory(src/memory)
 add_subdirectory(src/learning)
 add_subdirectory(src/nn)
+add_subdirectory(src/agent)
 
 target_link_libraries(dpan_core PUBLIC Threads::Threads)
 
@@ -65,6 +66,7 @@ set(DPAN_LIBRARIES
     dpan_memory
     dpan_learning
     dpan_nn
+    dpan_agent
 )
 
 # Umbrella target: link dpan::dpan to use the whole library

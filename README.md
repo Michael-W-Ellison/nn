@@ -24,6 +24,7 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
+| `dpan::agent` | Drop-in learner, in progress (`docs/AGENT_PLAN.md`): `EnvironmentSpec` and its validation, input encoders and `ObservationEncoder` |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
