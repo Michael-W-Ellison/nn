@@ -187,6 +187,15 @@ float UtilityCalculator::CalculateConfidenceScore(const PatternNode& pattern) co
 // AccessStats
 // ============================================================================
 
+AccessStats AccessStatsFromNode(const PatternNode& pattern) {
+    AccessStats stats;
+    stats.access_count = pattern.GetAccessCount();
+    stats.creation_time = pattern.GetCreationTime();
+    stats.last_access = stats.access_count > 0 ? pattern.GetLastAccessed()
+                                               : pattern.GetCreationTime();
+    return stats;
+}
+
 void AccessStats::RecordAccess(Timestamp timestamp) {
     if (access_count == 0) {
         // First access
@@ -301,6 +310,18 @@ std::optional<AccessStats> AccessTracker::GetAssociationStatsSnapshot(
         return std::nullopt;
     }
     return it->second;
+}
+
+std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>
+AccessTracker::GetAssociationAccessCounts() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash> counts;
+    counts.reserve(association_stats_.size());
+    for (const auto& [key, stats] : association_stats_) {
+        counts[key] = static_cast<size_t>(stats.access_count);
+    }
+    return counts;
 }
 
 const AccessStats* AccessTracker::GetAssociationStats(PatternID source, PatternID target) const {

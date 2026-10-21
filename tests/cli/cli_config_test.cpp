@@ -4,6 +4,7 @@
 
 #include "cli/cli_config.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <fstream>
 #include <filesystem>
 
@@ -11,7 +12,7 @@ using namespace dpan;
 
 class CliConfigTest : public ::testing::Test {
 protected:
-    std::string temp_config_path = "/tmp/test_config.yaml";
+    std::string temp_config_path = test::UniqueTempPath("test_config") + ".yaml";
 
     void TearDown() override {
         // Clean up temp file

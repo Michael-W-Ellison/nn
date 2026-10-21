@@ -48,7 +48,7 @@ TEST(EdgeCaseTest, PatternNodeWithExtremelyLargeFeatureVector) {
     EXPECT_NO_THROW({
         PatternData data = PatternData::FromFeatures(large_features, DataModality::NUMERIC);
         PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
-        EXPECT_EQ(10000u, node.GetData().GetFeatures().size());
+        EXPECT_EQ(10000u, node.GetData().GetFeatures().Dimension());
     });
 }
 
@@ -95,23 +95,21 @@ TEST(EdgeCaseTest, MemoryBackendStoreNullPatternData) {
     EXPECT_TRUE(backend.Store(node));
 }
 
-TEST(EdgeCaseTest, MemoryBackendExceedsCapacity) {
+TEST(EdgeCaseTest, MemoryBackendHasNoCapacityLimit) {
+    // initial_capacity only pre-sizes the hash map; storage is unbounded
+    // (memory limits are enforced by MemoryManager pruning, not the backend)
     MemoryBackend::Config config;
-    config.max_size = 10;  // Very small capacity
+    config.initial_capacity = 10;
     MemoryBackend backend(config);
 
-    // Store more than capacity
-    std::vector<PatternID> ids;
     for (int i = 0; i < 20; ++i) {
         FeatureVector features(std::vector<float>(1, static_cast<float>(i)));
         PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
         PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
-        ids.push_back(node.GetID());
-        backend.Store(node);
+        EXPECT_TRUE(backend.Store(node));
     }
 
-    // Backend should handle capacity (either reject or evict)
-    EXPECT_LE(backend.Count(), config.max_size);
+    EXPECT_EQ(20u, backend.Count());
 }
 
 TEST(EdgeCaseTest, MemoryBackendConcurrentStoreRetrieve) {
@@ -139,12 +137,9 @@ TEST(EdgeCaseTest, AssociationMatrixSelfLoop) {
 
     PatternID id = PatternID::Generate();
 
-    // Try to create self-loop (pattern associated with itself)
-    bool result = matrix.AddAssociation(id, id, 0.5f, AssociationType::CAUSAL);
-
-    // Should either accept (if allowed) or reject (if prevented)
-    // Document behavior: Currently allows self-loops
-    EXPECT_TRUE(result);  // Or EXPECT_FALSE if self-loops prevented
+    // Self-loops (pattern associated with itself) are allowed
+    EXPECT_TRUE(matrix.AddAssociation(AssociationEdge(id, id, AssociationType::CAUSAL, 0.5f)));
+    EXPECT_TRUE(matrix.HasAssociation(id, id));
 }
 
 TEST(EdgeCaseTest, AssociationMatrixZeroStrength) {
@@ -153,11 +148,11 @@ TEST(EdgeCaseTest, AssociationMatrixZeroStrength) {
     PatternID id1 = PatternID::Generate();
     PatternID id2 = PatternID::Generate();
 
-    // Association with zero strength
-    bool result = matrix.AddAssociation(id1, id2, 0.0f, AssociationType::CAUSAL);
-
-    // Should handle zero strength (might reject or normalize)
-    EXPECT_TRUE(result || !result);  // Document actual behavior
+    // Zero-strength associations are stored as-is (pruning removes them)
+    EXPECT_TRUE(matrix.AddAssociation(AssociationEdge(id1, id2, AssociationType::CAUSAL, 0.0f)));
+    const auto* edge = matrix.GetAssociation(id1, id2);
+    ASSERT_NE(nullptr, edge);
+    EXPECT_FLOAT_EQ(0.0f, edge->GetStrength());
 }
 
 TEST(EdgeCaseTest, AssociationMatrixNegativeStrength) {
@@ -166,16 +161,11 @@ TEST(EdgeCaseTest, AssociationMatrixNegativeStrength) {
     PatternID id1 = PatternID::Generate();
     PatternID id2 = PatternID::Generate();
 
-    // Negative strength (inhibitory association?)
-    bool result = matrix.AddAssociation(id1, id2, -0.5f, AssociationType::CAUSAL);
-
-    // Should either normalize or reject
-    if (result) {
-        auto edge = matrix.GetAssociation(id1, id2);
-        EXPECT_TRUE(edge.has_value());
-        // Verify strength is clamped to valid range
-        EXPECT_GE(edge->GetStrength(), 0.0f);
-    }
+    // Negative strength is clamped to 0
+    EXPECT_TRUE(matrix.AddAssociation(AssociationEdge(id1, id2, AssociationType::CAUSAL, -0.5f)));
+    const auto* edge = matrix.GetAssociation(id1, id2);
+    ASSERT_NE(nullptr, edge);
+    EXPECT_FLOAT_EQ(0.0f, edge->GetStrength());
 }
 
 TEST(EdgeCaseTest, AssociationMatrixExtremelyLargeStrength) {
@@ -184,18 +174,25 @@ TEST(EdgeCaseTest, AssociationMatrixExtremelyLargeStrength) {
     PatternID id1 = PatternID::Generate();
     PatternID id2 = PatternID::Generate();
 
-    // Very large strength value
-    bool result = matrix.AddAssociation(id1, id2, 1000000.0f, AssociationType::CAUSAL);
-
-    if (result) {
-        auto edge = matrix.GetAssociation(id1, id2);
-        EXPECT_TRUE(edge.has_value());
-        // Should be clamped to [0, 1] or documented maximum
-        EXPECT_LE(edge->GetStrength(), 10.0f);  // Reasonable upper bound
-    }
+    // Strength above 1 is clamped to 1
+    EXPECT_TRUE(matrix.AddAssociation(AssociationEdge(id1, id2, AssociationType::CAUSAL, 1000000.0f)));
+    const auto* edge = matrix.GetAssociation(id1, id2);
+    ASSERT_NE(nullptr, edge);
+    EXPECT_FLOAT_EQ(1.0f, edge->GetStrength());
 }
 
-TEST(EdgeCaseTest, AssociationMatrixMillionEdges) {
+TEST(EdgeCaseTest, AssociationMatrixDuplicateAssociationRejected) {
+    AssociationMatrix matrix;
+
+    PatternID id1 = PatternID::Generate();
+    PatternID id2 = PatternID::Generate();
+
+    EXPECT_TRUE(matrix.AddAssociation(AssociationEdge(id1, id2, AssociationType::CAUSAL, 0.5f)));
+    EXPECT_FALSE(matrix.AddAssociation(AssociationEdge(id1, id2, AssociationType::CAUSAL, 0.9f)));
+    EXPECT_EQ(1u, matrix.GetAssociationCount());
+}
+
+TEST(EdgeCaseTest, AssociationMatrixThousandEdges) {
     AssociationMatrix matrix;
 
     // Create 1000 patterns
@@ -204,18 +201,18 @@ TEST(EdgeCaseTest, AssociationMatrixMillionEdges) {
         patterns.push_back(PatternID::Generate());
     }
 
-    // Create 1000 associations (not 1M to keep test fast)
+    // Create 1000 associations in a ring
     size_t added = 0;
     for (int i = 0; i < 1000; ++i) {
         PatternID from = patterns[i % patterns.size()];
         PatternID to = patterns[(i + 1) % patterns.size()];
-        if (matrix.AddAssociation(from, to, 0.5f, AssociationType::CAUSAL)) {
+        if (matrix.AddAssociation(AssociationEdge(from, to, AssociationType::CAUSAL, 0.5f))) {
             ++added;
         }
     }
 
     EXPECT_EQ(1000u, added);
-    EXPECT_GE(matrix.GetAssociationCount(), 1000u);
+    EXPECT_EQ(1000u, matrix.GetAssociationCount());
 }
 
 // ============================================================================
@@ -343,32 +340,6 @@ TEST(EdgeCaseTest, PatternIDMaxValue) {
 
     EXPECT_EQ(std::numeric_limits<uint64_t>::max(), max_id.value());
 }
-
-// ============================================================================
-// Resource Exhaustion (Commented out for safety)
-// ============================================================================
-
-// TEST(EdgeCaseTest, DISABLED_OutOfMemoryHandling) {
-//     // This test would exhaust memory - disabled by default
-//     // Only run in isolated environment with proper limits
-//
-//     MemoryBackend::Config config;
-//     config.max_size = std::numeric_limits<size_t>::max();
-//     MemoryBackend backend(config);
-//
-//     try {
-//         for (size_t i = 0; i < 1000000000; ++i) {
-//             FeatureVector features(1000, 1.0f);  // 1000 floats per pattern
-//             PatternData data = PatternData::FromFeatures(features, DataModality::NUMERIC);
-//             PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
-//             backend.Store(node);
-//         }
-//         FAIL() << "Expected out-of-memory exception";
-//     } catch (const std::bad_alloc&) {
-//         // Expected behavior
-//         SUCCEED();
-//     }
-// }
 
 } // namespace
 } // namespace dpan

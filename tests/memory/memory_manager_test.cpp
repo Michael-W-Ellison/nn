@@ -3,7 +3,11 @@
 #include "storage/memory_backend.hpp"
 #include "similarity/similarity_metric.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
+#include <chrono>
+#include <filesystem>
 #include <memory>
+#include <thread>
 
 using namespace dpan;
 
@@ -427,4 +431,147 @@ TEST_F(MemoryManagerTest, FullIntegrationWorkflow) {
     EXPECT_GT(final_stats.last_pruning_time.ToMicros(), 0);
     EXPECT_GT(final_stats.last_transition_time.ToMicros(), 0);
     EXPECT_GT(final_stats.last_consolidation_time.ToMicros(), 0);
+}
+
+// ============================================================================
+// Access-Driven Utilities, Pruning and Forgetting
+// ============================================================================
+
+namespace {
+
+PatternID StoreDistinctPattern(PatternDatabase& db, float seed) {
+    FeatureVector fv(3);
+    fv[0] = seed;
+    fv[1] = -seed * 2.0f;
+    fv[2] = seed * seed + 1.0f;
+    PatternData data = PatternData::FromFeatures(fv, DataModality::NUMERIC);
+    PatternNode node(PatternID::Generate(), data, PatternType::ATOMIC);
+    node.SetConfidenceScore(0.8f);
+    PatternID id = node.GetID();
+    db.Store(node);
+    return id;
+}
+
+}  // namespace
+
+TEST_F(MemoryManagerTest, UtilitiesReflectRecordedAccesses) {
+    memory_manager_->Initialize(pattern_db_.get(), assoc_matrix_.get(), similarity_metric_);
+
+    PatternID used = StoreDistinctPattern(*pattern_db_, 1.0f);
+    PatternID untracked = StoreDistinctPattern(*pattern_db_, 2.0f);
+    for (int i = 0; i < 200; ++i) {
+        memory_manager_->RecordPatternAccess(used);
+    }
+
+    auto utilities = memory_manager_->ComputePatternUtilities();
+    ASSERT_EQ(2u, utilities.size());
+    // Untracked pattern is scored from its own node: new and never accessed
+    EXPECT_GT(utilities[used], utilities[untracked]);
+    EXPECT_EQ(1u, memory_manager_->GetAccessTracker().GetTrackedPatternCount());
+}
+
+TEST_F(MemoryManagerTest, PruningRemovesUnusedPatterns) {
+    MemoryManager::Config config;
+    config.pattern_pruner_config.min_pattern_age = std::chrono::milliseconds(1);
+    config.pattern_pruner_config.enable_merging = false;
+    MemoryManager manager(config);
+    manager.Initialize(pattern_db_.get(), assoc_matrix_.get(), similarity_metric_);
+
+    PatternID used = StoreDistinctPattern(*pattern_db_, 1.0f);
+    PatternID unused = StoreDistinctPattern(*pattern_db_, 2.0f);
+    for (int i = 0; i < 200; ++i) {
+        manager.RecordPatternAccess(used);
+    }
+    // Last used 1000 hours ago: recency (and so utility) is low
+    manager.RecordPatternAccess(unused, Timestamp::Now() - std::chrono::hours(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    manager.PerformPruning();
+
+    EXPECT_TRUE(pattern_db_->Exists(used));
+    EXPECT_FALSE(pattern_db_->Exists(unused));
+    EXPECT_EQ(1u, manager.GetStatistics().patterns_pruned_last_cycle);
+}
+
+TEST_F(MemoryManagerTest, AssociationPruningRemovesWeakAssociations) {
+    MemoryManager::Config config;
+    config.association_pruner_config.min_association_strength = 0.05f;
+    config.association_pruner_config.weak_strength_threshold = 0.1f;
+    MemoryManager manager(config);
+    manager.Initialize(pattern_db_.get(), assoc_matrix_.get(), similarity_metric_);
+
+    PatternID a = PatternID::Generate();
+    PatternID b = PatternID::Generate();
+    PatternID c = PatternID::Generate();
+    assoc_matrix_->AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.01f));
+    assoc_matrix_->AddAssociation(AssociationEdge(a, c, AssociationType::CAUSAL, 0.9f));
+
+    manager.PerformPruning();
+
+    EXPECT_FALSE(assoc_matrix_->HasAssociation(a, b));
+    EXPECT_TRUE(assoc_matrix_->HasAssociation(a, c));
+    EXPECT_EQ(1u, manager.GetStatistics().associations_pruned_last_cycle);
+}
+
+TEST_F(MemoryManagerTest, ForgettingDecaysUnusedPatternConfidence) {
+    MemoryManager::Config config;
+    config.decay_constant = 100000.0f;  // per hour: visible after milliseconds
+    MemoryManager manager(config);
+    manager.Initialize(pattern_db_.get(), assoc_matrix_.get(), nullptr);
+
+    PatternID id = StoreDistinctPattern(*pattern_db_, 1.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    manager.ApplyForgetting();
+
+    auto node = pattern_db_->Retrieve(id);
+    ASSERT_TRUE(node.has_value());
+    EXPECT_LT(node->GetConfidenceScore(), 0.8f);
+    EXPECT_EQ(1u, manager.GetStatistics().patterns_with_decay);
+}
+
+TEST_F(MemoryManagerTest, SleepConsolidationStrengthensUsefulPatterns) {
+    MemoryManager::Config config;
+    config.sleep_config.min_utility_for_strengthening = 0.3f;
+    config.pattern_pruner_config.enable_merging = false;
+    MemoryManager manager(config);
+    manager.Initialize(pattern_db_.get(), assoc_matrix_.get(), similarity_metric_);
+
+    PatternID used = StoreDistinctPattern(*pattern_db_, 1.0f);
+    for (int i = 0; i < 500; ++i) {
+        manager.RecordPatternAccess(used);
+    }
+
+    auto result = manager.GetSleepConsolidator()->TriggerConsolidation();
+
+    EXPECT_TRUE(result.was_successful);
+    EXPECT_EQ(1u, result.patterns_strengthened);
+    auto node = pattern_db_->Retrieve(used);
+    ASSERT_TRUE(node.has_value());
+    EXPECT_GT(node->GetConfidenceScore(), 0.8f);
+}
+
+TEST_F(MemoryManagerTest, TierTransitionsRunOnceTiersInitialized) {
+    std::filesystem::path base = test::UniqueTempPath("dpan_memory_manager_tiers");
+    std::filesystem::remove_all(base);
+
+    memory_manager_->Initialize(pattern_db_.get(), assoc_matrix_.get(), similarity_metric_);
+    auto& tiers = memory_manager_->GetTierManager();
+    tiers.Initialize(CreateActiveTier(), CreateWarmTier((base / "warm").string()),
+                     CreateColdTier((base / "cold").string()),
+                     CreateArchiveTier((base / "archive").string()));
+
+    FeatureVector fv(2);
+    fv[0] = 1.0f;
+    fv[1] = 2.0f;
+    PatternNode node(PatternID::Generate(), PatternData::FromFeatures(fv, DataModality::NUMERIC),
+                     PatternType::ATOMIC);
+    ASSERT_TRUE(tiers.StorePattern(node, MemoryTier::ACTIVE));
+
+    memory_manager_->PerformTierTransitions();
+
+    EXPECT_NE(MemoryTier::ACTIVE, tiers.GetPatternTier(node.GetID()));
+    EXPECT_EQ(0u, memory_manager_->GetStatistics().active_patterns);
+
+    std::filesystem::remove_all(base);
 }

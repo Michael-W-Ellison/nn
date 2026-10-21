@@ -330,6 +330,7 @@ private:
     void InitializeDecayFunction();
     void ApplyDecayToPatterns();
     void ApplyInterferenceToPatterns();
+    void RunSleepConsolidation(SleepConsolidator::ConsolidationCycleResult& result);
 };
 
 } // namespace dpan

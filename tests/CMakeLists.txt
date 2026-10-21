@@ -17,14 +17,13 @@ add_subdirectory(integration)
 add_subdirectory(benchmarks)
 add_subdirectory(cli)
 
-# Edge case tests (added for TDD analysis)
-# TODO: Fix API compatibility issues with FeatureVector and AssociationMatrix
-# add_executable(edge_case_tests edge_case_tests.cpp)
-# target_link_libraries(edge_case_tests PRIVATE
-#     dpan_core
-#     dpan_storage
-#     dpan_association
-#     dpan_memory
-#     gtest_main
-# )
-# add_test(NAME EdgeCaseTests COMMAND edge_case_tests)
+# Edge case tests
+add_executable(edge_case_tests edge_case_tests.cpp)
+target_link_libraries(edge_case_tests PRIVATE
+    dpan_core
+    dpan_storage
+    dpan_association
+    dpan_memory
+    GTest::gtest_main
+)
+gtest_discover_tests(edge_case_tests)

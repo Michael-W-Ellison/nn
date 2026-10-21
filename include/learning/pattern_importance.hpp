@@ -27,6 +27,7 @@
 
 #include "core/types.hpp"
 #include "storage/pattern_database.hpp"
+#include "association/association_matrix.hpp"
 #include <map>
 #include <mutex>
 #include <cmath>
@@ -152,10 +153,11 @@ public:
     /// Scores based on number of strong associations (strength > 0.5).
     /// Formula: score = log(1 + strong_assoc_count) / log(1 + max_assoc_count)
     ///
-    /// @param pattern_id Pattern to score
-    /// @return Association score in [0, 1], or 0.0 if pattern not found
+    /// Counts both outgoing and incoming associations.
     ///
-    /// @note Currently returns 0.5 as placeholder until AssociationSystem is integrated
+    /// @param pattern_id Pattern to score
+    /// @return Association score in [0, 1]; 0.5 (neutral) if no association
+    ///         matrix has been set with SetAssociationMatrix()
     float ComputeAssociationScore(PatternID pattern_id) const;
 
     /// Compute prediction success rate score
@@ -230,6 +232,16 @@ public:
     /// @param db New pattern database (not owned)
     void SetPatternDatabase(PatternDatabase* db);
 
+    /// Set association matrix used for association richness scores
+    ///
+    /// @param matrix Association matrix (not owned, may be nullptr)
+    void SetAssociationMatrix(const AssociationMatrix* matrix);
+
+    /// Set maximum strong-association count for normalization
+    ///
+    /// @param max_count Count that maps to an association score of 1.0
+    void SetMaxAssociationCount(uint32_t max_count);
+
     /// Set maximum access count for normalization
     ///
     /// This should be set to the maximum observed access count across all patterns
@@ -258,6 +270,12 @@ private:
 
     /// Maximum observed access count (for normalization)
     uint32_t max_access_count_;
+
+    /// Association matrix for association scores (not owned, may be nullptr)
+    const AssociationMatrix* assoc_matrix_{nullptr};
+
+    /// Strong-association count that maps to score 1.0
+    uint32_t max_association_count_{100};
 
     /// Statistics counters
     mutable size_t importance_calculations_;

@@ -86,15 +86,28 @@ float PatternImportanceCalculator::ComputeConfidenceScore(PatternID pattern_id) 
 }
 
 float PatternImportanceCalculator::ComputeAssociationScore(PatternID pattern_id) const {
-    // Placeholder implementation until AssociationSystem is integrated
-    // In a full implementation, this would:
-    // 1. Query AssociationSystem for all associations involving this pattern
-    // 2. Count associations with strength > 0.5
-    // 3. Normalize using log scaling similar to frequency
-    //
-    // For now, return neutral score
-    (void)pattern_id;  // Unused parameter
-    return kDefaultScore;
+    if (!assoc_matrix_) {
+        return kDefaultScore;  // No association information available
+    }
+
+    // Count strong associations (strength > 0.5) in either direction
+    constexpr float kStrongAssociation = 0.5f;
+    size_t strong_count = 0;
+    for (const auto* edge : assoc_matrix_->GetOutgoingAssociations(pattern_id)) {
+        if (edge->GetStrength() > kStrongAssociation) {
+            strong_count++;
+        }
+    }
+    for (const auto* edge : assoc_matrix_->GetIncomingAssociations(pattern_id)) {
+        if (edge->GetStrength() > kStrongAssociation) {
+            strong_count++;
+        }
+    }
+
+    // Log scaling: score = log(1 + count) / log(1 + max_count)
+    float log_count = std::log(1.0f + static_cast<float>(strong_count));
+    float log_max = std::log(1.0f + static_cast<float>(std::max<uint32_t>(1, max_association_count_)));
+    return std::min(1.0f, log_count / log_max);
 }
 
 float PatternImportanceCalculator::ComputeSuccessRateScore(PatternID pattern_id) const {
@@ -194,6 +207,14 @@ const ImportanceWeights& PatternImportanceCalculator::GetWeights() const {
 
 void PatternImportanceCalculator::SetPatternDatabase(PatternDatabase* db) {
     pattern_db_ = db;
+}
+
+void PatternImportanceCalculator::SetAssociationMatrix(const AssociationMatrix* matrix) {
+    assoc_matrix_ = matrix;
+}
+
+void PatternImportanceCalculator::SetMaxAssociationCount(uint32_t max_count) {
+    max_association_count_ = max_count;
 }
 
 void PatternImportanceCalculator::SetMaxAccessCount(uint32_t max_count) {

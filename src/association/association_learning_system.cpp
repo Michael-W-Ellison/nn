@@ -403,9 +403,20 @@ std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithA
         association_strengths[target] = strength;
     }
 
-    // Use attention mechanism to combine association scores with attention weights
-    // ApplyAttention handles the combination logic using configured weights
-    auto weighted_predictions = attention->ApplyAttention(source, candidates, context);
+    // Combine association strengths with attention weights:
+    //   score = association_weight * strength + attention_weight * attention
+    auto attention_weights = attention->ComputeAttention(source, candidates, context);
+    const AttentionConfig& attention_config = attention->GetConfig();
+
+    std::vector<std::pair<PatternID, float>> weighted_predictions;
+    weighted_predictions.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        auto it = attention_weights.find(candidate);
+        float attention_weight = it != attention_weights.end() ? it->second : 0.0f;
+        float score = attention_config.association_weight * association_strengths[candidate] +
+                      attention_config.attention_weight * attention_weight;
+        weighted_predictions.emplace_back(candidate, score);
+    }
 
     // Sort by combined score (descending)
     std::sort(weighted_predictions.begin(), weighted_predictions.end(),

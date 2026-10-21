@@ -79,6 +79,69 @@ void CoOccurrenceTracker::RecordActivations(
 }
 
 // ============================================================================
+// Pair Count Table
+// ============================================================================
+
+namespace {
+
+inline uint64_t MixPair(uint64_t first, uint64_t second) {
+    uint64_t x = first * 0x9e3779b97f4a7c15ULL ^ (second + 0x632be59bd9b4e019ULL);
+    x ^= x >> 31;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 29;
+    return x;
+}
+
+}  // namespace
+
+size_t CoOccurrenceTracker::PairCounts::FindSlot(uint64_t first, uint64_t second) const {
+    size_t mask = slots_.size() - 1;
+    size_t index = static_cast<size_t>(MixPair(first, second)) & mask;
+    while (slots_[index].first != 0 &&
+           (slots_[index].first != first || slots_[index].second != second)) {
+        index = (index + 1) & mask;  // Linear probing
+    }
+    return index;
+}
+
+void CoOccurrenceTracker::PairCounts::Grow() {
+    std::vector<Slot> old = std::move(slots_);
+    slots_.assign(old.empty() ? 64 : old.size() * 2, Slot{});
+    for (const auto& slot : old) {
+        if (slot.first != 0) {
+            slots_[FindSlot(slot.first, slot.second)] = slot;
+        }
+    }
+}
+
+void CoOccurrenceTracker::PairCounts::Increment(PatternID p1, PatternID p2) {
+    // Keep load factor <= 1/2
+    if ((size_ + 1) * 2 > slots_.size()) {
+        Grow();
+    }
+    Slot& slot = slots_[FindSlot(p1.value(), p2.value())];
+    if (slot.first == 0) {
+        slot.first = p1.value();
+        slot.second = p2.value();
+        size_++;
+    }
+    slot.count++;
+}
+
+uint32_t CoOccurrenceTracker::PairCounts::Get(PatternID p1, PatternID p2) const {
+    if (slots_.empty()) {
+        return 0;
+    }
+    const Slot& slot = slots_[FindSlot(p1.value(), p2.value())];
+    return slot.first != 0 ? slot.count : 0;
+}
+
+void CoOccurrenceTracker::PairCounts::Clear() {
+    slots_.clear();
+    size_ = 0;
+}
+
+// ============================================================================
 // Helper Methods
 // ============================================================================
 
@@ -126,7 +189,7 @@ void CoOccurrenceTracker::IncrementPair(PatternID p1, PatternID p2) {
     if (p2 < p1) {
         std::swap(p1, p2);
     }
-    co_occurrence_counts_[std::make_pair(p1, p2)]++;
+    co_occurrence_counts_.Increment(p1, p2);
 }
 
 std::vector<PatternID> CoOccurrenceTracker::GetPatternsInWindow(
@@ -186,10 +249,7 @@ uint32_t CoOccurrenceTracker::GetCoOccurrenceCountUnlocked(PatternID p1, Pattern
         std::swap(p1, p2);
     }
 
-    auto key = std::make_pair(p1, p2);
-    auto it = co_occurrence_counts_.find(key);
-
-    return it != co_occurrence_counts_.end() ? it->second : 0;
+    return co_occurrence_counts_.Get(p1, p2);
 }
 
 float CoOccurrenceTracker::GetCoOccurrenceProbability(PatternID p1, PatternID p2) const {
@@ -281,18 +341,18 @@ std::vector<std::pair<PatternID, uint32_t>> CoOccurrenceTracker::GetCoOccurringP
     std::vector<std::pair<PatternID, uint32_t>> results;
 
     std::shared_lock lock(mutex_);
-    for (const auto& [key, count] : co_occurrence_counts_) {
+    co_occurrence_counts_.ForEach([&](PatternID first, PatternID second, uint32_t count) {
         if (count < min_count) {
-            continue;
+            return;
         }
 
         // Check if pattern is in the pair
-        if (key.first == pattern) {
-            results.emplace_back(key.second, count);
-        } else if (key.second == pattern) {
-            results.emplace_back(key.first, count);
+        if (first == pattern) {
+            results.emplace_back(second, count);
+        } else if (second == pattern) {
+            results.emplace_back(first, count);
         }
-    }
+    });
 
     // Sort by count (descending)
     std::sort(results.begin(), results.end(),
@@ -328,7 +388,7 @@ void CoOccurrenceTracker::PruneOldActivationsUnlocked(Timestamp cutoff_time) {
 void CoOccurrenceTracker::Clear() {
     std::unique_lock lock(mutex_);
     activations_.clear();
-    co_occurrence_counts_.clear();
+    co_occurrence_counts_.Clear();
     pattern_counts_.clear();
     window_counts_.clear();
     window_begin_ = 0;
@@ -354,7 +414,7 @@ uint64_t CoOccurrenceTracker::GetTotalWindows() const {
 
 size_t CoOccurrenceTracker::GetCoOccurrencePairCount() const {
     std::shared_lock lock(mutex_);
-    return co_occurrence_counts_.size();
+    return co_occurrence_counts_.Size();
 }
 
 std::vector<PatternID> CoOccurrenceTracker::GetTrackedPatterns() const {

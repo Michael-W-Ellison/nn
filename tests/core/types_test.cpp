@@ -1,6 +1,7 @@
 // File: tests/core/types_test.cpp
 #include "core/types.hpp"
 #include <gtest/gtest.h>
+#include <sstream>
 #include <unordered_set>
 #include <thread>
 #include <vector>
@@ -168,6 +169,61 @@ TEST(TimestampTest, FromMicrosRoundTrip) {
     Timestamp ts = Timestamp::FromMicros(micros);
 
     EXPECT_EQ(micros, ts.ToMicros());
+}
+
+TEST(PatternIDTest, FromStringParsesToStringForm) {
+    PatternID id = PatternID::Generate();
+    auto parsed = PatternID::FromString(id.ToString());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(id, *parsed);
+
+    auto bare = PatternID::FromString("1f");
+    ASSERT_TRUE(bare.has_value());
+    EXPECT_EQ(0x1fu, bare->value());
+}
+
+TEST(PatternIDTest, FromStringRejectsMalformedInput) {
+    EXPECT_FALSE(PatternID::FromString("").has_value());
+    EXPECT_FALSE(PatternID::FromString("PatternID(INVALID)").has_value());
+    EXPECT_FALSE(PatternID::FromString("PatternID(12").has_value());
+    EXPECT_FALSE(PatternID::FromString("xyz").has_value());
+    EXPECT_FALSE(PatternID::FromString("0").has_value());  // Invalid ID
+    EXPECT_FALSE(PatternID::FromString("11112222333344445").has_value());  // > 64 bits
+}
+
+TEST(PatternIDTest, ReserveThroughSkipsReservedIDs) {
+    PatternID current = PatternID::Generate();
+    PatternID::ValueType reserved = current.value() + 1000;
+
+    PatternID::ReserveThrough(reserved);
+    EXPECT_GT(PatternID::Generate().value(), reserved);
+
+    // Reserving a lower ID never moves the counter backwards
+    PatternID::ReserveThrough(1);
+    EXPECT_GT(PatternID::Generate().value(), reserved);
+}
+
+TEST(PatternIDTest, DeserializeReservesLoadedID) {
+    PatternID far_ahead(PatternID::Generate().value() + 5000);
+
+    std::stringstream ss;
+    far_ahead.Serialize(ss);
+    PatternID loaded = PatternID::Deserialize(ss);
+
+    EXPECT_EQ(far_ahead, loaded);
+    EXPECT_GT(PatternID::Generate().value(), far_ahead.value());
+}
+
+TEST(PatternIDTest, HashSpreadsSequentialIDs) {
+    // Sequential IDs must not collapse into a few hash buckets when combined
+    std::unordered_set<size_t> pair_hashes;
+    PatternPairHash hasher;
+    for (uint64_t a = 1; a <= 100; ++a) {
+        for (uint64_t b = a + 1; b <= 100; ++b) {
+            pair_hashes.insert(hasher({PatternID(a), PatternID(b)}));
+        }
+    }
+    EXPECT_EQ(4950u, pair_hashes.size());
 }
 
 } // namespace

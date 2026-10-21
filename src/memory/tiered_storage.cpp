@@ -259,14 +259,8 @@ size_t TieredStorage::GetCacheCapacity() const {
 }
 
 void TieredStorage::SetCacheCapacity(size_t capacity) {
-    // Note: LRUCache capacity is set at construction and cannot be changed.
-    // We clear the cache and update the config, but the actual capacity
-    // remains the same until a new TieredStorage is created.
-    cache_.Clear();
+    cache_.SetCapacity(capacity);
     config_.cache_capacity = capacity;
-
-    // TODO: To properly change capacity, we would need to reconstruct
-    // the entire TieredStorage object or make LRUCache support dynamic resizing
 }
 
 // ============================================================================

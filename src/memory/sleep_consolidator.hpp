@@ -5,7 +5,10 @@
 #include <chrono>
 #include <vector>
 #include <atomic>
+#include <functional>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace dpan {
 
@@ -191,6 +194,18 @@ public:
      */
     ConsolidationCycleResult TriggerConsolidation();
 
+    /// Work performed by each consolidation cycle. It receives the cycle
+    /// result and fills in patterns_strengthened, patterns_pruned,
+    /// associations_reorganized, average_utility_change and
+    /// memory_freed_bytes. Exceptions mark the cycle unsuccessful.
+    using ConsolidationWork = std::function<void(ConsolidationCycleResult&)>;
+
+    /// Set the work run by TriggerConsolidation(). Without it a cycle only
+    /// updates timing and statistics and reports no work done.
+    /// MemoryManager installs work that strengthens high-utility patterns,
+    /// prunes and consolidates.
+    void SetConsolidationWork(ConsolidationWork work);
+
     /**
      * @brief Identify patterns that should be strengthened
      *
@@ -276,6 +291,10 @@ private:
     // Statistics
     mutable std::mutex stats_mutex_;
     Statistics stats_;
+
+    // Consolidation work (guarded by work_mutex_)
+    std::mutex work_mutex_;
+    ConsolidationWork work_;
 
     // Helper methods
     void UpdateActivityHistory();

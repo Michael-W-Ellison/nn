@@ -3,6 +3,7 @@
 #include "storage/memory_backend.hpp"
 #include "storage/persistent_backend.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -257,10 +258,11 @@ TEST(PatternDatabaseTest, MaintenanceOperationsDontThrow) {
 TEST(PatternDatabaseTest, SnapshotOperationsReturnBoolean) {
     MockPatternDatabase db;
 
-    bool created = db.CreateSnapshot("/tmp/test_snapshot.bin");
+    std::string snapshot_path = test::UniqueTempPath("test_snapshot") + ".bin";
+    bool created = db.CreateSnapshot(snapshot_path);
     EXPECT_TRUE(created);
 
-    bool restored = db.RestoreSnapshot("/tmp/test_snapshot.bin");
+    bool restored = db.RestoreSnapshot(snapshot_path);
     EXPECT_TRUE(restored);
 }
 
@@ -277,7 +279,7 @@ PatternData CreateTestPatternData() {
 }
 
 std::string WriteConfigFile(const std::string& name, const std::string& content) {
-    std::string path = (std::filesystem::temp_directory_path() / name).string();
+    std::string path = test::UniqueTempPath(name);
     std::ofstream(path) << content;
     return path;
 }
@@ -307,7 +309,7 @@ TEST(CreatePatternDatabaseTest, CreatesMemoryBackendFromJson) {
 }
 
 TEST(CreatePatternDatabaseTest, CreatesPersistentBackendFromYaml) {
-    auto db_path = (std::filesystem::temp_directory_path() / "dpan_factory_test.db").string();
+    auto db_path = test::UniqueTempPath("dpan_factory_test") + ".db";
     std::filesystem::remove(db_path);
     auto path = WriteConfigFile("dpan_factory_persistent.yaml",
         "# storage settings\n"

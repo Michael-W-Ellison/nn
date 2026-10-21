@@ -10,6 +10,7 @@
 #include "similarity/geometric_similarity.hpp"
 #include "similarity/statistical_similarity.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <vector>
 #include <random>
 #include <algorithm>
@@ -63,7 +64,7 @@ std::vector<uint8_t> GenerateNumericSequence(size_t count, float start = 0.0f, f
 PatternEngine::Config CreateTestEngineConfig(const std::string& db_type = "memory") {
     PatternEngine::Config config;
     config.database_type = db_type;
-    config.database_path = "/tmp/dpan_integration_test.db";
+    config.database_path = test::UniqueTempPath("dpan_integration_test") + ".db";
     config.similarity_metric = "context";
     config.enable_auto_refinement = true;
     config.enable_indexing = true;
@@ -307,9 +308,8 @@ TEST(IntegrationTest, MemoryBackendFullWorkflow) {
     EXPECT_EQ(stats.composite_patterns, 0u);
 }
 
-// DISABLED: Hangs on pattern reload - needs investigation
-TEST(IntegrationTest, DISABLED_PersistentBackendFullWorkflow) {
-    std::string db_path = "/tmp/dpan_integration_persistent_test.db";
+TEST(IntegrationTest, PersistentBackendFullWorkflow) {
+    std::string db_path = test::UniqueTempPath("dpan_integration_persistent_test") + ".db";
 
     // Clean up any existing database
     if (std::filesystem::exists(db_path)) {

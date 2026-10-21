@@ -266,7 +266,13 @@ public:
     }
 
     void Compact() override {
-        // Could implement file consolidation here
+        // Reconcile the in-memory indices with the files on disk (drops
+        // entries whose files were removed externally, adds files written
+        // by other instances)
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        pattern_index_.clear();
+        association_index_.clear();
+        RebuildIndex();
     }
 
     void Clear() override {

@@ -490,5 +490,64 @@ TEST_F(AssociationPrunerTest, PruneAssociations_ResultStatistics) {
     EXPECT_EQ(result.associations_before - result.total_pruned, result.associations_after);
 }
 
+TEST_F(AssociationPrunerTest, PruneWeakAssociationsRemovesOnlyPrunableEdges) {
+    AssociationPruner::Config config;
+    config.weak_strength_threshold = 0.1f;
+    config.min_association_strength = 0.05f;
+    AssociationPruner pruner(config);
+
+    AssociationMatrix matrix;
+    AddEdge(matrix, patterns_[0], patterns_[1], 0.01f);  // Weak and below safety floor
+    AddEdge(matrix, patterns_[1], patterns_[2], 0.08f);  // Weak but above safety floor
+    AddEdge(matrix, patterns_[2], patterns_[3], 0.9f);   // Strong
+
+    EXPECT_EQ(1u, pruner.PruneWeakAssociations(matrix));
+    EXPECT_FALSE(matrix.HasAssociation(patterns_[0], patterns_[1]));
+    EXPECT_TRUE(matrix.HasAssociation(patterns_[1], patterns_[2]));
+    EXPECT_TRUE(matrix.HasAssociation(patterns_[2], patterns_[3]));
+    EXPECT_EQ(1u, pruner.GetStatistics().weak_removed);
+}
+
+TEST_F(AssociationPrunerTest, PruneAssociationsProtectsHubEdges) {
+    AssociationPruner::Config config;
+    config.min_association_strength = 0.05f;
+    config.hub_threshold = 3;
+    AssociationPruner pruner(config);
+
+    AssociationMatrix matrix;
+    // patterns_[0] is a hub (3 edges); its weak edge is kept
+    AddEdge(matrix, patterns_[0], patterns_[1], 0.01f);
+    AddEdge(matrix, patterns_[0], patterns_[2], 0.9f);
+    AddEdge(matrix, patterns_[0], patterns_[3], 0.9f);
+    // Weak edge between non-hubs is pruned
+    AddEdge(matrix, patterns_[4], patterns_[5], 0.01f);
+
+    auto result = pruner.PruneAssociations(matrix, nullptr);
+
+    EXPECT_EQ(1u, result.total_pruned);
+    EXPECT_TRUE(matrix.HasAssociation(patterns_[0], patterns_[1]));
+    EXPECT_FALSE(matrix.HasAssociation(patterns_[4], patterns_[5]));
+    EXPECT_EQ(1u, result.edges_kept_safe);
+}
+
+TEST_F(AssociationPrunerTest, PruneStaleAssociationsUsesAccessHistory) {
+    AssociationPruner::Config config;
+    config.min_association_strength = 0.05f;
+    config.staleness_threshold = std::chrono::hours(1);
+    AssociationPruner pruner(config);
+
+    AssociationMatrix matrix;
+    AddEdge(matrix, patterns_[0], patterns_[1], 0.02f);
+    AddEdge(matrix, patterns_[2], patterns_[3], 0.02f);
+
+    AccessTracker tracker;
+    tracker.RecordAssociationAccess(patterns_[0], patterns_[1], Timestamp::Now() - std::chrono::hours(5));
+    tracker.RecordAssociationAccess(patterns_[2], patterns_[3], Timestamp::Now());
+
+    EXPECT_EQ(1u, pruner.PruneStaleAssociations(matrix, tracker));
+    EXPECT_FALSE(matrix.HasAssociation(patterns_[0], patterns_[1]));
+    EXPECT_TRUE(matrix.HasAssociation(patterns_[2], patterns_[3]));
+}
+
 } // namespace
 } // namespace dpan

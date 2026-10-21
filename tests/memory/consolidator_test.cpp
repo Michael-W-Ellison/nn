@@ -3,6 +3,7 @@
 #include "storage/memory_backend.hpp"
 #include "similarity/geometric_similarity.hpp"
 #include <gtest/gtest.h>
+#include <tuple>
 
 namespace dpan {
 namespace {
@@ -477,6 +478,39 @@ TEST_F(MemoryConsolidatorTest, Statistics_ResetWorks) {
 
     const auto& stats = consolidator.GetStatistics();
     EXPECT_EQ(0u, stats.total_consolidation_operations);
+}
+
+TEST_F(MemoryConsolidatorTest, FindFrequentPathsFromAccessStats) {
+    MemoryConsolidator::Config config;
+    config.min_path_traversals = 5;
+    MemoryConsolidator consolidator(config);
+
+    AssociationMatrix matrix;
+    PatternID a = PatternID::Generate();
+    PatternID b = PatternID::Generate();
+    PatternID c = PatternID::Generate();
+    PatternID d = PatternID::Generate();
+    matrix.AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.8f));
+    matrix.AddAssociation(AssociationEdge(b, c, AssociationType::CAUSAL, 0.8f));
+    matrix.AddAssociation(AssociationEdge(b, d, AssociationType::CAUSAL, 0.8f));
+
+    std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash> stats;
+    stats[{a, b}] = 20;
+    stats[{b, c}] = 8;   // a->b->c traversed min(20, 8) = 8 times
+    stats[{b, d}] = 2;   // a->b->d only twice: below threshold
+
+    auto paths = consolidator.FindFrequentPaths(matrix, stats);
+
+    ASSERT_EQ(1u, paths.size());
+    EXPECT_EQ(a, std::get<0>(paths[0]));
+    EXPECT_EQ(b, std::get<1>(paths[0]));
+    EXPECT_EQ(c, std::get<2>(paths[0]));
+    EXPECT_EQ(8u, std::get<3>(paths[0]));
+
+    // Compression creates the a->c shortcut
+    auto compression = consolidator.CompressAssociations(matrix, stats);
+    EXPECT_EQ(1u, compression.total_shortcuts);
+    EXPECT_TRUE(matrix.HasAssociation(a, c));
 }
 
 } // namespace

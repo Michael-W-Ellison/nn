@@ -37,6 +37,7 @@ add_subdirectory(src/similarity)
 add_subdirectory(src/discovery)
 add_subdirectory(src/association)
 add_subdirectory(src/memory)
+add_subdirectory(src/learning)
 
 # CLI interface
 add_subdirectory(src/cli)

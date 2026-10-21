@@ -122,8 +122,40 @@ private:
     // Activation history: (timestamp, pattern) sorted by timestamp
     std::deque<std::pair<Timestamp, PatternID>> activations_;
 
+    /// Open-addressing map (p1, p2) -> count with p1 < p2. Each activation
+    /// updates one count per pattern in its window, so this is the hot path;
+    /// a flat table avoids the pointer chasing of std::unordered_map.
+    class PairCounts {
+    public:
+        void Increment(PatternID p1, PatternID p2);
+        uint32_t Get(PatternID p1, PatternID p2) const;
+        size_t Size() const { return size_; }
+        void Clear();
+
+        template <typename Fn>
+        void ForEach(Fn fn) const {
+            for (const auto& slot : slots_) {
+                if (slot.first != 0) {
+                    fn(PatternID(slot.first), PatternID(slot.second), slot.count);
+                }
+            }
+        }
+
+    private:
+        struct Slot {
+            uint64_t first{0};   // 0 = empty (PatternID 0 is invalid)
+            uint64_t second{0};
+            uint32_t count{0};
+        };
+        std::vector<Slot> slots_;
+        size_t size_{0};
+
+        size_t FindSlot(uint64_t first, uint64_t second) const;
+        void Grow();
+    };
+
     // Co-occurrence counts: (p1, p2) -> count (p1 < p2 always)
-    std::unordered_map<std::pair<PatternID, PatternID>, uint32_t, PatternPairHash> co_occurrence_counts_;
+    PairCounts co_occurrence_counts_;
 
     // Individual pattern activation counts
     std::unordered_map<PatternID, uint32_t> pattern_counts_;

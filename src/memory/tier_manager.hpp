@@ -120,8 +120,8 @@ public:
 
     /// Compute utility scores for every pattern managed by the tiers
     ///
-    /// Patterns without access statistics are scored with empty statistics
-    /// (never accessed), so they become candidates for demotion.
+    /// Patterns without tracker statistics are scored from the pattern node's
+    /// own access count and timestamps.
     ///
     /// @param utility_calc Utility calculator for scoring patterns
     /// @param access_tracker Access tracker for statistics

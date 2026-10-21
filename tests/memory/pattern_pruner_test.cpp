@@ -957,3 +957,51 @@ TEST_F(PatternPrunerTest, EdgeCase_ZeroUtility) {
     EXPECT_EQ(1u, result.pruned_patterns.size());
     EXPECT_FALSE(pattern_db_->Exists(id));
 }
+
+TEST_F(PatternPrunerTest, PrunePatternsMergesIntoSimilarPattern) {
+    PatternPruner::Config config;
+    config.utility_threshold = 0.3f;
+    config.min_pattern_age = std::chrono::milliseconds(1);
+    config.enable_merging = true;
+    config.merge_similarity_threshold = 0.95f;
+    PatternPruner pruner(config);
+
+    // Two identical-feature patterns: the low-utility one merges into the other
+    auto low = CreateTestPattern();
+    auto high = CreateTestPattern();
+    PatternID low_id = low.GetID();
+    PatternID high_id = high.GetID();
+    pattern_db_->Store(std::move(low));
+    pattern_db_->Store(std::move(high));
+
+    PatternID other = PatternID::Generate();
+    assoc_matrix_->AddAssociation(AssociationEdge(low_id, other, AssociationType::CAUSAL, 0.4f));
+
+    std::unordered_map<PatternID, float> utilities{{low_id, 0.1f}, {high_id, 0.9f}};
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    auto result = pruner.PrunePatterns(*pattern_db_, *assoc_matrix_, utilities);
+
+    ASSERT_EQ(1u, result.merged_patterns.size());
+    EXPECT_EQ(low_id, result.merged_patterns[0].first);
+    EXPECT_EQ(high_id, result.merged_patterns[0].second);
+    EXPECT_FALSE(pattern_db_->Exists(low_id));
+    EXPECT_TRUE(pattern_db_->Exists(high_id));
+}
+
+TEST_F(PatternPrunerTest, MergeCandidateIgnoresDissimilarPatterns) {
+    PatternPruner::Config config;
+    PatternPruner pruner(config);
+
+    auto pattern = CreateTestPattern();
+    FeatureVector fv(3);
+    fv[0] = -5.0f;
+    fv[1] = 4.0f;
+    fv[2] = -1.0f;
+    PatternNode dissimilar(PatternID::Generate(), PatternData::FromFeatures(fv, DataModality::NUMERIC),
+                           PatternType::ATOMIC);
+    pattern_db_->Store(pattern);
+    pattern_db_->Store(dissimilar);
+
+    EXPECT_FALSE(pruner.FindMergeCandidate(pattern, *pattern_db_).has_value());
+}

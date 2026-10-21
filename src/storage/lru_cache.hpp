@@ -119,7 +119,21 @@ public:
     /// Get cache capacity
     /// @return Maximum capacity
     size_t Capacity() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return capacity_;
+    }
+
+    /// Change capacity, evicting least recently used items if shrinking
+    /// @param capacity New maximum number of items (minimum 1)
+    void SetCapacity(size_t capacity) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        capacity_ = capacity == 0 ? 1 : capacity;
+        while (items_.size() > capacity_) {
+            map_.erase(items_.back().first);
+            items_.pop_back();
+            evictions_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     /// Check if cache contains key

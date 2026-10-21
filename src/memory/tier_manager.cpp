@@ -652,7 +652,8 @@ std::unordered_map<PatternID, float> TierManager::ComputeUtilities(
         if (!pattern) {
             continue;  // Removed concurrently
         }
-        AccessStats stats = access_tracker.GetPatternStatsSnapshot(id).value_or(AccessStats{});
+        auto tracked = access_tracker.GetPatternStatsSnapshot(id);
+        AccessStats stats = tracked ? *tracked : AccessStatsFromNode(*pattern);
         utilities[id] = utility_calc.CalculatePatternUtility(*pattern, stats, no_associations);
     }
 

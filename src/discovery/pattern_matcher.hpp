@@ -23,7 +23,9 @@ public:
         /// Maximum number of matches to return
         size_t max_matches{10};
 
-        /// Use fast approximate search
+        /// Reserved; currently unused. FindMatches() always performs an exact
+        /// scan. For approximate (LSH) search over large databases use
+        /// ApproximateSearch from similarity/similarity_search.hpp.
         bool use_fast_search{true};
 
         /// Threshold for "strong match" (update existing pattern)

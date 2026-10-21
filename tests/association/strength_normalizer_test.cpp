@@ -409,3 +409,39 @@ TEST(StrengthNormalizerTest, AnalyzeNormalizationEmptyMatrix) {
     EXPECT_EQ(0u, stats.patterns_normalized);
     EXPECT_EQ(0u, stats.edges_updated);
 }
+
+TEST(StrengthNormalizerTest, NormalizeAllNormalizesEverySource) {
+    AssociationMatrix matrix;
+    PatternID a = PatternID::Generate();
+    PatternID b = PatternID::Generate();
+    PatternID c = PatternID::Generate();
+
+    matrix.AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.6f));
+    matrix.AddAssociation(AssociationEdge(a, c, AssociationType::CAUSAL, 0.6f));
+    matrix.AddAssociation(AssociationEdge(b, c, AssociationType::CAUSAL, 0.4f));
+    matrix.AddAssociation(AssociationEdge(b, a, AssociationType::CAUSAL, 0.4f));
+
+    EXPECT_EQ(2u, NormalizeAll(matrix));
+    EXPECT_TRUE(IsNormalized(matrix, a));
+    EXPECT_TRUE(IsNormalized(matrix, b));
+}
+
+TEST(StrengthNormalizerTest, AnalyzeNormalizationReportsSums) {
+    AssociationMatrix matrix;
+    PatternID a = PatternID::Generate();
+    PatternID b = PatternID::Generate();
+    PatternID c = PatternID::Generate();
+
+    // a: sum 1.2 (needs normalization), b: sum 1.0 (already normalized)
+    matrix.AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.6f));
+    matrix.AddAssociation(AssociationEdge(a, c, AssociationType::CAUSAL, 0.6f));
+    matrix.AddAssociation(AssociationEdge(b, c, AssociationType::CAUSAL, 1.0f));
+
+    auto stats = AnalyzeNormalization(matrix);
+    EXPECT_EQ(2u, stats.patterns_processed);
+    EXPECT_EQ(1u, stats.patterns_normalized);
+    EXPECT_EQ(2u, stats.edges_updated);
+    EXPECT_NEAR(1.0f, stats.min_strength_sum, 1e-5f);
+    EXPECT_NEAR(1.2f, stats.max_strength_sum, 1e-5f);
+    EXPECT_NEAR(1.1f, stats.average_strength_sum, 1e-5f);
+}

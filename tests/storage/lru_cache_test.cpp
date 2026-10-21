@@ -447,5 +447,26 @@ TEST(LRUCacheTest, HighHitRateOnRepeatedAccess) {
     EXPECT_GT(hit_rate, 0.99f);
 }
 
+TEST(LRUCacheTest, SetCapacityShrinksByEvictingLeastRecentlyUsed) {
+    LRUCache<int, int> cache(4);
+    for (int i = 0; i < 4; ++i) {
+        cache.Put(i, i * 10);
+    }
+    cache.Get(0);  // 0 becomes most recently used
+
+    cache.SetCapacity(2);
+
+    EXPECT_EQ(2u, cache.Capacity());
+    EXPECT_EQ(2u, cache.Size());
+    EXPECT_TRUE(cache.Contains(0));
+    EXPECT_TRUE(cache.Contains(3));
+    EXPECT_FALSE(cache.Contains(1));
+    EXPECT_EQ(2u, cache.Evictions());
+
+    cache.SetCapacity(10);
+    cache.Put(5, 50);
+    EXPECT_EQ(3u, cache.Size());
+}
+
 } // namespace
 } // namespace dpan

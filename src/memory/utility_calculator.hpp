@@ -154,6 +154,10 @@ struct AccessStats {
     static AccessStats Deserialize(std::istream& in);
 };
 
+/// Access statistics derived from a pattern node's own counters, for patterns
+/// with no AccessTracker history (a never-accessed node counts from creation)
+AccessStats AccessStatsFromNode(const PatternNode& pattern);
+
 /// Centralized tracking of access statistics for patterns and associations
 ///
 /// Thread-safe tracker for maintaining access history to support
@@ -197,6 +201,10 @@ public:
 
     /// Get a copy of an association's access statistics (thread-safe)
     std::optional<AccessStats> GetAssociationStatsSnapshot(PatternID source, PatternID target) const;
+
+    /// Get the access count of every tracked association (thread-safe)
+    std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>
+    GetAssociationAccessCounts() const;
 
     /// Remove statistics older than cutoff time
     ///

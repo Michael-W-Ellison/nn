@@ -76,6 +76,15 @@ MemoryConsolidator::ConsolidationResult MemoryConsolidator::Consolidate(
     AssociationMatrix& assoc_matrix,
     const SimilarityMetric& similarity_metric
 ) {
+    return Consolidate(pattern_db, assoc_matrix, similarity_metric, {});
+}
+
+MemoryConsolidator::ConsolidationResult MemoryConsolidator::Consolidate(
+    PatternDatabase& pattern_db,
+    AssociationMatrix& assoc_matrix,
+    const SimilarityMetric& similarity_metric,
+    const std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>& access_stats
+) {
     ConsolidationResult result;
     result.timestamp = Timestamp::Now();
 
@@ -94,9 +103,7 @@ MemoryConsolidator::ConsolidationResult MemoryConsolidator::Consolidate(
 
     // Phase 3: Association Compression
     if (config_.enable_association_compression) {
-        // Need access stats - for now use empty map
-        std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash> empty_stats;
-        result.compression_result = CompressAssociations(assoc_matrix, empty_stats);
+        result.compression_result = CompressAssociations(assoc_matrix, access_stats);
     }
 
     size_t memory_after = pattern_db.GetStats().memory_usage_bytes +
@@ -412,13 +419,37 @@ std::vector<std::tuple<PatternID, PatternID, PatternID, size_t>> MemoryConsolida
 ) {
     std::vector<std::tuple<PatternID, PatternID, PatternID, size_t>> frequent_paths;
 
-    // This is a simplified implementation
-    // In a full implementation, we would:
-    // 1. Iterate through all two-hop paths in the graph
-    // 2. Count how many times each path is traversed (from access_stats)
-    // 3. Return paths that exceed min_path_traversals threshold
+    // A two-hop path source -> intermediate -> target is traversed at most
+    // min(count(source, intermediate), count(intermediate, target)) times
+    for (const auto& [first_hop, first_count] : access_stats) {
+        if (first_count < config_.min_path_traversals) {
+            continue;
+        }
+        const auto& [source, intermediate] = first_hop;
+        if (!assoc_matrix.HasAssociation(source, intermediate)) {
+            continue;
+        }
 
-    // For now, return empty vector as we don't have access_stats populated
+        for (const auto* edge : assoc_matrix.GetOutgoingAssociations(intermediate)) {
+            PatternID target = edge->GetTarget();
+            if (target == source || target == intermediate) {
+                continue;
+            }
+            auto second = access_stats.find(std::make_pair(intermediate, target));
+            if (second == access_stats.end()) {
+                continue;
+            }
+            size_t traversals = std::min(first_count, second->second);
+            if (traversals >= config_.min_path_traversals) {
+                frequent_paths.emplace_back(source, intermediate, target, traversals);
+            }
+        }
+    }
+
+    // Most traversed first
+    std::sort(frequent_paths.begin(), frequent_paths.end(),
+              [](const auto& a, const auto& b) { return std::get<3>(a) > std::get<3>(b); });
+
     return frequent_paths;
 }
 

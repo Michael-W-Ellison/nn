@@ -435,38 +435,16 @@ void PatternEngine::RunMaintenance() {
 // ============================================================================
 
 bool PatternEngine::SaveSnapshot(const std::string& path) {
-    // For now, this is a simplified implementation
-    // In a real system, you would serialize all engine state including:
-    // - All patterns from database
-    // - Statistics
-    // - Configuration
-    // - Index state (if applicable)
-
-    // Flush database first
+    // Patterns are the engine's persistent state; the backend writes them
+    // (binary dump for memory, SQLite backup for persistent)
     Flush();
-
-    // For memory backend, we can't easily save snapshot
-    // For persistent backend, the database file itself is the snapshot
-    if (config_.database_type == "persistent") {
-        // The database is already persisted at config_.database_path
-        // We could copy it to the snapshot path here
-        return true;
-    }
-
-    // Memory backend doesn't support snapshots in this simple implementation
-    return false;
+    return database_->CreateSnapshot(path);
 }
 
 bool PatternEngine::LoadSnapshot(const std::string& path) {
-    // Simplified implementation
-    // In a real system, you would deserialize all engine state
-
-    if (config_.database_type == "persistent") {
-        // Database automatically loads from config_.database_path
-        return true;
-    }
-
-    return false;
+    // Replaces the current patterns; similarity search reads the database
+    // directly, so no index needs rebuilding
+    return database_->RestoreSnapshot(path);
 }
 
 } // namespace dpan

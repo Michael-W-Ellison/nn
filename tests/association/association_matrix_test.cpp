@@ -1,7 +1,9 @@
 // File: tests/association/association_matrix_test.cpp
 #include "association/association_matrix.hpp"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <thread>
+#include <vector>
 #include <chrono>
 
 namespace dpan {
@@ -674,6 +676,80 @@ TEST(AssociationMatrixTest, ToString) {
     std::string str = matrix.ToString();
     EXPECT_FALSE(str.empty());
     EXPECT_NE(std::string::npos, str.find("AssociationMatrix"));
+}
+
+TEST(AssociationMatrixTest, GetAllAssociationKeys) {
+    AssociationMatrix matrix;
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+    PatternID p3 = PatternID::Generate();
+
+    matrix.AddAssociation(AssociationEdge(p1, p2, AssociationType::CAUSAL, 0.5f));
+    matrix.AddAssociation(AssociationEdge(p2, p3, AssociationType::CAUSAL, 0.5f));
+    matrix.AddAssociation(AssociationEdge(p3, p1, AssociationType::CAUSAL, 0.5f));
+    matrix.RemoveAssociation(p2, p3);
+
+    auto keys = matrix.GetAllAssociationKeys();
+    ASSERT_EQ(2u, keys.size());
+    std::sort(keys.begin(), keys.end());
+    std::vector<std::pair<PatternID, PatternID>> expected{{p1, p2}, {p3, p1}};
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(expected, keys);
+}
+
+TEST(AssociationMatrixTest, GetStrengthSummary) {
+    AssociationMatrix matrix;
+    EXPECT_EQ(0u, matrix.GetStrengthSummary().count_at_or_above);
+
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+    PatternID p3 = PatternID::Generate();
+    matrix.AddAssociation(AssociationEdge(p1, p2, AssociationType::CAUSAL, 0.2f));
+    matrix.AddAssociation(AssociationEdge(p1, p3, AssociationType::CAUSAL, 0.8f));
+    matrix.AddAssociation(AssociationEdge(p2, p3, AssociationType::CAUSAL, 0.0f));
+
+    auto summary = matrix.GetStrengthSummary(0.5f);
+    EXPECT_FLOAT_EQ(0.0f, summary.min);
+    EXPECT_FLOAT_EQ(0.8f, summary.max);
+    EXPECT_NEAR(1.0f / 3.0f, summary.average, 1e-5f);
+    EXPECT_EQ(1u, summary.count_at_or_above);
+}
+
+TEST(AssociationMatrixTest, EdgePointersStayValidAcrossUpdateAndRemove) {
+    AssociationMatrix matrix;
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+    PatternID p3 = PatternID::Generate();
+
+    matrix.AddAssociation(AssociationEdge(p1, p2, AssociationType::CAUSAL, 0.3f));
+    matrix.AddAssociation(AssociationEdge(p1, p3, AssociationType::CAUSAL, 0.4f));
+    const AssociationEdge* edge = matrix.GetAssociation(p1, p2);
+    const AssociationEdge* removed = matrix.GetAssociation(p1, p3);
+    ASSERT_NE(nullptr, edge);
+
+    // Update modifies the same object
+    matrix.UpdateAssociation(p1, p2, AssociationEdge(p1, p2, AssociationType::CAUSAL, 0.9f));
+    EXPECT_EQ(edge, matrix.GetAssociation(p1, p2));
+    EXPECT_FLOAT_EQ(0.9f, edge->GetStrength());
+
+    // A removed edge stays readable; its slot is reused by a new edge
+    matrix.RemoveAssociation(p1, p3);
+    matrix.AddAssociation(AssociationEdge(p2, p3, AssociationType::CAUSAL, 0.7f));
+    EXPECT_EQ(p3, removed->GetTarget());
+    EXPECT_FLOAT_EQ(0.4f, removed->GetStrength());
+}
+
+TEST(AssociationMatrixTest, UpdateWithNewTypeMovesTypeIndex) {
+    AssociationMatrix matrix;
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+
+    matrix.AddAssociation(AssociationEdge(p1, p2, AssociationType::CAUSAL, 0.5f));
+    matrix.UpdateAssociation(p1, p2, AssociationEdge(p1, p2, AssociationType::SPATIAL, 0.6f));
+
+    EXPECT_TRUE(matrix.GetAssociationsByType(AssociationType::CAUSAL).empty());
+    ASSERT_EQ(1u, matrix.GetAssociationsByType(AssociationType::SPATIAL).size());
+    EXPECT_FLOAT_EQ(0.6f, matrix.GetAssociation(p1, p2)->GetStrength());
 }
 
 } // namespace

@@ -216,23 +216,16 @@ std::vector<std::pair<PatternID, float>> BasicAttentionMechanism::ApplyAttention
     // Compute attention weights
     auto attention_weights = ComputeAttention(query, predictions, context);
 
-    // For now, we don't have association scores, so we just use attention weights
-    // In future integration with AssociationSystem, we'll combine:
-    // final_score = attention_weight * attention_score + association_weight * assoc_score
+    // Scores are attention weights only: this mechanism has no association
+    // strengths. AssociationLearningSystem::PredictWithAttention combines
+    // ComputeAttention() weights with association strengths using
+    // config_.association_weight / config_.attention_weight.
 
     std::vector<std::pair<PatternID, float>> results;
     results.reserve(predictions.size());
 
     for (const auto& pred_id : predictions) {
-        float attention_score = attention_weights[pred_id];
-
-        // Weighted combination (placeholder for association scores)
-        // When integrated with AssociationSystem, this will be:
-        // float final_score = config_.attention_weight * attention_score +
-        //                     config_.association_weight * association_score;
-        float final_score = attention_score;
-
-        results.push_back({pred_id, final_score});
+        results.push_back({pred_id, attention_weights[pred_id]});
     }
 
     // Sort by final score (descending)

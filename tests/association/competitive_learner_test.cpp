@@ -445,5 +445,29 @@ TEST(CompetitiveLearnerTest, ApplyCompetitionIncomingWorks) {
     EXPECT_LT(loser2->GetStrength(), 0.5f);
 }
 
+TEST(CompetitiveLearnerTest, ApplyCompetitionAllAppliesToEveryPattern) {
+    AssociationMatrix matrix;
+    PatternID a = CreateTestPattern();
+    PatternID b = CreateTestPattern();
+    PatternID c = CreateTestPattern();
+    PatternID d = CreateTestPattern();
+
+    // a and b each have two competing outgoing associations; c has one
+    matrix.AddAssociation(AssociationEdge(a, b, AssociationType::CAUSAL, 0.8f));
+    matrix.AddAssociation(AssociationEdge(a, c, AssociationType::CAUSAL, 0.4f));
+    matrix.AddAssociation(AssociationEdge(b, c, AssociationType::CAUSAL, 0.7f));
+    matrix.AddAssociation(AssociationEdge(b, d, AssociationType::CAUSAL, 0.3f));
+    matrix.AddAssociation(AssociationEdge(c, d, AssociationType::CAUSAL, 0.5f));
+
+    EXPECT_EQ(2u, CompetitiveLearner::ApplyCompetitionAll(matrix));
+
+    // Winners strengthened, losers weakened
+    EXPECT_GT(matrix.GetAssociation(a, b)->GetStrength(), 0.8f);
+    EXPECT_LT(matrix.GetAssociation(a, c)->GetStrength(), 0.4f);
+    EXPECT_GT(matrix.GetAssociation(b, c)->GetStrength(), 0.7f);
+    EXPECT_LT(matrix.GetAssociation(b, d)->GetStrength(), 0.3f);
+    EXPECT_FLOAT_EQ(0.5f, matrix.GetAssociation(c, d)->GetStrength());
+}
+
 } // namespace
 } // namespace dpan

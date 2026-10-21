@@ -1,6 +1,8 @@
 // File: tests/core/pattern_engine_test.cpp
 #include "core/pattern_engine.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
+#include <filesystem>
 
 namespace dpan {
 namespace {
@@ -401,6 +403,24 @@ TEST(PatternEngineTest, IndexingEnabledVsDisabled) {
         auto results = engine.FindSimilarPatterns(data, 5);
         EXPECT_GE(results.size(), 0u);
     }
+}
+
+TEST(PatternEngineTest, SnapshotSaveAndLoadMemoryBackend) {
+    auto path = test::UniqueTempPath("dpan_engine_snapshot") + ".bin";
+    std::filesystem::remove(path);
+
+    PatternEngine engine(CreateTestConfig());
+    FeatureVector fv(std::vector<float>{1.0f, 2.0f, 3.0f});
+    PatternID id = engine.CreatePattern(PatternData::FromFeatures(fv, DataModality::NUMERIC));
+    ASSERT_TRUE(engine.SaveSnapshot(path));
+
+    PatternEngine restored(CreateTestConfig());
+    EXPECT_FALSE(restored.GetPattern(id).has_value());
+    ASSERT_TRUE(restored.LoadSnapshot(path));
+    EXPECT_TRUE(restored.GetPattern(id).has_value());
+
+    EXPECT_FALSE(restored.LoadSnapshot(path + ".missing"));
+    std::filesystem::remove(path);
 }
 
 } // namespace

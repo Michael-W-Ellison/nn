@@ -186,13 +186,35 @@ TEST_F(PatternImportanceTest, ConfidenceScoreMissingPattern) {
 // Association Scoring Tests
 // ============================================================================
 
-TEST_F(PatternImportanceTest, AssociationScorePlaceholder) {
+TEST_F(PatternImportanceTest, AssociationScoreNeutralWithoutMatrix) {
     auto pattern_ids = CreateTestPatterns(1);
 
     float score = calculator_->ComputeAssociationScore(pattern_ids[0]);
 
-    // Currently returns neutral score (placeholder)
+    // No association matrix set: neutral score
     EXPECT_NEAR(score, 0.5f, 1e-5f);
+}
+
+TEST_F(PatternImportanceTest, AssociationScoreCountsStrongAssociations) {
+    auto pattern_ids = CreateTestPatterns(4);
+
+    AssociationMatrix matrix;
+    calculator_->SetAssociationMatrix(&matrix);
+    calculator_->SetMaxAssociationCount(3);
+
+    EXPECT_NEAR(calculator_->ComputeAssociationScore(pattern_ids[0]), 0.0f, 1e-5f);
+
+    // Two strong (one outgoing, one incoming) and one weak association
+    matrix.AddAssociation(AssociationEdge(pattern_ids[0], pattern_ids[1], AssociationType::CAUSAL, 0.9f));
+    matrix.AddAssociation(AssociationEdge(pattern_ids[2], pattern_ids[0], AssociationType::CAUSAL, 0.8f));
+    matrix.AddAssociation(AssociationEdge(pattern_ids[0], pattern_ids[3], AssociationType::CAUSAL, 0.2f));
+
+    float expected = std::log(3.0f) / std::log(4.0f);
+    EXPECT_NEAR(calculator_->ComputeAssociationScore(pattern_ids[0]), expected, 1e-5f);
+
+    // Reaching the maximum count saturates at 1.0
+    matrix.AddAssociation(AssociationEdge(pattern_ids[3], pattern_ids[0], AssociationType::CAUSAL, 0.7f));
+    EXPECT_NEAR(calculator_->ComputeAssociationScore(pattern_ids[0]), 1.0f, 1e-5f);
 }
 
 // ============================================================================
