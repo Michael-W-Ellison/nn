@@ -15,7 +15,10 @@ add_subdirectory(memory)
 add_subdirectory(learning)
 add_subdirectory(integration)
 add_subdirectory(benchmarks)
-add_subdirectory(cli)
+# The CLI uses PersistentBackend
+if(DPAN_WITH_SQLITE)
+    add_subdirectory(cli)
+endif()
 add_subdirectory(nn)
 
 # Edge case tests

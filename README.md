@@ -29,7 +29,8 @@ scorer.
 ## Requirements
 
 - CMake ≥ 3.20 and a C++17 compiler (GCC or Clang)
-- SQLite3 and zlib development packages
+- SQLite3 and zlib development packages (optional, see `DPAN_WITH_SQLITE`
+  and `DPAN_WITH_ZLIB`)
 - libyaml (only for the `dpan_cli` tool)
 - Network access on first configure when building tests (GoogleTest is fetched)
 
@@ -50,6 +51,15 @@ added with `add_subdirectory`):
 | `DPAN_BUILD_EXAMPLES` | Build programs in `examples/` |
 | `DPAN_BUILD_CLI` | Build the interactive `dpan_cli` |
 | `DPAN_INSTALL` | Install rules and the `DPAN` CMake package (default ON) |
+| `DPAN_WITH_SQLITE` | Build the SQLite `PersistentBackend` (default ON). When OFF, the `persistent`/`sqlite` database types throw, and `dpan_cli` is not built. |
+| `DPAN_WITH_ZLIB` | Compress archive-tier files (default ON). When OFF, archive files are written uncompressed and compressed files written by a zlib build cannot be read. |
+
+### Time
+
+All timestamps come from a process-wide clock (`core/clock.hpp`). By
+default it is the system clock (microseconds since the Unix epoch). Install
+a `ManualClock` with `SetClock` or `ScopedClock` to drive time from a
+simulation or to make runs reproducible.
 
 ## Using DPAN in another project
 

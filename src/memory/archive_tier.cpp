@@ -7,10 +7,14 @@
 //
 // File format: "DPZ1" magic, uint64 uncompressed size, zlib stream.
 // Files without the magic are read as uncompressed (pre-compression format).
+// Without zlib (DPAN_WITH_ZLIB=OFF) files are written uncompressed and
+// DPZ1 files cannot be read.
 
 #include "memory/memory_tier.hpp"
 #include "core/binary_io.hpp"
+#ifdef DPAN_HAS_ZLIB
 #include <zlib.h>
+#endif
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -28,6 +32,14 @@ constexpr char kArchiveMagic[4] = {'D', 'P', 'Z', '1'};
 
 /// Compress serialized bytes and write them to `filepath`
 bool WriteCompressed(const fs::path& filepath, const std::string& raw) {
+#ifndef DPAN_HAS_ZLIB
+    std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    return file.good();
+#else
     uLongf compressed_size = compressBound(static_cast<uLong>(raw.size()));
     std::string compressed(compressed_size, '\0');
     if (compress2(reinterpret_cast<Bytef*>(compressed.data()), &compressed_size,
@@ -44,6 +56,7 @@ bool WriteCompressed(const fs::path& filepath, const std::string& raw) {
     io::Write<uint64_t>(file, raw.size());
     file.write(compressed.data(), static_cast<std::streamsize>(compressed_size));
     return file.good();
+#endif
 }
 
 /// Read `filepath` and return its decompressed bytes (std::nullopt on error)
@@ -61,6 +74,9 @@ std::optional<std::string> ReadCompressed(const fs::path& filepath) {
         return contents;  // Uncompressed legacy file
     }
 
+#ifndef DPAN_HAS_ZLIB
+    return std::nullopt;  // Compressed file, but built without zlib
+#else
     std::istringstream header(contents.substr(sizeof(kArchiveMagic), sizeof(uint64_t)));
     uint64_t raw_size = io::Read<uint64_t>(header);
     if (raw_size > (uint64_t{1} << 34)) {
@@ -76,6 +92,7 @@ std::optional<std::string> ReadCompressed(const fs::path& filepath) {
         return std::nullopt;
     }
     return raw;
+#endif
 }
 
 }  // namespace

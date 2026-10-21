@@ -172,5 +172,5 @@ integration test with a fixed seed and a fake clock.
 
 | Phase | State |
 |---|---|
-| 0. Groundwork | In progress |
+| 0. Groundwork | Complete. Clock (`core/clock.hpp`), little-endian serialization (`core/binary_io.hpp`) with byte-level fixtures, optimizer `SaveState`/`LoadState`, `ClipGradientNorm`, learning-rate schedules, `AssociationLearningSystem::AddAssociation`/`SetAssociationStrength`/`RemoveAssociation`, CMake options `DPAN_WITH_SQLITE` and `DPAN_WITH_ZLIB`. |
 | 1–8 | Not started |

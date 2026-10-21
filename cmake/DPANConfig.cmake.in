@@ -1,9 +1,16 @@
 @PACKAGE_INIT@
 
+set(DPAN_WITH_SQLITE @DPAN_WITH_SQLITE@)
+set(DPAN_WITH_ZLIB @DPAN_WITH_ZLIB@)
+
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
-find_dependency(SQLite3)
-find_dependency(ZLIB)
+if(DPAN_WITH_SQLITE)
+    find_dependency(SQLite3)
+endif()
+if(DPAN_WITH_ZLIB)
+    find_dependency(ZLIB)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/DPANTargets.cmake")
 

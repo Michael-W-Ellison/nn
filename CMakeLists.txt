@@ -12,6 +12,13 @@ option(DPAN_BUILD_TESTS "Build DPAN tests (downloads GoogleTest)" ${DPAN_IS_TOP_
 option(DPAN_BUILD_EXAMPLES "Build DPAN example applications" ${DPAN_IS_TOP_LEVEL})
 option(DPAN_BUILD_CLI "Build the dpan_cli interactive tool (requires libyaml)" ${DPAN_IS_TOP_LEVEL})
 option(DPAN_INSTALL "Generate install rules and the DPAN CMake package" ON)
+option(DPAN_WITH_SQLITE "Build the SQLite-backed PersistentBackend (requires SQLite3)" ON)
+option(DPAN_WITH_ZLIB "Compress archive-tier files with zlib (requires ZLIB)" ON)
+
+if(DPAN_BUILD_CLI AND NOT DPAN_WITH_SQLITE)
+    message(STATUS "DPAN_WITH_SQLITE is OFF: dpan_cli and its tests are not built")
+    set(DPAN_BUILD_CLI OFF)
+endif()
 
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
@@ -108,10 +115,14 @@ if(DPAN_INSTALL)
     )
 
     # Headers keep their module layout under include/dpan
+    set(DPAN_HEADER_EXCLUDES PATTERN "cli" EXCLUDE)
+    if(NOT DPAN_WITH_SQLITE)
+        list(APPEND DPAN_HEADER_EXCLUDES PATTERN "persistent_backend.hpp" EXCLUDE)
+    endif()
     install(DIRECTORY src/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dpan
         FILES_MATCHING PATTERN "*.hpp"
-        PATTERN "cli" EXCLUDE
+        ${DPAN_HEADER_EXCLUDES}
     )
     install(DIRECTORY include/learning
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dpan

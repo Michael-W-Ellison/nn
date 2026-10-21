@@ -1,7 +1,9 @@
 // File: src/core/pattern_engine.cpp
 #include "pattern_engine.hpp"
 #include "storage/memory_backend.hpp"
+#ifdef DPAN_HAS_SQLITE
 #include "storage/persistent_backend.hpp"
+#endif
 #include "similarity/contextual_similarity.hpp"
 #include "similarity/geometric_similarity.hpp"
 #include "similarity/statistical_similarity.hpp"
@@ -33,9 +35,14 @@ void PatternEngine::InitializeComponents() {
         MemoryBackend::Config db_config;
         database_ = std::make_shared<MemoryBackend>(db_config);
     } else if (config_.database_type == "persistent") {
+#ifdef DPAN_HAS_SQLITE
         PersistentBackend::Config db_config;
         db_config.db_path = config_.database_path;
         database_ = std::make_shared<PersistentBackend>(db_config);
+#else
+        throw std::invalid_argument("Database type 'persistent' is unavailable "
+                                    "(DPAN was built without SQLite)");
+#endif
     } else {
         throw std::invalid_argument("Unknown database type: " + config_.database_type);
     }
