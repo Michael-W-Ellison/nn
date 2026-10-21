@@ -121,9 +121,10 @@ public:
 
     /// Apply attention to reweight predictions
     ///
-    /// Combines attention weights with existing association scores using
-    /// configurable weighting: final = attention_weight * attention_score +
-    ///                                  association_weight * association_score
+    /// Scores each prediction by its attention weight. This mechanism has no
+    /// association strengths; AssociationLearningSystem::PredictWithAttention
+    /// combines ComputeAttention() weights with association strengths as
+    /// association_weight * strength + attention_weight * attention.
     ///
     /// @param query Query pattern ID
     /// @param predictions Initial predictions with scores

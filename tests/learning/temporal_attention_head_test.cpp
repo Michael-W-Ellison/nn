@@ -184,17 +184,14 @@ TEST_F(TemporalAttentionHeadTest, ExponentialDecay) {
 TEST_F(TemporalAttentionHeadTest, DecayConstantEffect) {
     auto pattern_ids = CreateTestPatterns(2);
 
-    // Record access for both
+    // Access the patterns 40ms apart so their recencies differ by a known amount
     for (auto id : pattern_ids) {
         auto pattern_opt = mock_db_->Retrieve(id);
-        if (pattern_opt) {
-            auto& pattern = const_cast<PatternNode&>(*pattern_opt);
-            pattern.RecordAccess();
-        }
+        ASSERT_TRUE(pattern_opt.has_value());
+        pattern_opt->RecordAccess();
+        mock_db_->Update(*pattern_opt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
-
-    // Wait a bit
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     ContextVector context;
 

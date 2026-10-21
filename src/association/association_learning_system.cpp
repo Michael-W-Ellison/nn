@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <limits>
+#include <stdexcept>
+#include <unordered_set>
 
 namespace dpan {
 
@@ -48,13 +51,14 @@ void AssociationLearningSystem::RecordPatternActivation(
     // Record in co-occurrence tracker
     tracker_.RecordActivation(pattern, now);
 
+    // Associations into this pattern learn the context it occurred in
+    UpdateContextProfiles({pattern}, context, now);
+
     // Update activation history
     UpdateActivationHistory(pattern, now);
 
     // Check if auto-maintenance is needed
-    if (config_.enable_auto_maintenance) {
-        CheckAutoMaintenance();
-    }
+    CheckAutoMaintenance();
 }
 
 void AssociationLearningSystem::RecordPatternActivations(
@@ -65,22 +69,22 @@ void AssociationLearningSystem::RecordPatternActivations(
 
     // Record all activations
     tracker_.RecordActivations(patterns, now);
-    
+
+    UpdateContextProfiles(patterns, context, now);
+
     for (const auto& pattern : patterns) {
         UpdateActivationHistory(pattern, now);
     }
 
     // Check if auto-maintenance is needed
-    if (config_.enable_auto_maintenance) {
-        CheckAutoMaintenance();
-    }
+    CheckAutoMaintenance();
 }
 
 // ============================================================================
 // Association Formation
 // ============================================================================
 
-size_t AssociationLearningSystem::FormNewAssociations(const PatternDatabase& pattern_db) {
+size_t AssociationLearningSystem::FormNewAssociations(PatternDatabase& pattern_db) {
     size_t formed_count = 0;
 
     // Get all patterns that have been tracked in co-occurrence tracker
@@ -96,12 +100,31 @@ size_t AssociationLearningSystem::FormNewAssociations(const PatternDatabase& pat
 
 size_t AssociationLearningSystem::FormAssociationsForPattern(
     PatternID pattern,
-    const PatternDatabase& pattern_db
+    PatternDatabase& pattern_db
 ) {
     size_t formed_count = 0;
 
+    AssociationFormationRules rules;
+    bool require_significance;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        rules = formation_rules_;
+        require_significance = config_.require_significance;
+    }
+    uint32_t min_co_occurrences = rules.GetConfig().min_co_occurrences;
+
     // Get co-occurring patterns
-    auto co_occurring = tracker_.GetCoOccurringPatterns(pattern, config_.formation.min_co_occurrences);
+    auto co_occurring = tracker_.GetCoOccurringPatterns(pattern, min_co_occurrences);
+    if (co_occurring.empty()) {
+        return 0;
+    }
+
+    auto source_node = pattern_db.Retrieve(pattern);
+    std::vector<std::pair<Timestamp, PatternID>> history;
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        history.assign(activation_history_.begin(), activation_history_.end());
+    }
 
     for (const auto& [target, count] : co_occurring) {
         // Skip if association already exists
@@ -109,16 +132,29 @@ size_t AssociationLearningSystem::FormAssociationsForPattern(
             continue;
         }
 
-        // Get co-occurrence count
-        uint32_t co_occ_count = tracker_.GetCoOccurrenceCount(pattern, target);
-        
-        if (co_occ_count >= config_.formation.min_co_occurrences) {
-            // Create new association with default type and initial strength
-            AssociationEdge edge(pattern, target, AssociationType::CATEGORICAL, 0.5f);
+        if (count < min_co_occurrences) {
+            continue;
+        }
+        if (require_significance && !rules.ShouldFormAssociation(tracker_, pattern, target)) {
+            continue;
+        }
 
-            if (matrix_.AddAssociation(edge)) {
-                formed_count++;
+        // Classify from pattern data when both patterns are stored
+        AssociationType type = AssociationType::CATEGORICAL;
+        if (source_node) {
+            if (auto target_node = pattern_db.Retrieve(target)) {
+                type = rules.ClassifyAssociationType(*source_node, *target_node, history);
             }
+        }
+
+        float strength = rules.CalculateInitialStrength(tracker_, pattern, target, type);
+        AssociationEdge edge(pattern, target, type, strength);
+        for (uint32_t i = 0; i < count; ++i) {
+            edge.IncrementCoOccurrence();
+        }
+
+        if (matrix_.AddAssociation(edge)) {
+            formed_count++;
         }
     }
 
@@ -140,16 +176,20 @@ void AssociationLearningSystem::Reinforce(
     PatternID actual,
     bool correct
 ) {
-    // Get the edge
-    const auto* edge_ptr = matrix_.GetAssociation(predicted, actual);
-    if (!edge_ptr) {
-        return;  // No association to reinforce
-    }
+    {
+        std::lock_guard<std::mutex> lock(reinforcement_mutex_);
 
-    // Clone and update
-    auto edge = edge_ptr->Clone();
-    reinforcement_mgr_.ReinforcePrediction(*edge, true, correct);
-    matrix_.UpdateAssociation(predicted, actual, *edge);
+        // Get the edge
+        const auto* edge_ptr = matrix_.GetAssociation(predicted, actual);
+        if (!edge_ptr) {
+            return;  // No association to reinforce
+        }
+
+        // Clone and update
+        auto edge = edge_ptr->Clone();
+        reinforcement_mgr_.ReinforcePrediction(*edge, true, correct);
+        matrix_.UpdateAssociation(predicted, actual, *edge);
+    }
 
     // Update statistics
     {
@@ -171,22 +211,57 @@ void AssociationLearningSystem::ReinforceBatch(
 // ============================================================================
 
 void AssociationLearningSystem::ApplyDecay(Timestamp::Duration elapsed) {
+    std::lock_guard<std::mutex> lock(maintenance_mutex_);
+    ApplyDecayLocked(elapsed);
+}
+
+size_t AssociationLearningSystem::ApplyCompetition() {
+    std::lock_guard<std::mutex> lock(maintenance_mutex_);
+    return ApplyCompetitionLocked();
+}
+
+size_t AssociationLearningSystem::ApplyNormalization() {
+    std::lock_guard<std::mutex> lock(maintenance_mutex_);
+    return ApplyNormalizationLocked();
+}
+
+size_t AssociationLearningSystem::PruneWeakAssociations(float min_strength) {
+    std::lock_guard<std::mutex> lock(maintenance_mutex_);
+    return PruneWeakAssociationsLocked(min_strength);
+}
+
+void AssociationLearningSystem::ApplyDecayLocked(Timestamp::Duration elapsed) {
     matrix_.ApplyDecayAll(elapsed);
     last_decay_ = Timestamp::Now();
 }
 
-size_t AssociationLearningSystem::ApplyCompetition() {
+size_t AssociationLearningSystem::ApplyCompetitionLocked() {
+    CompetitiveLearner::Config competition;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        competition = config_.competition;
+    }
+
+    size_t applied = CompetitiveLearner::ApplyCompetitionAll(matrix_, competition);
     last_competition_ = Timestamp::Now();
-    return 0;  // Simplified - would need pattern iteration
+    return applied;
 }
 
-size_t AssociationLearningSystem::ApplyNormalization() {
+size_t AssociationLearningSystem::ApplyNormalizationLocked() {
+    StrengthNormalizer::Config normalization;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        normalization = config_.normalization;
+    }
+
+    size_t normalized = StrengthNormalizer::NormalizeAll(matrix_, normalization);
     last_normalization_ = Timestamp::Now();
-    return 0;  // Simplified - would need pattern iteration
+    return normalized;
 }
 
-size_t AssociationLearningSystem::PruneWeakAssociations(float min_strength) {
+size_t AssociationLearningSystem::PruneWeakAssociationsLocked(float min_strength) {
     if (min_strength == 0.0f) {
+        std::lock_guard<std::mutex> lock(config_mutex_);
         min_strength = config_.prune_threshold;
     }
 
@@ -195,16 +270,10 @@ size_t AssociationLearningSystem::PruneWeakAssociations(float min_strength) {
     // Collect weak associations to prune (to avoid iterator invalidation)
     std::vector<std::pair<PatternID, PatternID>> to_prune;
 
-    // Get all patterns that have associations
-    auto all_patterns = matrix_.GetAllPatterns();
-
-    for (const auto& pattern : all_patterns) {
-        auto outgoing = matrix_.GetOutgoingAssociations(pattern);
-
-        for (const auto* edge : outgoing) {
-            if (edge && edge->GetStrength() < min_strength) {
-                to_prune.push_back({edge->GetSource(), edge->GetTarget()});
-            }
+    for (const auto& [source, target] : matrix_.GetAllAssociationKeys()) {
+        const auto* edge = matrix_.GetAssociation(source, target);
+        if (edge && edge->GetStrength() < min_strength) {
+            to_prune.emplace_back(source, target);
         }
     }
 
@@ -225,20 +294,21 @@ void AssociationLearningSystem::Compact() {
 
 AssociationLearningSystem::MaintenanceStats AssociationLearningSystem::PerformMaintenance() {
     MaintenanceStats stats;
+    std::lock_guard<std::mutex> lock(maintenance_mutex_);
 
     // Apply decay since last application
     auto decay_elapsed = Timestamp::Now() - last_decay_;
-    ApplyDecay(decay_elapsed);
+    ApplyDecayLocked(decay_elapsed);
     stats.decay_applied = decay_elapsed;
 
     // Apply competition
-    stats.competitions_applied = ApplyCompetition();
+    stats.competitions_applied = ApplyCompetitionLocked();
 
     // Apply normalization
-    stats.normalizations_applied = ApplyNormalization();
+    stats.normalizations_applied = ApplyNormalizationLocked();
 
     // Prune weak associations
-    stats.associations_pruned = PruneWeakAssociations();
+    stats.associations_pruned = PruneWeakAssociationsLocked(0.0f);
 
     // Compact if significant pruning occurred
     if (stats.associations_pruned > 100) {
@@ -267,26 +337,53 @@ std::vector<const AssociationEdge*> AssociationLearningSystem::GetAssociations(
     }
 }
 
+std::vector<std::pair<PatternID, float>> AssociationLearningSystem::RankCandidates(
+    PatternID pattern,
+    const ContextVector* context
+) const {
+    std::shared_ptr<const PredictionScorer> scorer;
+    float weight;
+    {
+        std::lock_guard<std::mutex> lock(scorer_mutex_);
+        scorer = prediction_scorer_;
+        weight = prediction_scorer_weight_;
+    }
+
+    auto associations = matrix_.GetOutgoingAssociations(pattern);
+
+    std::vector<std::pair<PatternID, float>> ranked;
+    ranked.reserve(associations.size());
+
+    for (const auto* edge : associations) {
+        float strength = context ? edge->GetContextualStrength(*context) : edge->GetStrength();
+        float score = strength;
+        if (scorer) {
+            float learned = std::clamp(
+                scorer->Score(pattern, edge->GetTarget(), strength, context), 0.0f, 1.0f);
+            score = (1.0f - weight) * strength + weight * learned;
+        }
+        ranked.emplace_back(edge->GetTarget(), score);
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+        [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+
+    return ranked;
+}
+
 std::vector<PatternID> AssociationLearningSystem::Predict(
     PatternID pattern,
     size_t k,
     const ContextVector* context
 ) const {
-    auto associations = matrix_.GetOutgoingAssociations(pattern);
-
-    std::vector<const AssociationEdge*> sorted_assocs(associations.begin(), associations.end());
-    std::sort(sorted_assocs.begin(), sorted_assocs.end(),
-        [context](const AssociationEdge* a, const AssociationEdge* b) {
-            float strength_a = context ? a->GetContextualStrength(*context) : a->GetStrength();
-            float strength_b = context ? b->GetContextualStrength(*context) : b->GetStrength();
-            return strength_a > strength_b;
-        });
+    auto ranked = RankCandidates(pattern, context);
 
     std::vector<PatternID> predictions;
-    predictions.reserve(std::min(k, sorted_assocs.size()));
-
-    for (size_t i = 0; i < std::min(k, sorted_assocs.size()); ++i) {
-        predictions.push_back(sorted_assocs[i]->GetTarget());
+    predictions.reserve(std::min(k, ranked.size()));
+    for (size_t i = 0; i < std::min(k, ranked.size()); ++i) {
+        predictions.push_back(ranked[i].first);
     }
 
     {
@@ -302,20 +399,7 @@ std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithC
     size_t k,
     const ContextVector* context
 ) const {
-    auto associations = matrix_.GetOutgoingAssociations(pattern);
-
-    std::vector<std::pair<PatternID, float>> predictions;
-    predictions.reserve(associations.size());
-
-    for (const auto* edge : associations) {
-        float strength = context ? edge->GetContextualStrength(*context) : edge->GetStrength();
-        predictions.emplace_back(edge->GetTarget(), strength);
-    }
-
-    std::sort(predictions.begin(), predictions.end(),
-        [](const auto& a, const auto& b) {
-            return a.second > b.second;
-        });
+    auto predictions = RankCandidates(pattern, context);
 
     if (predictions.size() > k) {
         predictions.resize(k);
@@ -366,9 +450,20 @@ std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithA
         association_strengths[target] = strength;
     }
 
-    // Use attention mechanism to combine association scores with attention weights
-    // ApplyAttention handles the combination logic using configured weights
-    auto weighted_predictions = attention->ApplyAttention(source, candidates, context);
+    // Combine association strengths with attention weights:
+    //   score = association_weight * strength + attention_weight * attention
+    auto attention_weights = attention->ComputeAttention(source, candidates, context);
+    const AttentionConfig& attention_config = attention->GetConfig();
+
+    std::vector<std::pair<PatternID, float>> weighted_predictions;
+    weighted_predictions.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        auto it = attention_weights.find(candidate);
+        float attention_weight = it != attention_weights.end() ? it->second : 0.0f;
+        float score = attention_config.association_weight * association_strengths[candidate] +
+                      attention_config.attention_weight * attention_weight;
+        weighted_predictions.emplace_back(candidate, score);
+    }
 
     // Sort by combined score (descending)
     std::sort(weighted_predictions.begin(), weighted_predictions.end(),
@@ -458,6 +553,7 @@ void AssociationLearningSystem::PrintStatistics(std::ostream& out) const {
 // ============================================================================
 
 void AssociationLearningSystem::SetConfig(const Config& config) {
+    std::lock_guard<std::mutex> reinforcement_lock(reinforcement_mutex_);
     std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
 
@@ -478,6 +574,21 @@ AssociationLearningSystem::Config AssociationLearningSystem::GetConfig() const {
 void AssociationLearningSystem::SetAttentionMechanism(AttentionMechanism* attention) {
     std::lock_guard<std::mutex> lock(attention_mutex_);
     attention_mechanism_ = attention;
+}
+
+void AssociationLearningSystem::SetPredictionScorer(
+    std::shared_ptr<const PredictionScorer> scorer, float weight) {
+    if (weight < 0.0f || weight > 1.0f) {
+        throw std::invalid_argument("SetPredictionScorer: weight must be in [0, 1]");
+    }
+    std::lock_guard<std::mutex> lock(scorer_mutex_);
+    prediction_scorer_ = std::move(scorer);
+    prediction_scorer_weight_ = weight;
+}
+
+std::shared_ptr<const PredictionScorer> AssociationLearningSystem::GetPredictionScorer() const {
+    std::lock_guard<std::mutex> lock(scorer_mutex_);
+    return prediction_scorer_;
 }
 
 AttentionMechanism* AssociationLearningSystem::GetAttentionMechanism() const {
@@ -534,21 +645,75 @@ bool AssociationLearningSystem::Load(const std::string& filepath) {
 // Private Helper Methods
 // ============================================================================
 
-void AssociationLearningSystem::UpdateActivationHistory(PatternID pattern, Timestamp timestamp) {
-    std::lock_guard<std::mutex> lock(history_mutex_);
-    activation_history_.emplace_back(timestamp, pattern);
-    TrimActivationHistory();
+void AssociationLearningSystem::UpdateContextProfiles(
+    const std::vector<PatternID>& activated,
+    const ContextVector& context,
+    Timestamp timestamp) {
+
+    if (context.IsEmpty()) {
+        return;
+    }
+
+    Timestamp::Duration window;
+    float learning_rate;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        window = config_.activation_window;
+        learning_rate = config_.reinforcement.learning_rate;
+    }
+
+    // Sources: patterns active in the window before this activation, plus the
+    // other patterns activated together with it
+    std::unordered_set<PatternID> sources(activated.begin(), activated.end());
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        Timestamp cutoff = timestamp - window;
+        for (auto it = activation_history_.rbegin();
+             it != activation_history_.rend() && !(it->first < cutoff); ++it) {
+            sources.insert(it->second);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(reinforcement_mutex_);
+    for (const auto& target : activated) {
+        for (const auto& source : sources) {
+            if (source == target) {
+                continue;
+            }
+            const auto* edge = matrix_.GetAssociation(source, target);
+            if (!edge) {
+                continue;
+            }
+            auto updated = edge->Clone();
+            updated->UpdateContextProfile(context, learning_rate);
+            matrix_.UpdateAssociation(source, target, *updated);
+        }
+    }
 }
 
-void AssociationLearningSystem::TrimActivationHistory() {
-    Timestamp cutoff = Timestamp::Now() - config_.activation_window;
+void AssociationLearningSystem::UpdateActivationHistory(PatternID pattern, Timestamp timestamp) {
+    Timestamp::Duration window;
+    size_t max_size;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        window = config_.activation_window;
+        max_size = config_.max_activation_history;
+    }
+
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    activation_history_.emplace_back(timestamp, pattern);
+    TrimActivationHistory(window, max_size);
+}
+
+void AssociationLearningSystem::TrimActivationHistory(Timestamp::Duration window, size_t max_size) {
+    Timestamp cutoff = Timestamp::Now() - window;
 
     while (!activation_history_.empty() &&
            activation_history_.front().first < cutoff) {
         activation_history_.pop_front();
     }
 
-    while (activation_history_.size() > config_.max_activation_history) {
+    while (activation_history_.size() > max_size) {
         activation_history_.pop_front();
     }
 }
@@ -572,42 +737,62 @@ void AssociationLearningSystem::UpdateStatistics() const {
         stats_.activation_history_size = activation_history_.size();
     }
 
-    stats_.last_decay = last_decay_;
-    stats_.last_competition = last_competition_;
-    stats_.last_normalization = last_normalization_;
-    stats_.last_pruning = last_pruning_;
+    {
+        std::lock_guard<std::mutex> maintenance_lock(maintenance_mutex_);
+        stats_.last_decay = last_decay_;
+        stats_.last_competition = last_competition_;
+        stats_.last_normalization = last_normalization_;
+        stats_.last_pruning = last_pruning_;
+    }
 
-    stats_.average_strength = 0.5f;
-    stats_.min_strength = 0.0f;
-    stats_.max_strength = 1.0f;
-    stats_.active_associations = stats_.total_associations;
+    // Active = non-zero strength
+    auto summary = matrix_.GetStrengthSummary(std::numeric_limits<float>::min());
+    stats_.average_strength = summary.average;
+    stats_.min_strength = summary.min;
+    stats_.max_strength = summary.max;
+    stats_.active_associations = summary.count_at_or_above;
 }
 
 void AssociationLearningSystem::CheckAutoMaintenance() {
-    if (!config_.enable_auto_maintenance) {
+    Timestamp::Duration decay_interval;
+    Timestamp::Duration competition_interval;
+    Timestamp::Duration normalization_interval;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        if (!config_.enable_auto_maintenance) {
+            return;
+        }
+        decay_interval = config_.auto_decay_interval;
+        competition_interval = config_.auto_competition_interval;
+        normalization_interval = config_.auto_normalization_interval;
+    }
+
+    // Skip if another thread is already running maintenance
+    std::unique_lock<std::mutex> lock(maintenance_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
         return;
     }
 
     Timestamp now = Timestamp::Now();
 
-    if (config_.auto_decay_interval.count() > 0) {
+    if (decay_interval.count() > 0) {
         auto decay_elapsed = now - last_decay_;
-        if (decay_elapsed >= config_.auto_decay_interval) {
-            ApplyDecay(decay_elapsed);
+        if (decay_elapsed >= decay_interval) {
+            ApplyDecayLocked(decay_elapsed);
         }
     }
 
-    if (config_.auto_competition_interval.count() > 0) {
+    if (competition_interval.count() > 0) {
         auto comp_elapsed = now - last_competition_;
-        if (comp_elapsed >= config_.auto_competition_interval) {
-            ApplyCompetition();
+        if (comp_elapsed >= competition_interval) {
+            ApplyCompetitionLocked();
         }
     }
 
-    if (config_.auto_normalization_interval.count() > 0) {
+    if (normalization_interval.count() > 0) {
         auto norm_elapsed = now - last_normalization_;
-        if (norm_elapsed >= config_.auto_normalization_interval) {
-            ApplyNormalization();
+        if (norm_elapsed >= normalization_interval) {
+            ApplyNormalizationLocked();
         }
     }
 }

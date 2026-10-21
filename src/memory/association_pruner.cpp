@@ -2,6 +2,7 @@
 #include "memory/association_pruner.hpp"
 #include <algorithm>
 #include <queue>
+#include <tuple>
 #include <stdexcept>
 
 namespace dpan {
@@ -165,26 +166,9 @@ AssociationPruner::PruneResult AssociationPruner::PruneAssociations(
 }
 
 size_t AssociationPruner::PruneWeakAssociations(AssociationMatrix& assoc_matrix) {
-    size_t removed = 0;
-    size_t processed = 0;
-
-    // Build hub set for safety
-    std::unordered_set<PatternID> hubs;
-    if (config_.protect_hub_edges) {
-        hubs = BuildHubSet(assoc_matrix);
-    }
-
-    // Get all patterns
-    std::vector<PatternID> patterns;
-    // Note: We need to iterate through the matrix, but there's no direct API for this
-    // We'll need to use a workaround by getting all associations
-
-    // Collect weak associations to remove
-    std::vector<std::pair<PatternID, PatternID>> to_remove;
-
-    // This is inefficient, but we need to iterate through all edges
-    // In a real implementation, we'd add an API to AssociationMatrix to iterate all edges
-    // For now, we'll mark this as a limitation
+    size_t removed = RemoveMatching(assoc_matrix, [this](const AssociationEdge& edge) {
+        return IsWeak(edge);
+    });
 
     // Update statistics
     stats_.weak_removed += removed;
@@ -197,10 +181,15 @@ size_t AssociationPruner::PruneStaleAssociations(
     AssociationMatrix& assoc_matrix,
     const AccessTracker& access_tracker
 ) {
-    size_t removed = 0;
-
-    // Similar limitation as PruneWeakAssociations
-    // Would need AssociationMatrix API to iterate all edges
+    size_t removed = RemoveMatching(assoc_matrix,
+        [this, &access_tracker](const AssociationEdge& edge) {
+            // Prefer recorded access history; fall back to reinforcement time
+            auto stats = access_tracker.GetAssociationStatsSnapshot(edge.GetSource(), edge.GetTarget());
+            if (stats && stats->access_count > 0) {
+                return stats->TimeSinceLastAccess() > config_.staleness_threshold;
+            }
+            return IsStale(edge);
+        });
 
     stats_.stale_removed += removed;
     stats_.total_associations_removed += removed;
@@ -209,14 +198,48 @@ size_t AssociationPruner::PruneStaleAssociations(
 }
 
 size_t AssociationPruner::PruneRedundantAssociations(AssociationMatrix& assoc_matrix) {
-    size_t removed = 0;
-
-    // Redundancy detection requires checking all edges
-    // Similar limitation as above
+    size_t removed = RemoveMatching(assoc_matrix, [this, &assoc_matrix](const AssociationEdge& edge) {
+        return IsRedundant(edge, assoc_matrix);
+    });
 
     stats_.redundant_removed += removed;
     stats_.total_associations_removed += removed;
 
+    return removed;
+}
+
+template <typename Predicate>
+size_t AssociationPruner::RemoveMatching(AssociationMatrix& assoc_matrix, Predicate matches) {
+    std::unordered_set<PatternID> hubs;
+    if (config_.protect_hub_edges) {
+        hubs = BuildHubSet(assoc_matrix);
+    }
+
+    // Decide first, then remove, so removals do not affect later checks
+    // (e.g. alternative paths used by redundancy detection)
+    std::vector<std::pair<PatternID, PatternID>> to_remove;
+    for (const auto& [source, target] : CollectCandidates(assoc_matrix, nullptr)) {
+        if (to_remove.size() >= config_.max_prune_batch) {
+            break;
+        }
+        const AssociationEdge* edge = assoc_matrix.GetAssociation(source, target);
+        if (!edge || !IsSafeToPrune(*edge, assoc_matrix)) {
+            continue;
+        }
+        if (hubs.count(source) > 0 || hubs.count(target) > 0) {
+            continue;
+        }
+        if (matches(*edge)) {
+            to_remove.emplace_back(source, target);
+        }
+    }
+
+    size_t removed = 0;
+    for (const auto& [source, target] : to_remove) {
+        if (assoc_matrix.RemoveAssociation(source, target)) {
+            removed++;
+        }
+    }
     return removed;
 }
 
@@ -317,19 +340,27 @@ void AssociationPruner::ResetStatistics() {
 
 std::vector<std::pair<PatternID, PatternID>> AssociationPruner::CollectCandidates(
     const AssociationMatrix& assoc_matrix,
-    const AccessTracker* access_tracker
+    const AccessTracker* /* access_tracker */
 ) const {
+    // Only edges below min_association_strength can pass IsSafeToPrune(),
+    // so those are the candidates; weakest first so batch limits keep the
+    // most prunable edges
+    std::vector<std::tuple<float, PatternID, PatternID>> weak_edges;
+    for (const auto& [source, target] : assoc_matrix.GetAllAssociationKeys()) {
+        const AssociationEdge* edge = assoc_matrix.GetAssociation(source, target);
+        if (edge && edge->GetStrength() < config_.min_association_strength) {
+            weak_edges.emplace_back(edge->GetStrength(), source, target);
+        }
+    }
+
+    std::sort(weak_edges.begin(), weak_edges.end(),
+              [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+
     std::vector<std::pair<PatternID, PatternID>> candidates;
-
-    // This is a limitation of the current AssociationMatrix API
-    // We don't have a way to iterate through all edges efficiently
-    // In a production implementation, we would add an API like:
-    //   std::vector<std::pair<PatternID, PatternID>> GetAllEdges() const;
-    // or an iterator interface
-
-    // For now, we return an empty vector
-    // The pruning will still work when called with specific pattern IDs
-
+    candidates.reserve(weak_edges.size());
+    for (const auto& [strength, source, target] : weak_edges) {
+        candidates.emplace_back(source, target);
+    }
     return candidates;
 }
 
@@ -338,8 +369,11 @@ std::unordered_set<PatternID> AssociationPruner::BuildHubSet(
 ) const {
     std::unordered_set<PatternID> hubs;
 
-    // Similar limitation as CollectCandidates
-    // We would need to iterate through all patterns in the matrix
+    for (const auto& pattern : assoc_matrix.GetAllPatterns()) {
+        if (IsHub(pattern, assoc_matrix)) {
+            hubs.insert(pattern);
+        }
+    }
 
     return hubs;
 }

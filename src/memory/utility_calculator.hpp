@@ -25,6 +25,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <shared_mutex>
+#include <optional>
 #include <vector>
 
 namespace dpan {
@@ -153,6 +154,10 @@ struct AccessStats {
     static AccessStats Deserialize(std::istream& in);
 };
 
+/// Access statistics derived from a pattern node's own counters, for patterns
+/// with no AccessTracker history (a never-accessed node counts from creation)
+AccessStats AccessStatsFromNode(const PatternNode& pattern);
+
 /// Centralized tracking of access statistics for patterns and associations
 ///
 /// Thread-safe tracker for maintaining access history to support
@@ -177,7 +182,15 @@ public:
     ///
     /// @param pattern Pattern ID to query
     /// @return Pointer to stats (nullptr if not tracked)
+    /// The pointer is invalidated by PruneOldStats()/Clear(); use
+    /// GetPatternStatsSnapshot() when other threads may record accesses.
     const AccessStats* GetPatternStats(PatternID pattern) const;
+
+    /// Get a copy of a pattern's access statistics (thread-safe)
+    ///
+    /// @param pattern Pattern ID to query
+    /// @return Stats copy (std::nullopt if not tracked)
+    std::optional<AccessStats> GetPatternStatsSnapshot(PatternID pattern) const;
 
     /// Get access statistics for an association
     ///
@@ -185,6 +198,13 @@ public:
     /// @param target Target pattern ID
     /// @return Pointer to stats (nullptr if not tracked)
     const AccessStats* GetAssociationStats(PatternID source, PatternID target) const;
+
+    /// Get a copy of an association's access statistics (thread-safe)
+    std::optional<AccessStats> GetAssociationStatsSnapshot(PatternID source, PatternID target) const;
+
+    /// Get the access count of every tracked association (thread-safe)
+    std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>
+    GetAssociationAccessCounts() const;
 
     /// Remove statistics older than cutoff time
     ///
@@ -203,15 +223,6 @@ public:
 
 private:
     std::unordered_map<PatternID, AccessStats> pattern_stats_;
-
-    // Use custom hash for pattern pairs
-    struct PatternPairHash {
-        size_t operator()(const std::pair<PatternID, PatternID>& p) const {
-            size_t h1 = std::hash<PatternID>{}(p.first);
-            size_t h2 = std::hash<PatternID>{}(p.second);
-            return h1 ^ (h2 << 1);
-        }
-    };
 
     std::unordered_map<std::pair<PatternID, PatternID>, AccessStats, PatternPairHash> association_stats_;
 

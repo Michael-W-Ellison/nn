@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <limits>
 #include <string>
 
 namespace dpan {
@@ -43,6 +44,13 @@ struct QueryOptions {
 
     /// Maximum timestamp for time-range queries (optional)
     std::optional<Timestamp> max_timestamp;
+
+    /// Options with no result limit (max_results defaults to 100)
+    static QueryOptions Unlimited() {
+        QueryOptions options;
+        options.max_results = std::numeric_limits<size_t>::max();
+        return options;
+    }
 };
 
 /// Abstract interface for pattern storage backends
@@ -178,10 +186,11 @@ public:
 
 /// Factory function to create a pattern database from configuration
 ///
-/// The configuration file should specify the backend type and parameters.
+/// The configuration file specifies the backend type and its parameters, as
+/// JSON or as "key: value" lines (YAML subset, one level of sections).
 /// Example config (JSON format):
 /// {
-///   "backend": "memory",  // or "rocksdb", "mmap"
+///   "backend": "memory",  // "memory", "mmap", or "persistent" ("sqlite")
 ///   "memory": {
 ///     "initial_capacity": 10000,
 ///     "enable_cache": true,
@@ -189,8 +198,16 @@ public:
 ///   }
 /// }
 ///
+/// Backend keys (section-qualified or top-level):
+/// - memory / mmap: initial_capacity, enable_cache, cache_size; mmap.path
+///   (required for "mmap") persists the in-memory store to a file
+/// - persistent / sqlite: db_path (required), enable_wal, cache_size_kb,
+///   page_size, enable_auto_vacuum, synchronous (FULL/NORMAL/OFF)
+///
 /// @param config_path Path to the configuration file
 /// @return Unique pointer to a PatternDatabase implementation
+/// @throws std::runtime_error if the file cannot be read, is malformed, names
+///         an unsupported backend, or has invalid/missing values
 std::unique_ptr<PatternDatabase> CreatePatternDatabase(const std::string& config_path);
 
 } // namespace dpan

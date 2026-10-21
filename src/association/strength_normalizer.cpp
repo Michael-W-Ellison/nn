@@ -136,13 +136,29 @@ size_t NormalizeAll(
     AssociationMatrix& matrix,
     const Config& config
 ) {
-    // Note: This is limited by the AssociationMatrix API
-    // Without a method to get all unique patterns, we cannot efficiently
-    // normalize all patterns in the matrix
-    // This would require AssociationMatrix to expose a GetAllPatterns() method
-    // For now, return 0
-    // TODO: Update when AssociationMatrix provides pattern iteration
-    return 0;
+    size_t normalized_count = 0;
+
+    for (const auto& pattern : matrix.GetAllPatterns()) {
+        bool normalized = false;
+        switch (config.mode) {
+            case NormalizationMode::OUTGOING:
+                normalized = NormalizeOutgoing(matrix, pattern, config);
+                break;
+            case NormalizationMode::INCOMING:
+                normalized = NormalizeIncoming(matrix, pattern, config);
+                break;
+            case NormalizationMode::BIDIRECTIONAL: {
+                auto [out, in] = NormalizeBidirectional(matrix, pattern, config);
+                normalized = out || in;
+                break;
+            }
+        }
+        if (normalized) {
+            normalized_count++;
+        }
+    }
+
+    return normalized_count;
 }
 
 // ============================================================================
@@ -215,15 +231,48 @@ NormalizationStats AnalyzeNormalization(
 ) {
     NormalizationStats stats;
 
-    // Note: This is limited by the AssociationMatrix API
-    // Without a method to iterate over all unique patterns, we cannot
-    // efficiently analyze the entire matrix
-    // This would require AssociationMatrix to expose a GetAllPatterns() method
-    // For now, return empty stats
-    // TODO: Update when AssociationMatrix provides pattern iteration
+    // Read-only analysis of outgoing strength sums: patterns_normalized counts
+    // patterns whose sum is already within tolerance of 1.0, edges_updated
+    // counts edges a NormalizeAll() would rescale
+    constexpr float kTolerance = 0.01f;
+    double total_sum = 0.0;
 
-    stats.min_strength_sum = std::numeric_limits<float>::max();
-    stats.max_strength_sum = 0.0f;
+    for (const auto& pattern : matrix.GetAllPatterns()) {
+        auto outgoing = matrix.GetOutgoingAssociations(pattern);
+
+        float sum = 0.0f;
+        size_t eligible = 0;
+        for (const auto* edge : outgoing) {
+            if (edge->GetStrength() >= config.min_strength_threshold) {
+                sum += edge->GetStrength();
+                eligible++;
+            }
+        }
+        if (eligible == 0) {
+            continue;
+        }
+
+        if (stats.patterns_processed == 0) {
+            stats.min_strength_sum = sum;
+            stats.max_strength_sum = sum;
+        } else {
+            stats.min_strength_sum = std::min(stats.min_strength_sum, sum);
+            stats.max_strength_sum = std::max(stats.max_strength_sum, sum);
+        }
+        stats.patterns_processed++;
+        total_sum += sum;
+
+        if (std::abs(sum - 1.0f) <= kTolerance) {
+            stats.patterns_normalized++;
+        } else {
+            stats.edges_updated += eligible;
+        }
+    }
+
+    if (stats.patterns_processed > 0) {
+        stats.average_strength_sum =
+            static_cast<float>(total_sum / stats.patterns_processed);
+    }
 
     return stats;
 }

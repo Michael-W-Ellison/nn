@@ -1,11 +1,23 @@
 // File: src/storage/persistent_backend.cpp
 #include "storage/persistent_backend.hpp"
+#include <algorithm>
+#include <limits>
 #include <sstream>
 #include <fstream>
 #include <cstring>
 #include <sys/stat.h>
 
 namespace dpan {
+
+namespace {
+
+// SQLite LIMIT takes a signed 64-bit value
+sqlite3_int64 ClampLimit(size_t max_results) {
+    constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<sqlite3_int64>::max());
+    return static_cast<sqlite3_int64>(std::min(max_results, kMax));
+}
+
+}  // namespace
 
 // ============================================================================
 // Constructor and Destructor
@@ -69,6 +81,15 @@ void PersistentBackend::InitializeDatabase() {
 
     // Create indices for efficient queries
     CreateIndices();
+
+    // Keep newly generated IDs above every stored ID
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT MAX(id) FROM patterns;", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+            PatternID::ReserveThrough(static_cast<PatternID::ValueType>(sqlite3_column_int64(stmt, 0)));
+        }
+        sqlite3_finalize(stmt);
+    }
 }
 
 void PersistentBackend::CreateTables() {
@@ -409,7 +430,7 @@ std::vector<PatternID> PersistentBackend::FindByType(
     }
 
     sqlite3_bind_int(stmt, 1, static_cast<int>(type));
-    sqlite3_bind_int64(stmt, 2, options.max_results);
+    sqlite3_bind_int64(stmt, 2, ClampLimit(options.max_results));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         uint64_t id_value = sqlite3_column_int64(stmt, 0);
@@ -438,7 +459,7 @@ std::vector<PatternID> PersistentBackend::FindByTimeRange(
 
     sqlite3_bind_int64(stmt, 1, start.ToMicros());
     sqlite3_bind_int64(stmt, 2, end.ToMicros());
-    sqlite3_bind_int64(stmt, 3, options.max_results);
+    sqlite3_bind_int64(stmt, 3, ClampLimit(options.max_results));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         uint64_t id_value = sqlite3_column_int64(stmt, 0);
@@ -462,7 +483,7 @@ std::vector<PatternID> PersistentBackend::FindAll(const QueryOptions& options) {
         return results;
     }
 
-    sqlite3_bind_int64(stmt, 1, options.max_results);
+    sqlite3_bind_int64(stmt, 1, ClampLimit(options.max_results));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         uint64_t id_value = sqlite3_column_int64(stmt, 0);

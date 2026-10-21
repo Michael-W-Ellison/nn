@@ -8,8 +8,6 @@ endif()
 add_executable(dpan_cli
     dpan_cli.cpp
     cli_config.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
 )
 
 target_link_libraries(dpan_cli
@@ -17,6 +15,7 @@ target_link_libraries(dpan_cli
         dpan_core
         dpan_storage
         dpan_association
+        dpan_learning
         sqlite3
         pthread
         ${YAML_LIBRARY}

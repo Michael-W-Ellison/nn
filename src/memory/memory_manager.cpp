@@ -1,20 +1,21 @@
 // File: src/memory/memory_manager.cpp
 #include "memory/memory_manager.hpp"
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace dpan {
 
 MemoryManager::MemoryManager()
-    : config_(), last_maintenance_(Timestamp::Now()),
+    : config_(), last_stats_update_(Timestamp::Now()), last_maintenance_(Timestamp::Now()),
       last_pruning_(Timestamp::Now()), last_transition_(Timestamp::Now()),
-      last_consolidation_(Timestamp::Now()), last_stats_update_(Timestamp::Now()) {
+      last_consolidation_(Timestamp::Now()), last_forgetting_(Timestamp::Now()) {
 }
 
 MemoryManager::MemoryManager(const Config& config)
-    : config_(config), last_maintenance_(Timestamp::Now()),
+    : config_(config), last_stats_update_(Timestamp::Now()), last_maintenance_(Timestamp::Now()),
       last_pruning_(Timestamp::Now()), last_transition_(Timestamp::Now()),
-      last_consolidation_(Timestamp::Now()), last_stats_update_(Timestamp::Now()) {
+      last_consolidation_(Timestamp::Now()), last_forgetting_(Timestamp::Now()) {
     if (!config_.IsValid()) {
         throw std::invalid_argument("Invalid MemoryManager configuration");
     }
@@ -31,6 +32,7 @@ void MemoryManager::Initialize(
 
     pattern_db_ = pattern_db;
     assoc_matrix_ = assoc_matrix;
+    similarity_metric_ = similarity_metric;
 
     // Initialize utility calculator with config
     utility_calculator_ = UtilityCalculator(config_.utility_config);
@@ -52,6 +54,10 @@ void MemoryManager::Initialize(
 
     // Initialize sleep consolidator
     sleep_consolidator_ = std::make_unique<SleepConsolidator>(config_.sleep_config);
+    sleep_consolidator_->SetConsolidationWork(
+        [this](SleepConsolidator::ConsolidationCycleResult& result) {
+            RunSleepConsolidation(result);
+        });
 
     // Initialize decay function
     InitializeDecayFunction();
@@ -121,20 +127,66 @@ void MemoryManager::PerformMaintenance() {
     UpdateCachedStatistics();
 }
 
+void MemoryManager::RecordPatternAccess(PatternID pattern, Timestamp timestamp) {
+    access_tracker_.RecordPatternAccess(pattern, timestamp);
+    RecordOperation();
+}
+
+void MemoryManager::RecordAssociationAccess(PatternID source, PatternID target, Timestamp timestamp) {
+    access_tracker_.RecordAssociationAccess(source, target, timestamp);
+    RecordOperation();
+}
+
+std::unordered_map<PatternID, float> MemoryManager::ComputePatternUtilities() const {
+    std::unordered_map<PatternID, float> utilities;
+    if (!is_initialized_) {
+        return utilities;
+    }
+
+    QueryOptions all = QueryOptions::Unlimited();
+    auto ids = pattern_db_->FindAll(all);
+    utilities.reserve(ids.size());
+
+    for (const auto& id : ids) {
+        auto node = pattern_db_->Retrieve(id);
+        if (!node) {
+            continue;  // Removed concurrently
+        }
+
+        // Associations involving the pattern (copies: edges are not copyable)
+        std::vector<AssociationEdge> associations;
+        for (const auto* edge : assoc_matrix_->GetOutgoingAssociations(id)) {
+            associations.push_back(std::move(*edge->Clone()));
+        }
+        for (const auto* edge : assoc_matrix_->GetIncomingAssociations(id)) {
+            associations.push_back(std::move(*edge->Clone()));
+        }
+
+        auto tracked = access_tracker_.GetPatternStatsSnapshot(id);
+        AccessStats stats = tracked ? *tracked : AccessStatsFromNode(*node);
+        utilities[id] = utility_calculator_.CalculatePatternUtility(*node, stats, associations);
+    }
+
+    return utilities;
+}
+
 void MemoryManager::PerformPruning() {
     if (!is_initialized_) {
         throw std::runtime_error("MemoryManager not initialized");
     }
 
-    // TODO: Get utilities from UtilityTracker once AccessTracker is integrated
-    std::unordered_map<PatternID, float> utilities;
+    auto utilities = ComputePatternUtilities();
 
-    // Get current threshold
+    // Prune below the adaptive threshold (it tracks memory pressure)
     auto threshold_stats = threshold_manager_.GetStats();
     float threshold = threshold_stats.current_threshold;
 
     // Perform pattern pruning
     if (config_.enable_automatic_pruning && pattern_pruner_) {
+        auto pruner_config = pattern_pruner_->GetConfig();
+        pruner_config.utility_threshold = threshold;
+        pattern_pruner_->SetConfig(pruner_config);
+
         auto prune_result = pattern_pruner_->PrunePatterns(
             *pattern_db_,
             *assoc_matrix_,
@@ -163,17 +215,82 @@ void MemoryManager::PerformTierTransitions() {
         return;
     }
 
-    // TODO: Get utilities from UtilityTracker once AccessTracker is integrated
-    std::unordered_map<PatternID, float> utilities;
-
-    // Tier manager would handle transitions based on utilities
-    // (This is a simplified version - actual implementation would be more complex)
-
     // Update threshold based on current memory usage
-    threshold_manager_.UpdateThreshold(
-        pattern_db_->Count() * 1024,  // Estimate memory usage
-        pattern_db_->Count()
-    );
+    size_t pattern_count = pattern_db_->Count();
+    size_t memory_bytes = pattern_db_->GetStats().memory_usage_bytes;
+    if (memory_bytes == 0) {
+        memory_bytes = pattern_count * 1024;  // Backend does not report memory: estimate
+    }
+    threshold_manager_.UpdateThreshold(memory_bytes, pattern_count);
+
+    // Move patterns between tiers once the tiers have been set up
+    if (tier_manager_->IsInitialized()) {
+        tier_manager_->RunTransitionCycle(utility_calculator_, access_tracker_);
+
+        auto tier_stats = tier_manager_->GetStats();
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        cached_stats_.active_patterns = tier_stats.active_count;
+        cached_stats_.warm_patterns = tier_stats.warm_count;
+        cached_stats_.cold_patterns = tier_stats.cold_count;
+        cached_stats_.archive_patterns = tier_stats.archive_count;
+    }
+}
+
+void MemoryManager::RunSleepConsolidation(SleepConsolidator::ConsolidationCycleResult& result) {
+    // 1. Strengthen the most useful patterns (raise their confidence)
+    auto utilities = ComputePatternUtilities();
+    auto to_strengthen = sleep_consolidator_->IdentifyPatternsToStrengthen(utilities);
+
+    float total_change = 0.0f;
+    for (const auto& info : to_strengthen) {
+        auto node = pattern_db_->Retrieve(info.pattern_id);
+        if (!node) {
+            continue;
+        }
+        float confidence = node->GetConfidenceScore();
+        float boosted = std::min(1.0f, confidence + info.boost_amount);
+        if (boosted > confidence) {
+            node->SetConfidenceScore(boosted);
+            if (pattern_db_->Update(*node)) {
+                result.patterns_strengthened++;
+                total_change += info.boost_amount;
+            }
+        }
+    }
+    if (result.patterns_strengthened > 0) {
+        result.average_utility_change = total_change / result.patterns_strengthened;
+    }
+
+    // 2. Prune more aggressively than during waking maintenance
+    if (pattern_pruner_) {
+        auto original = pattern_pruner_->GetConfig();
+        auto aggressive = original;
+        aggressive.utility_threshold = std::min(
+            1.0f, threshold_manager_.GetStats().current_threshold *
+                  config_.sleep_config.sleep_pruning_multiplier);
+        pattern_pruner_->SetConfig(aggressive);
+
+        auto prune_result = pattern_pruner_->PrunePatterns(*pattern_db_, *assoc_matrix_,
+                                                           ComputePatternUtilities());
+        pattern_pruner_->SetConfig(original);
+
+        result.patterns_pruned = prune_result.pruned_patterns.size() +
+                                 prune_result.merged_patterns.size();
+        result.memory_freed_bytes += prune_result.bytes_freed;
+    }
+
+    // 3. Merge similar patterns and compress association paths
+    if (similarity_metric_) {
+        size_t edges_before = assoc_matrix_->GetAssociationCount();
+        auto consolidation = memory_consolidator_.Consolidate(
+            *pattern_db_, *assoc_matrix_, *similarity_metric_,
+            access_tracker_.GetAssociationAccessCounts());
+        size_t edges_after = assoc_matrix_->GetAssociationCount();
+        result.associations_reorganized = edges_after > edges_before
+            ? edges_after - edges_before
+            : edges_before - edges_after;
+        result.memory_freed_bytes += consolidation.memory_freed_bytes;
+    }
 }
 
 void MemoryManager::PerformConsolidation() {
@@ -181,9 +298,11 @@ void MemoryManager::PerformConsolidation() {
         return;
     }
 
-    // Perform memory consolidation
-    // Note: This requires pattern database and similarity metric
-    // Actual consolidation is complex and would integrate with tier management
+    // Merging and clustering compare patterns, so they need a similarity metric
+    if (similarity_metric_) {
+        memory_consolidator_.Consolidate(*pattern_db_, *assoc_matrix_, *similarity_metric_,
+                                         access_tracker_.GetAssociationAccessCounts());
+    }
 
     std::lock_guard<std::mutex> lock(stats_mutex_);
     cached_stats_.last_consolidation_time = Timestamp::Now();
@@ -199,6 +318,8 @@ void MemoryManager::ApplyForgetting() {
 
     // Apply interference to patterns
     ApplyInterferenceToPatterns();
+
+    last_forgetting_ = Timestamp::Now();
 }
 
 void MemoryManager::RecordOperation() {
@@ -304,45 +425,122 @@ void MemoryManager::ApplyDecayToPatterns() {
         return;
     }
 
-    // Note: In a full implementation, this would:
-    // 1. Iterate through patterns
-    // 2. Calculate time since last access
-    // 3. Apply decay to confidence/utility
-    // 4. Update pattern database
-
-    // Simplified version for integration
+    // Decay each pattern's confidence for the time it went unused since the
+    // previous forgetting pass (so repeated passes do not compound)
     Timestamp now = Timestamp::Now();
     size_t patterns_with_decay = 0;
 
-    // This would be implemented with actual pattern iteration
-    // For now, just track that decay is being applied
+    QueryOptions all = QueryOptions::Unlimited();
+    for (const auto& id : pattern_db_->FindAll(all)) {
+        auto node = pattern_db_->Retrieve(id);
+        if (!node) {
+            continue;
+        }
+
+        auto stats = access_tracker_.GetPatternStatsSnapshot(id);
+        Timestamp last_use = stats ? stats->last_access : AccessStatsFromNode(*node).last_access;
+        Timestamp decay_start = std::max(last_use, last_forgetting_);
+        if (!(decay_start < now)) {
+            continue;
+        }
+
+        float confidence = node->GetConfidenceScore();
+        float decayed = decay_function_->ApplyDecay(confidence, now - decay_start);
+        if (decayed < confidence) {
+            node->SetConfidenceScore(decayed);
+            if (pattern_db_->Update(*node)) {
+                patterns_with_decay++;
+            }
+        }
+    }
 
     std::lock_guard<std::mutex> lock(stats_mutex_);
     cached_stats_.patterns_with_decay = patterns_with_decay;
 }
 
 void MemoryManager::ApplyInterferenceToPatterns() {
-    if (!pattern_db_ || !assoc_matrix_) {
+    if (!pattern_db_ || !assoc_matrix_ || !similarity_metric_) {
         return;
     }
 
-    // Note: In a full implementation, this would:
-    // 1. Identify similar patterns
-    // 2. Calculate interference between them
-    // 3. Reduce strength of interfered patterns
-    // 4. Update pattern database
+    // Similar patterns weaken each other's confidence:
+    //   s'(p) = s(p) × (1 - α × min(1, Σ similarity(p, q) × s(q)))
+    // scaled by the hours elapsed since the previous pass (capped at 1) so
+    // the effect is per unit time rather than per maintenance call.
+    Timestamp now = Timestamp::Now();
+    float hours = std::chrono::duration<float, std::ratio<3600>>(now - last_forgetting_).count();
+    float time_scale = std::clamp(hours, 0.0f, 1.0f);
+    if (time_scale <= 0.0f) {
+        return;
+    }
 
-    // Simplified version for integration
+    QueryOptions all = QueryOptions::Unlimited();
+    std::vector<PatternNode> all_nodes;
+    for (const auto& id : pattern_db_->FindAll(all)) {
+        if (auto node = pattern_db_->Retrieve(id)) {
+            all_nodes.push_back(std::move(*node));
+        }
+    }
+
+    // Keep the most recently accessed patterns when over the limit
+    // (PatternNode is not move-assignable, so sort indices)
+    std::vector<size_t> order(all_nodes.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    if (order.size() > config_.max_interference_patterns) {
+        std::partial_sort(order.begin(), order.begin() + config_.max_interference_patterns, order.end(),
+            [&all_nodes](size_t a, size_t b) {
+                return all_nodes[b].GetLastAccessed() < all_nodes[a].GetLastAccessed();
+            });
+        order.resize(config_.max_interference_patterns);
+    }
+
+    std::vector<PatternNode*> nodes;
+    nodes.reserve(order.size());
+    for (size_t index : order) {
+        nodes.push_back(&all_nodes[index]);
+    }
+
+    std::vector<FeatureVector> features;
+    features.reserve(nodes.size());
+    for (const auto& node : nodes) {
+        features.push_back(node->GetData().GetFeatures());
+    }
+
     size_t patterns_with_interference = 0;
     float total_interference = 0.0f;
 
-    // This would be implemented with actual interference calculation
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        float interference = 0.0f;
+        for (size_t j = 0; j < nodes.size(); ++j) {
+            if (i == j || features[i].Dimension() != features[j].Dimension()) {
+                continue;
+            }
+            interference += interference_calculator_.CalculateInterference(
+                features[i], features[j], nodes[j]->GetConfidenceScore());
+        }
+        interference = std::min(1.0f, interference) * time_scale;
+        if (interference <= 0.0f) {
+            continue;
+        }
+
+        float confidence = nodes[i]->GetConfidenceScore();
+        float reduced = interference_calculator_.ApplyInterference(confidence, interference);
+        if (reduced < confidence) {
+            nodes[i]->SetConfidenceScore(reduced);
+            if (pattern_db_->Update(*nodes[i])) {
+                patterns_with_interference++;
+                total_interference += interference;
+            }
+        }
+    }
 
     std::lock_guard<std::mutex> lock(stats_mutex_);
     cached_stats_.patterns_with_interference = patterns_with_interference;
-    if (patterns_with_interference > 0) {
-        cached_stats_.average_interference = total_interference / patterns_with_interference;
-    }
+    cached_stats_.average_interference = patterns_with_interference > 0
+        ? total_interference / patterns_with_interference
+        : 0.0f;
 }
 
 } // namespace dpan

@@ -41,7 +41,9 @@ void PatternEngine::InitializeComponents() {
     }
 
     // Create similarity metric
-    similarity_metric_ = CreateSimilarityMetric(config_.similarity_metric);
+    similarity_metric_ = config_.similarity_metric_instance
+        ? config_.similarity_metric_instance
+        : CreateSimilarityMetric(config_.similarity_metric);
 
     // Create pattern extractor
     extractor_ = std::make_unique<PatternExtractor>(config_.extraction_config);
@@ -83,15 +85,35 @@ std::shared_ptr<SimilarityMetric> PatternEngine::CreateSimilarityMetric(
         return std::make_shared<HistogramSimilarity>();
     } else if (metric_name == "spectral") {
         return std::make_shared<SpectralSimilarity>();
-    } else {
-        // Default to context vector similarity
-        return std::make_shared<ContextVectorSimilarity>();
+    } else if (metric_name == "cosine") {
+        return std::make_shared<CosineSimilarity>();
+    } else if (metric_name == "euclidean") {
+        return std::make_shared<EuclideanSimilarity>();
     }
+
+    throw std::invalid_argument(
+        "Unknown similarity metric '" + metric_name + "' (supported: context, cosine, "
+        "euclidean, hausdorff, chamfer, temporal, histogram, spectral)");
 }
 
 // ============================================================================
 // High-Level API
 // ============================================================================
+
+std::vector<PatternData> PatternEngine::ExtractForModality(
+    const std::vector<uint8_t>& raw_input,
+    DataModality modality) const {
+
+    if (modality == extractor_->GetConfig().modality) {
+        return extractor_->Extract(raw_input);
+    }
+
+    // Different modality than configured: extract with an adjusted copy of
+    // the extraction config (the shared extractor is left unchanged)
+    PatternExtractor::Config config = extractor_->GetConfig();
+    config.modality = modality;
+    return PatternExtractor(config).Extract(raw_input);
+}
 
 PatternEngine::ProcessResult PatternEngine::ProcessInput(
     const std::vector<uint8_t>& raw_input,
@@ -105,7 +127,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
     result.updated_patterns.clear();
 
     // Step 1: Extract patterns from raw input
-    auto extracted_patterns = extractor_->Extract(raw_input);
+    auto extracted_patterns = ExtractForModality(raw_input, modality);
 
     if (extracted_patterns.empty()) {
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -127,6 +149,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
                     PatternType::ATOMIC,
                     decision.confidence
                 );
+                matcher_->NotifyPatternChanged(new_id);
                 result.created_patterns.push_back(new_id);
                 break;
             }
@@ -157,6 +180,7 @@ PatternEngine::ProcessResult PatternEngine::ProcessInput(
                 if (!merge_candidates.empty() && config_.enable_auto_refinement) {
                     auto merge_result = refiner_->MergePatterns(merge_candidates);
                     if (merge_result.success) {
+                        matcher_->InvalidateIndex();
                         result.created_patterns.push_back(merge_result.merged_id);
                         // Mark originals as updated (merged away)
                         for (const auto& id : merge_candidates) {
@@ -191,11 +215,12 @@ std::vector<PatternID> PatternEngine::DiscoverPatterns(
     std::vector<PatternID> discovered;
 
     // Extract patterns from raw input
-    auto extracted_patterns = extractor_->Extract(raw_input);
+    auto extracted_patterns = ExtractForModality(raw_input, modality);
 
     // Create patterns for all extracted data
     for (const auto& pattern_data : extracted_patterns) {
         PatternID id = creator_->CreatePattern(pattern_data);
+        matcher_->NotifyPatternChanged(id);
         discovered.push_back(id);
     }
 
@@ -227,7 +252,7 @@ std::vector<PatternNode> PatternEngine::GetPatternsBatch(
 }
 
 std::vector<PatternID> PatternEngine::GetAllPatternIDs() const {
-    return database_->FindAll();
+    return database_->FindAll(QueryOptions::Unlimited());
 }
 
 // ============================================================================
@@ -242,7 +267,7 @@ std::vector<SearchResult> PatternEngine::FindSimilarPatterns(
     if (!similarity_search_) {
         // Fallback to brute-force search if indexing disabled
         std::vector<SearchResult> results;
-        auto all_ids = database_->FindAll();
+        auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
         for (const auto& id : all_ids) {
             auto pattern_opt = database_->Retrieve(id);
@@ -296,6 +321,7 @@ PatternID PatternEngine::CreatePattern(
     float confidence) {
 
     PatternID id = creator_->CreatePattern(data, PatternType::ATOMIC, confidence);
+    matcher_->NotifyPatternChanged(id);
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -310,6 +336,7 @@ PatternID PatternEngine::CreateCompositePattern(
     const PatternData& data) {
 
     PatternID id = creator_->CreateCompositePattern(sub_patterns, data);
+    matcher_->NotifyPatternChanged(id);
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -326,6 +353,7 @@ bool PatternEngine::UpdatePattern(
     bool success = refiner_->UpdatePattern(id, new_data);
 
     if (success) {
+        matcher_->NotifyPatternChanged(id);
         std::lock_guard<std::mutex> lock(stats_mutex_);
         total_patterns_updated_++;
     }
@@ -334,7 +362,11 @@ bool PatternEngine::UpdatePattern(
 }
 
 bool PatternEngine::DeletePattern(PatternID id) {
-    return database_->Delete(id);
+    bool deleted = database_->Delete(id);
+    if (deleted) {
+        matcher_->NotifyPatternRemoved(id);
+    }
+    return deleted;
 }
 
 // ============================================================================
@@ -344,7 +376,7 @@ bool PatternEngine::DeletePattern(PatternID id) {
 PatternEngine::Statistics PatternEngine::GetStatistics() const {
     Statistics stats;
 
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
     stats.total_patterns = all_ids.size();
 
     float total_confidence = 0.0f;
@@ -404,7 +436,7 @@ void PatternEngine::RunMaintenance() {
         return;
     }
 
-    auto all_ids = database_->FindAll();
+    auto all_ids = database_->FindAll(QueryOptions::Unlimited());
 
     // Check for patterns that need splitting
     std::vector<PatternID> to_split;
@@ -428,6 +460,9 @@ void PatternEngine::RunMaintenance() {
             }
         }
     }
+
+    // Splits and merges replace patterns
+    matcher_->InvalidateIndex();
 }
 
 // ============================================================================
@@ -435,38 +470,20 @@ void PatternEngine::RunMaintenance() {
 // ============================================================================
 
 bool PatternEngine::SaveSnapshot(const std::string& path) {
-    // For now, this is a simplified implementation
-    // In a real system, you would serialize all engine state including:
-    // - All patterns from database
-    // - Statistics
-    // - Configuration
-    // - Index state (if applicable)
-
-    // Flush database first
+    // Patterns are the engine's persistent state; the backend writes them
+    // (binary dump for memory, SQLite backup for persistent)
     Flush();
-
-    // For memory backend, we can't easily save snapshot
-    // For persistent backend, the database file itself is the snapshot
-    if (config_.database_type == "persistent") {
-        // The database is already persisted at config_.database_path
-        // We could copy it to the snapshot path here
-        return true;
-    }
-
-    // Memory backend doesn't support snapshots in this simple implementation
-    return false;
+    return database_->CreateSnapshot(path);
 }
 
 bool PatternEngine::LoadSnapshot(const std::string& path) {
-    // Simplified implementation
-    // In a real system, you would deserialize all engine state
-
-    if (config_.database_type == "persistent") {
-        // Database automatically loads from config_.database_path
-        return true;
+    // Replaces the current patterns; similarity search reads the database
+    // directly, the matcher's fast-search index is rebuilt
+    bool restored = database_->RestoreSnapshot(path);
+    if (restored) {
+        matcher_->RebuildIndex();
     }
-
-    return false;
+    return restored;
 }
 
 } // namespace dpan

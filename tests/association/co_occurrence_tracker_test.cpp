@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 namespace dpan {
 namespace {
@@ -471,6 +472,76 @@ TEST(CoOccurrenceTrackerTest, Statistics) {
     EXPECT_EQ(3u, tracker.GetUniquePatternCount());
     EXPECT_EQ(3u, tracker.GetTotalWindows());
     EXPECT_EQ(3u, tracker.GetCoOccurrencePairCount());
+}
+
+TEST(CoOccurrenceTrackerTest, OutOfOrderActivationsCountedLikeInOrder) {
+    CoOccurrenceTracker::Config config;
+    config.window_size = std::chrono::seconds(10);
+
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+    PatternID p3 = PatternID::Generate();
+    auto t0 = Timestamp::Now();
+
+    CoOccurrenceTracker ordered(config);
+    ordered.RecordActivation(p1, t0);
+    ordered.RecordActivation(p2, t0 + std::chrono::seconds(5));
+    ordered.RecordActivation(p3, t0 + std::chrono::seconds(20));
+
+    CoOccurrenceTracker shuffled(config);
+    shuffled.RecordActivation(p3, t0 + std::chrono::seconds(20));
+    shuffled.RecordActivation(p1, t0);
+    shuffled.RecordActivation(p2, t0 + std::chrono::seconds(5));
+
+    // p1-p2 are 5s apart (inside window); p3 is 15s+ from both
+    EXPECT_EQ(1u, ordered.GetCoOccurrenceCount(p1, p2));
+    EXPECT_EQ(0u, ordered.GetCoOccurrenceCount(p1, p3));
+    EXPECT_EQ(0u, ordered.GetCoOccurrenceCount(p2, p3));
+    EXPECT_EQ(ordered.GetCoOccurrenceCount(p1, p2), shuffled.GetCoOccurrenceCount(p1, p2));
+    EXPECT_EQ(0u, shuffled.GetCoOccurrenceCount(p1, p3));
+}
+
+TEST(CoOccurrenceTrackerTest, SlidingWindowExpiresOldActivations) {
+    CoOccurrenceTracker::Config config;
+    config.window_size = std::chrono::seconds(10);
+    CoOccurrenceTracker tracker(config);
+
+    PatternID p1 = PatternID::Generate();
+    PatternID p2 = PatternID::Generate();
+    auto t0 = Timestamp::Now();
+
+    tracker.RecordActivation(p1, t0);
+    tracker.RecordActivation(p2, t0 + std::chrono::seconds(11));  // p1 expired
+    EXPECT_EQ(0u, tracker.GetCoOccurrenceCount(p1, p2));
+
+    tracker.RecordActivation(p1, t0 + std::chrono::seconds(12));  // p2 in window
+    EXPECT_EQ(1u, tracker.GetCoOccurrenceCount(p1, p2));
+}
+
+TEST(CoOccurrenceTrackerTest, ConcurrentRecordingIsConsistent) {
+    CoOccurrenceTracker tracker;
+
+    std::vector<PatternID> patterns;
+    for (int i = 0; i < 8; ++i) {
+        patterns.push_back(PatternID::Generate());
+    }
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&tracker, &patterns, t]() {
+            for (int i = 0; i < 500; ++i) {
+                tracker.RecordActivation(patterns[(t + i) % patterns.size()]);
+                tracker.GetCoOccurringPatterns(patterns[t]);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    EXPECT_EQ(8u, tracker.GetUniquePatternCount());
+    EXPECT_EQ(4000u, tracker.GetActivationCount());
+    EXPECT_EQ(28u, tracker.GetCoOccurrencePairCount());  // All 8 choose 2 pairs
 }
 
 } // namespace

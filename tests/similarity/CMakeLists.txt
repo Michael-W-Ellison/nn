@@ -86,3 +86,18 @@ target_link_libraries(similarity_search_test
 )
 
 gtest_discover_tests(similarity_search_test)
+
+# LSH index and approximate search tests
+add_executable(lsh_index_test
+    lsh_index_test.cpp
+)
+
+target_link_libraries(lsh_index_test
+    dpan_core
+    dpan_storage
+    dpan_similarity
+    gtest
+    gtest_main
+)
+
+gtest_discover_tests(lsh_index_test)

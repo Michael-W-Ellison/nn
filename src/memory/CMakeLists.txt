@@ -21,11 +21,15 @@ add_library(dpan_memory
 )
 
 target_include_directories(dpan_memory PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
+
+find_package(ZLIB REQUIRED)
 
 target_link_libraries(dpan_memory PUBLIC
     dpan_core
     dpan_association
     dpan_similarity
+    ZLIB::ZLIB
 )

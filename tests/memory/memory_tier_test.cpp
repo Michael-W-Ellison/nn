@@ -18,7 +18,10 @@
 #include "association/association_edge.hpp"
 #include "core/types.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <vector>
 #include <memory>
 
@@ -46,7 +49,7 @@ class WarmTierTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create temporary directory for testing
-        temp_dir_ = fs::temp_directory_path() / "dpan_warm_tier_test";
+        temp_dir_ = test::UniqueTempPath("dpan_warm_tier_test");
         fs::create_directories(temp_dir_);
         tier_ = CreateWarmTier(temp_dir_.string());
     }
@@ -66,7 +69,7 @@ class ColdTierTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create temporary directory for testing
-        temp_dir_ = fs::temp_directory_path() / "dpan_cold_tier_test";
+        temp_dir_ = test::UniqueTempPath("dpan_cold_tier_test");
         fs::create_directories(temp_dir_);
         tier_ = CreateColdTier(temp_dir_.string());
     }
@@ -86,7 +89,7 @@ class ArchiveTierTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create temporary directory for testing
-        temp_dir_ = fs::temp_directory_path() / "dpan_archive_tier_test";
+        temp_dir_ = test::UniqueTempPath("dpan_archive_tier_test");
         fs::create_directories(temp_dir_);
         tier_ = CreateArchiveTier(temp_dir_.string());
     }
@@ -904,4 +907,109 @@ TEST_F(WarmTierTest, ClearEmptyTier) {
     EXPECT_NO_THROW(tier_->Clear());
     EXPECT_EQ(0u, tier_->GetPatternCount());
     EXPECT_EQ(0u, tier_->GetAssociationCount());
+}
+
+// ============================================================================
+// Persistence Across Instances
+// ============================================================================
+
+namespace {
+
+void ExpectIndexRebuiltOnReopen(
+    const fs::path& dir,
+    std::unique_ptr<IMemoryTier> (*create)(const std::string&)) {
+
+    PatternNode pattern = CreateTestPattern();
+    PatternID source = pattern.GetID();
+    PatternID target = PatternID::Generate();
+    {
+        auto tier = create(dir.string());
+        ASSERT_TRUE(tier->StorePattern(pattern));
+        ASSERT_TRUE(tier->StoreAssociation(AssociationEdge(source, target, AssociationType::CAUSAL, 0.7f)));
+    }
+
+    // A new instance over the same directory finds the stored data
+    auto reopened = create(dir.string());
+    EXPECT_TRUE(reopened->HasPattern(source));
+    EXPECT_TRUE(reopened->HasAssociation(source, target));
+    EXPECT_EQ(1u, reopened->GetPatternCount());
+    EXPECT_EQ(1u, reopened->GetAssociationCount());
+
+    auto loaded = reopened->LoadPattern(source);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(source, loaded->GetID());
+
+    auto edge = reopened->LoadAssociation(source, target);
+    ASSERT_TRUE(edge.has_value());
+    EXPECT_FLOAT_EQ(0.7f, edge->GetStrength());
+}
+
+}  // namespace
+
+TEST_F(WarmTierTest, IndexRebuiltOnReopen) {
+    tier_.reset();
+    ExpectIndexRebuiltOnReopen(temp_dir_, &CreateWarmTier);
+}
+
+TEST_F(ColdTierTest, IndexRebuiltOnReopen) {
+    tier_.reset();
+    ExpectIndexRebuiltOnReopen(temp_dir_, &CreateColdTier);
+}
+
+TEST_F(ArchiveTierTest, IndexRebuiltOnReopen) {
+    tier_.reset();
+    ExpectIndexRebuiltOnReopen(temp_dir_, &CreateArchiveTier);
+}
+
+TEST_F(ArchiveTierTest, PatternFilesAreCompressed) {
+    // Highly repetitive data compresses well
+    FeatureVector fv(2000);
+    for (size_t i = 0; i < fv.Dimension(); ++i) {
+        fv[i] = 1.0f;
+    }
+    PatternData data = PatternData::FromFeatures(fv, DataModality::NUMERIC);
+    PatternNode pattern(PatternID::Generate(), data, PatternType::ATOMIC);
+    ASSERT_TRUE(tier_->StorePattern(pattern));
+
+    fs::path file = temp_dir_ / "patterns" / (pattern.GetID().ToString() + ".arc");
+    ASSERT_TRUE(fs::exists(file));
+
+    std::ifstream in(file, std::ios::binary);
+    char magic[4];
+    in.read(magic, sizeof(magic));
+    EXPECT_EQ(std::string("DPZ1"), std::string(magic, 4));
+
+    std::ostringstream raw;
+    pattern.Serialize(raw);
+    EXPECT_LT(fs::file_size(file), raw.str().size());
+
+    auto loaded = tier_->LoadPattern(pattern.GetID());
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(pattern.GetData().GetFeatures().Dimension(),
+              loaded->GetData().GetFeatures().Dimension());
+}
+
+TEST_F(ArchiveTierTest, ReadsUncompressedLegacyFiles) {
+    PatternNode pattern = CreateTestPattern();
+    fs::path file = temp_dir_ / "patterns" / (pattern.GetID().ToString() + ".arc");
+    {
+        std::ofstream out(file, std::ios::binary);
+        pattern.Serialize(out);
+    }
+
+    auto reopened = CreateArchiveTier(temp_dir_.string());
+    EXPECT_TRUE(reopened->HasPattern(pattern.GetID()));
+    auto loaded = reopened->LoadPattern(pattern.GetID());
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(pattern.GetID(), loaded->GetID());
+}
+
+TEST_F(WarmTierTest, CompactDropsEntriesForDeletedFiles) {
+    PatternNode pattern = CreateTestPattern();
+    ASSERT_TRUE(tier_->StorePattern(pattern));
+    fs::remove(temp_dir_ / "patterns" / (pattern.GetID().ToString() + ".pat"));
+
+    EXPECT_TRUE(tier_->HasPattern(pattern.GetID()));
+    tier_->Compact();
+    EXPECT_FALSE(tier_->HasPattern(pattern.GetID()));
 }

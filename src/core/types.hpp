@@ -8,6 +8,8 @@
 #include <chrono>
 #include <vector>
 #include <map>
+#include <optional>
+#include <utility>
 
 namespace dpan {
 
@@ -26,6 +28,15 @@ public:
 
     // Generate new unique ID (thread-safe)
     static PatternID Generate();
+
+    // Ensure future Generate() calls return IDs greater than `id`.
+    // Called whenever an ID is loaded from storage so that IDs generated after
+    // a restart do not collide with persisted ones (thread-safe).
+    static void ReserveThrough(ValueType id);
+
+    // Parse the ToString() form ("PatternID(<hex>)") or a bare hex value.
+    // Returns std::nullopt for malformed or invalid IDs. Reserves the parsed ID.
+    static std::optional<PatternID> FromString(const std::string& text);
 
     // Check if ID is valid
     bool IsValid() const { return value_ != kInvalidID; }
@@ -51,7 +62,15 @@ public:
     // Hash support for std::unordered_map
     struct Hash {
         size_t operator()(const PatternID& id) const {
-            return std::hash<ValueType>()(id.value_);
+            // IDs are sequential, so mix the bits (splitmix64 finalizer);
+            // an identity hash makes combined pair hashes collide heavily
+            uint64_t x = id.value_;
+            x ^= x >> 30;
+            x *= 0xbf58476d1ce4e5b9ULL;
+            x ^= x >> 27;
+            x *= 0x94d049bb133111ebULL;
+            x ^= x >> 31;
+            return static_cast<size_t>(x);
         }
     };
 
@@ -218,6 +237,19 @@ public:
 
 private:
     StorageType data_;
+};
+
+} // namespace dpan
+
+namespace dpan {
+
+/// Hash function for (PatternID, PatternID) pairs (for unordered_map)
+struct PatternPairHash {
+    size_t operator()(const std::pair<PatternID, PatternID>& p) const {
+        size_t seed = PatternID::Hash()(p.first);
+        seed ^= PatternID::Hash()(p.second) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        return seed;
+    }
 };
 
 } // namespace dpan

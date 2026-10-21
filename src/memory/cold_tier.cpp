@@ -266,7 +266,13 @@ public:
     }
 
     void Compact() override {
-        // Could implement file consolidation here
+        // Reconcile the in-memory indices with the files on disk (drops
+        // entries whose files were removed externally, adds files written
+        // by other instances)
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        pattern_index_.clear();
+        association_index_.clear();
+        RebuildIndex();
     }
 
     void Clear() override {
@@ -307,34 +313,33 @@ private:
     mutable std::shared_mutex mutex_;
 
     void RebuildIndex() {
-        // TODO: Implement index rebuilding once PatternID::FromString() is available
-        // For now, indices are built incrementally as patterns are stored
+        // Recover indices from files written by previous instances
+        // (pattern files: "<id>.pat", association files: "<source>_<target>.assoc")
         try {
-            // for (const auto& entry : fs::directory_iterator(patterns_dir_)) {
-            //     if (entry.is_regular_file() && entry.path().extension() == ".pat") {
-            //         std::string filename = entry.path().stem().string();
-            //         auto id = PatternID::FromString(filename);
-            //         if (id) {
-            //             pattern_index_.insert(*id);
-            //         }
-            //     }
-            // }
+            for (const auto& entry : fs::directory_iterator(patterns_dir_)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".pat") {
+                    auto id = PatternID::FromString(entry.path().stem().string());
+                    if (id) {
+                        pattern_index_.insert(*id);
+                    }
+                }
+            }
 
-            // for (const auto& entry : fs::directory_iterator(associations_dir_)) {
-            //     if (entry.is_regular_file() && entry.path().extension() == ".assoc") {
-            //         std::string filename = entry.path().stem().string();
-            //         size_t underscore_pos = filename.find('_');
-            //         if (underscore_pos != std::string::npos) {
-            //             auto source = PatternID::FromString(filename.substr(0, underscore_pos));
-            //             auto target = PatternID::FromString(filename.substr(underscore_pos + 1));
-            //             if (source && target) {
-            //                 association_index_.insert(std::make_pair(*source, *target));
-            //             }
-            //         }
-            //     }
-            // }
-        } catch (...) {
-            // Best effort
+            for (const auto& entry : fs::directory_iterator(associations_dir_)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".assoc") {
+                    std::string filename = entry.path().stem().string();
+                    size_t underscore_pos = filename.find('_');
+                    if (underscore_pos != std::string::npos) {
+                        auto source = PatternID::FromString(filename.substr(0, underscore_pos));
+                        auto target = PatternID::FromString(filename.substr(underscore_pos + 1));
+                        if (source && target) {
+                            association_index_.insert(std::make_pair(*source, *target));
+                        }
+                    }
+                }
+            }
+        } catch (const fs::filesystem_error&) {
+            // Best effort: unreadable directories leave the index partial
         }
     }
 };

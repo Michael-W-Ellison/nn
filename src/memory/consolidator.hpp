@@ -113,6 +113,15 @@ public:
         const SimilarityMetric& similarity_metric
     );
 
+    /// Perform complete consolidation, using association traversal counts
+    /// (source, target) -> count to find frequent paths for compression
+    ConsolidationResult Consolidate(
+        PatternDatabase& pattern_db,
+        AssociationMatrix& assoc_matrix,
+        const SimilarityMetric& similarity_metric,
+        const std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>& access_stats
+    );
+
     /// Merge similar patterns into representatives
     /// @param pattern_db Pattern database
     /// @param assoc_matrix Association matrix

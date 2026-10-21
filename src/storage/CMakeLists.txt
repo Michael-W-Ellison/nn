@@ -2,8 +2,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Find SQLite3
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+find_package(SQLite3 REQUIRED)
 
 # Storage library
 add_library(dpan_storage
@@ -13,14 +12,14 @@ add_library(dpan_storage
 )
 
 target_include_directories(dpan_storage PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
-    ${SQLITE3_INCLUDE_DIRS}
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
 # Link to core library and SQLite3
 target_link_libraries(dpan_storage PUBLIC
     dpan_core
-    ${SQLITE3_LIBRARIES}
+    SQLite::SQLite3
 )
 
 # C++17 required

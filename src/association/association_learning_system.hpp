@@ -4,6 +4,7 @@
 #include "association/association_matrix.hpp"
 #include "association/co_occurrence_tracker.hpp"
 #include "association/formation_rules.hpp"
+#include "association/prediction_scorer.hpp"
 #include "association/reinforcement_manager.hpp"
 #include "association/competitive_learner.hpp"
 #include "association/strength_normalizer.hpp"
@@ -76,6 +77,11 @@ public:
 
         /// Enable automatic maintenance (decay, competition, normalization, pruning)
         bool enable_auto_maintenance{true};
+
+        /// Also require a significant chi-squared test (formation rules) to
+        /// form an association. Off by default: with few or perfectly
+        /// correlated observations the test has no contrasting data.
+        bool require_significance{false};
     };
 
     // ========================================================================
@@ -100,7 +106,11 @@ public:
     // ========================================================================
 
     /// Record single pattern activation
-    /// Updates co-occurrence statistics and activation history
+    /// Updates co-occurrence statistics and activation history. A non-empty
+    /// context is learned into the context profiles of existing associations
+    /// from recently active patterns into this one (rate:
+    /// config.reinforcement.learning_rate), which context-sensitive
+    /// predictions use.
     /// @param pattern Pattern that was activated
     /// @param context Optional context vector for context-sensitive learning
     void RecordPatternActivation(
@@ -122,10 +132,15 @@ public:
     // ========================================================================
 
     /// Trigger association formation based on co-occurrence statistics
-    /// Analyzes tracked co-occurrences and creates new associations
+    /// Analyzes tracked co-occurrences and creates new associations.
+    /// Pairs need config.formation.min_co_occurrences co-occurrences (and a
+    /// significant chi-squared test when config.require_significance is set).
+    /// The association type is classified from the patterns' data when both
+    /// are in pattern_db (CATEGORICAL otherwise) and the initial strength is
+    /// computed from co-occurrence probability and significance.
     /// @param pattern_db Pattern database for accessing pattern details
     /// @return Number of new associations formed
-    size_t FormNewAssociations(const PatternDatabase& pattern_db);
+    size_t FormNewAssociations(PatternDatabase& pattern_db);
 
     /// Form associations for specific pattern
     /// @param pattern Source pattern
@@ -133,7 +148,7 @@ public:
     /// @return Number of new associations formed
     size_t FormAssociationsForPattern(
         PatternID pattern,
-        const PatternDatabase& pattern_db
+        PatternDatabase& pattern_db
     );
 
     // ========================================================================
@@ -207,7 +222,8 @@ public:
     ) const;
 
     /// Predict next patterns based on current pattern
-    /// Uses association strengths and activation propagation
+    /// Ranks outgoing associations by strength (context-adjusted when a
+    /// context is given), blended with the prediction scorer if one is set
     /// @param pattern Current pattern
     /// @param k Number of predictions to return
     /// @param context Optional context for context-sensitive prediction
@@ -339,6 +355,16 @@ public:
     /// @return Pointer to attention mechanism (nullptr if not set)
     AttentionMechanism* GetAttentionMechanism() const;
 
+    /// Set a scorer blended into Predict() and PredictWithConfidence():
+    ///   score = (1 - weight) * strength + weight * scorer.Score(...)
+    /// @param scorer Scorer (nullptr to disable)
+    /// @param weight Blend weight in [0, 1]
+    /// @throws std::invalid_argument if weight is outside [0, 1]
+    void SetPredictionScorer(std::shared_ptr<const PredictionScorer> scorer, float weight = 0.5f);
+
+    /// Current scorer (nullptr if not set)
+    std::shared_ptr<const PredictionScorer> GetPredictionScorer() const;
+
     // ========================================================================
     // Persistence
     // ========================================================================
@@ -369,6 +395,11 @@ private:
     AttentionMechanism* attention_mechanism_;
     mutable std::mutex attention_mutex_;
 
+    // Optional prediction scorer and its blend weight
+    std::shared_ptr<const PredictionScorer> prediction_scorer_;
+    float prediction_scorer_weight_{0.5f};
+    mutable std::mutex scorer_mutex_;
+
     // Activation history for temporal learning
     std::deque<std::pair<Timestamp, PatternID>> activation_history_;
     mutable std::mutex history_mutex_;
@@ -377,17 +408,36 @@ private:
     mutable Statistics stats_;
     mutable std::mutex stats_mutex_;
 
-    // Maintenance timestamps
+    // Maintenance timestamps (protected by maintenance_mutex_, which also
+    // serializes maintenance operations)
     Timestamp last_decay_;
     Timestamp last_competition_;
     Timestamp last_normalization_;
     Timestamp last_pruning_;
+    mutable std::mutex maintenance_mutex_;
+
+    // Serializes read-modify-write reinforcement of edges and access to
+    // reinforcement_mgr_ (whose statistics are not thread-safe)
+    mutable std::mutex reinforcement_mutex_;
 
     // Helper methods
     void UpdateActivationHistory(PatternID pattern, Timestamp timestamp);
-    void TrimActivationHistory();
+
+    /// Outgoing candidates of `pattern` with their (scorer-blended) scores,
+    /// best first
+    std::vector<std::pair<PatternID, float>> RankCandidates(
+        PatternID pattern, const ContextVector* context) const;
+    void UpdateContextProfiles(const std::vector<PatternID>& activated,
+                               const ContextVector& context, Timestamp timestamp);
+    void TrimActivationHistory(Timestamp::Duration window, size_t max_size);
     void UpdateStatistics() const;
     void CheckAutoMaintenance();
+
+    // Maintenance operations (caller must hold maintenance_mutex_)
+    void ApplyDecayLocked(Timestamp::Duration elapsed);
+    size_t ApplyCompetitionLocked();
+    size_t ApplyNormalizationLocked();
+    size_t PruneWeakAssociationsLocked(float min_strength);
 };
 
 } // namespace dpan

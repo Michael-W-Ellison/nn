@@ -33,8 +33,13 @@ public:
         PatternExtractor::Config extraction_config;
         PatternMatcher::Config matching_config;
 
-        // Similarity metric selection
-        std::string similarity_metric{"context"};  // "context", "hausdorff", "temporal", etc.
+        // Similarity metric selection: "context", "cosine", "euclidean",
+        // "hausdorff", "chamfer", "temporal", "histogram", "spectral"
+        std::string similarity_metric{"context"};
+
+        // Custom metric (e.g. nn::EmbeddingSimilarity); overrides
+        // similarity_metric when set
+        std::shared_ptr<SimilarityMetric> similarity_metric_instance;
 
         // Engine options
         bool enable_auto_refinement{true};
@@ -112,6 +117,11 @@ public:
     /// Get all pattern IDs
     /// @return Vector of all pattern IDs in the database
     std::vector<PatternID> GetAllPatternIDs() const;
+
+    /// Pattern database used by the engine, for use with other components
+    /// (e.g. AssociationLearningSystem::FormNewAssociations, MemoryManager)
+    PatternDatabase& GetDatabase() { return *database_; }
+    const PatternDatabase& GetDatabase() const { return *database_; }
 
     // ========================================================================
     // Pattern Search
@@ -234,6 +244,8 @@ private:
 
     // Helper methods
     void InitializeComponents();
+    std::vector<PatternData> ExtractForModality(
+        const std::vector<uint8_t>& raw_input, DataModality modality) const;
     std::shared_ptr<SimilarityMetric> CreateSimilarityMetric(const std::string& metric_name);
     void UpdateStatisticsAfterProcessing(const ProcessResult& result);
 };

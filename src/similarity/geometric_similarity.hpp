@@ -166,4 +166,35 @@ private:
     static PointSet<N> CenterAndNormalize(const PointSet<N>& points);
 };
 
+/// Cosine Similarity
+///
+/// Angle between feature vectors, independent of magnitude.
+/// similarity = max(0, cos θ): opposite directions map to 0.
+/// Vectors of different dimension, or with zero norm, have similarity 0.
+class CosineSimilarity : public SimilarityMetric {
+public:
+    CosineSimilarity() = default;
+
+    float Compute(const PatternData& a, const PatternData& b) const override;
+    float ComputeFromFeatures(const FeatureVector& a, const FeatureVector& b) const override;
+    std::string GetName() const override { return "Cosine"; }
+    bool IsSymmetric() const override { return true; }
+    bool IsMetric() const override { return false; }
+};
+
+/// Euclidean Similarity
+///
+/// similarity = 1 / (1 + ||a - b||). Identical vectors have similarity 1.
+/// Vectors of different dimension have similarity 0.
+class EuclideanSimilarity : public SimilarityMetric {
+public:
+    EuclideanSimilarity() = default;
+
+    float Compute(const PatternData& a, const PatternData& b) const override;
+    float ComputeFromFeatures(const FeatureVector& a, const FeatureVector& b) const override;
+    std::string GetName() const override { return "Euclidean"; }
+    bool IsSymmetric() const override { return true; }
+    bool IsMetric() const override { return false; }
+};
+
 } // namespace dpan

@@ -9,18 +9,6 @@
 
 namespace dpan {
 
-/// Hash function for (PatternID, PatternID) pairs
-#ifndef DPAN_PATTERN_PAIR_HASH_DEFINED
-#define DPAN_PATTERN_PAIR_HASH_DEFINED
-struct PatternPairHash {
-    size_t operator()(const std::pair<PatternID, PatternID>& p) const {
-        size_t h1 = PatternID::Hash()(p.first);
-        size_t h2 = PatternID::Hash()(p.second);
-        return h1 ^ (h2 << 1);  // Combine hashes
-    }
-};
-#endif // DPAN_PATTERN_PAIR_HASH_DEFINED
-
 /// AssociationMatrix: Sparse directed graph of pattern associations
 ///
 /// Storage uses a hybrid approach combining:
@@ -30,6 +18,10 @@ struct PatternPairHash {
 /// - Type index for filtering by association type
 ///
 /// Thread-safe with reader-writer locking (std::shared_mutex)
+///
+/// Pointer lifetime: edge pointers returned by lookup methods stay valid
+/// across Add/Update/Remove (updates modify the edge in place; removed edges
+/// are retired, not freed) until Compact(), Clear() or destruction.
 class AssociationMatrix {
 public:
     /// Configuration for matrix behavior
@@ -146,6 +138,18 @@ public:
     /// @return Vector of all pattern IDs
     std::vector<PatternID> GetAllPatterns() const;
 
+    /// Get every association as (source, target) pairs
+    std::vector<std::pair<PatternID, PatternID>> GetAllAssociationKeys() const;
+
+    /// Get strength statistics over all associations
+    struct StrengthSummary {
+        float min{0.0f};
+        float max{0.0f};
+        float average{0.0f};
+        size_t count_at_or_above{0};  // edges with strength >= threshold
+    };
+    StrengthSummary GetStrengthSummary(float threshold = 0.0f) const;
+
     // ========================================================================
     // Activation Propagation
     // ========================================================================
@@ -181,6 +185,7 @@ public:
     // ========================================================================
 
     /// Compact storage by removing deleted edges and rebuilding indices
+    /// Invalidates all edge pointers previously returned by lookups.
     void Compact();
 
     /// Clear all associations
@@ -222,6 +227,10 @@ private:
 
     // Deleted edge indices for reuse
     std::vector<size_t> deleted_indices_;
+
+    // Edges removed or replaced since the last Compact()/Clear(). Kept alive
+    // so pointers returned by lookup methods stay valid until then.
+    std::vector<std::unique_ptr<AssociationEdge>> retired_edges_;
 
     // Helper methods
     size_t AllocateEdgeIndex();

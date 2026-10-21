@@ -20,6 +20,7 @@
 #include "core/pattern_data.hpp"
 #include "core/types.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <filesystem>
 #include <vector>
 #include <memory>
@@ -35,7 +36,7 @@ class TieredStorageTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create temporary directories for file-based tiers
-        temp_base_dir_ = fs::temp_directory_path() / "dpan_tiered_storage_test";
+        temp_base_dir_ = test::UniqueTempPath("dpan_tiered_storage_test");
         warm_dir_ = temp_base_dir_ / "warm";
         cold_dir_ = temp_base_dir_ / "cold";
         archive_dir_ = temp_base_dir_ / "archive";
@@ -376,27 +377,24 @@ TEST_F(TieredStorageTest, CacheCapacity_GetAndSet) {
     size_t initial_capacity = storage_->GetCacheCapacity();
     EXPECT_GT(initial_capacity, 0u);
 
-    // Note: SetCacheCapacity clears the cache but doesn't actually change the capacity
-    // (LRUCache capacity is immutable after construction)
-    // We verify the cache is cleared instead
-
     // Add some patterns to cache
     for (int i = 0; i < 5; ++i) {
         PatternNode pattern = CreateTestPattern();
         storage_->StorePattern(pattern);
     }
 
-    EXPECT_GT(storage_->GetCacheSize(), 0u);
+    size_t cached = storage_->GetCacheSize();
+    EXPECT_GT(cached, 0u);
 
-    // Set new capacity (clears cache)
-    size_t new_capacity = 500;
-    storage_->SetCacheCapacity(new_capacity);
+    // Growing keeps cached items
+    storage_->SetCacheCapacity(initial_capacity + 500);
+    EXPECT_EQ(initial_capacity + 500, storage_->GetCacheCapacity());
+    EXPECT_EQ(cached, storage_->GetCacheSize());
 
-    // Cache should be cleared
-    EXPECT_EQ(0u, storage_->GetCacheSize());
-
-    // Capacity remains the same (limitation of current implementation)
-    EXPECT_EQ(initial_capacity, storage_->GetCacheCapacity());
+    // Shrinking evicts least recently used items down to the new capacity
+    storage_->SetCacheCapacity(2);
+    EXPECT_EQ(2u, storage_->GetCacheCapacity());
+    EXPECT_LE(storage_->GetCacheSize(), 2u);
 }
 
 // ============================================================================

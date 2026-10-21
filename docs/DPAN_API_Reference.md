@@ -535,13 +535,28 @@ struct PatternEngine::Config {
     PatternMatcher::Config matching_config;
 
     // Similarity metric selection
-    std::string similarity_metric{"context"};  // "context", "cosine", "euclidean"
+    std::string similarity_metric{"context"};  // "context", "cosine", "euclidean", "hausdorff",
+                                               // "chamfer", "temporal", "histogram", "spectral";
+                                               // other names throw std::invalid_argument
+    std::shared_ptr<SimilarityMetric> similarity_metric_instance;  // overrides similarity_metric
 
     // Engine options
     bool enable_auto_refinement{true};
     bool enable_indexing{true};
 };
 ```
+
+**Approximate matching** (`matching_config`): with `use_fast_search` (default
+`true`), `ProcessInput` matches against candidates from a locality-sensitive
+hash index (`LshIndex`, random hyperplanes over the feature vectors) instead
+of every pattern, once the database holds at least
+`fast_search_min_patterns` (default 10,000) patterns. Candidates are ranked
+with the configured metric; matches whose features point in a different
+direction than the input can be missed. `fast_search_index` sets the number
+of hash tables, bits per table and multi-probing. The engine keeps the index
+current for its own operations; after changing pattern features directly in
+the database, call `PatternMatcher::NotifyPatternChanged(id)` (count changes
+are detected automatically).
 
 **Usage:**
 ```cpp
@@ -882,10 +897,15 @@ system.RecordPatternActivations(activated);
 ### Association Formation
 
 #### FormNewAssociations
-Analyze co-occurrences and create associations.
+Analyze co-occurrences and create associations. A pair needs
+`config.formation.min_co_occurrences` co-occurrences (and a significant
+chi-squared test when `config.require_significance` is true). The type is
+classified from pattern data when both patterns are in `pattern_db`
+(CATEGORICAL otherwise); the initial strength comes from co-occurrence
+probability and significance.
 
 ```cpp
-size_t FormNewAssociations(const PatternDatabase& pattern_db);
+size_t FormNewAssociations(PatternDatabase& pattern_db);
 ```
 
 **Usage:**

@@ -1,5 +1,6 @@
 // File: src/association/association_matrix.cpp
 #include "association/association_matrix.hpp"
+#include <limits>
 #include <algorithm>
 #include <queue>
 #include <unordered_set>
@@ -39,6 +40,8 @@ size_t AssociationMatrix::AllocateEdgeIndex() {
 }
 
 void AssociationMatrix::ReleaseEdgeIndex(size_t index) {
+    // Keep the edge object alive: callers may still hold pointers to it
+    retired_edges_.push_back(std::move(edges_[index]));
     deleted_indices_.push_back(index);
 }
 
@@ -95,15 +98,8 @@ void AssociationMatrix::RebuildIndices() {
     type_index_.clear();
 
     for (size_t i = 0; i < edges_.size(); ++i) {
-        // Skip deleted edges (check if it's in the lookup map)
-        bool is_deleted = true;
-        for (const auto& [key, index] : edge_lookup_) {
-            if (index == i) {
-                is_deleted = false;
-                break;
-            }
-        }
-        if (!is_deleted) {
+        // Deleted slots hold no edge (moved to retired_edges_)
+        if (edges_[i]) {
             UpdateIndices(i, true);
         }
     }
@@ -153,7 +149,18 @@ bool AssociationMatrix::UpdateAssociation(
         return false;  // Doesn't exist
     }
 
-    edges_[it->second] = edge.Clone();
+    size_t index = it->second;
+    if (edges_[index]->GetType() == edge.GetType()) {
+        // Update in place so pointers handed out by lookups stay valid
+        edges_[index]->CopyStateFrom(edge);
+    } else {
+        // Type changed: swap in a new edge object and move it between type
+        // indices; the old object is retired, not freed
+        UpdateIndices(index, false);
+        retired_edges_.push_back(std::move(edges_[index]));
+        edges_[index] = edge.Clone();
+        UpdateIndices(index, true);
+    }
     return true;
 }
 
@@ -488,6 +495,40 @@ std::vector<PatternID> AssociationMatrix::GetAllPatterns() const {
     return std::vector<PatternID>(all_patterns.begin(), all_patterns.end());
 }
 
+std::vector<std::pair<PatternID, PatternID>> AssociationMatrix::GetAllAssociationKeys() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    std::vector<std::pair<PatternID, PatternID>> keys;
+    keys.reserve(edge_lookup_.size());
+    for (const auto& [key, index] : edge_lookup_) {
+        keys.push_back(key);
+    }
+    return keys;
+}
+
+AssociationMatrix::StrengthSummary AssociationMatrix::GetStrengthSummary(float threshold) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    StrengthSummary summary;
+    if (edge_lookup_.empty()) {
+        return summary;
+    }
+
+    summary.min = std::numeric_limits<float>::max();
+    double total = 0.0;
+    for (const auto& [key, index] : edge_lookup_) {
+        float strength = edges_[index]->GetStrength();
+        summary.min = std::min(summary.min, strength);
+        summary.max = std::max(summary.max, strength);
+        total += strength;
+        if (strength >= threshold) {
+            summary.count_at_or_above++;
+        }
+    }
+    summary.average = static_cast<float>(total / edge_lookup_.size());
+    return summary;
+}
+
 // ============================================================================
 // Activation Propagation
 // ============================================================================
@@ -601,7 +642,10 @@ std::unique_ptr<AssociationMatrix> AssociationMatrix::Deserialize(std::istream& 
 void AssociationMatrix::Compact() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
 
-    if (deleted_indices_.empty()) return;
+    if (deleted_indices_.empty()) {
+        retired_edges_.clear();
+        return;
+    }
 
     // Rebuild edge vector without deleted entries
     std::vector<std::unique_ptr<AssociationEdge>> new_edges;
@@ -618,6 +662,7 @@ void AssociationMatrix::Compact() {
     edges_ = std::move(new_edges);
     edge_lookup_ = std::move(new_lookup);
     deleted_indices_.clear();
+    retired_edges_.clear();
 
     // Rebuild all indices
     RebuildIndices();
@@ -627,6 +672,7 @@ void AssociationMatrix::Clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
 
     edges_.clear();
+    retired_edges_.clear();
     outgoing_index_.clear();
     incoming_index_.clear();
     edge_lookup_.clear();

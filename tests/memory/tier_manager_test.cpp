@@ -21,7 +21,10 @@
 #include "core/pattern_data.hpp"
 #include "core/types.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
+#include <chrono>
 #include <filesystem>
+#include <thread>
 #include <vector>
 #include <memory>
 #include <thread>
@@ -38,7 +41,7 @@ class TierManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create temporary directories for file-based tiers
-        temp_base_dir_ = fs::temp_directory_path() / "dpan_tier_manager_test";
+        temp_base_dir_ = test::UniqueTempPath("dpan_tier_manager_test");
         warm_dir_ = temp_base_dir_ / "warm";
         cold_dir_ = temp_base_dir_ / "cold";
         archive_dir_ = temp_base_dir_ / "archive";
@@ -1049,4 +1052,75 @@ TEST_F(TierManagerTest, EdgeCase_InvalidConfigUpdate) {
     invalid_config.active_capacity = 0;  // Invalid
 
     EXPECT_THROW(manager_->SetConfig(invalid_config), std::invalid_argument);
+}
+
+// ============================================================================
+// Utility-Driven Transition Cycle
+// ============================================================================
+
+TEST_F(TierManagerTest, RunTransitionCycleUsesAccessStatistics) {
+    CreateManager();
+    UtilityCalculator calculator;
+    AccessTracker tracker;
+
+    // Last used long ago: low utility, demoted out of the active tier
+    PatternNode unused = CreateTestPattern();
+    ASSERT_TRUE(manager_->StorePattern(unused, MemoryTier::ACTIVE));
+    tracker.RecordPatternAccess(unused.GetID(), Timestamp::Now() - std::chrono::hours(1000));
+
+    // Frequently and recently accessed: promoted from cold to warm
+    PatternNode popular = CreateTestPattern();
+    ASSERT_TRUE(manager_->StorePattern(popular, MemoryTier::COLD));
+    for (int i = 0; i < 1000; ++i) {
+        tracker.RecordPatternAccess(popular.GetID());
+    }
+
+    auto utilities = manager_->ComputeUtilities(calculator, tracker);
+    ASSERT_EQ(2u, utilities.size());
+    EXPECT_LT(utilities[unused.GetID()], utilities[popular.GetID()]);
+
+    EXPECT_GT(manager_->RunTransitionCycle(calculator, tracker), 0u);
+    EXPECT_NE(MemoryTier::ACTIVE, manager_->GetPatternTier(unused.GetID()));
+    EXPECT_EQ(MemoryTier::WARM, manager_->GetPatternTier(popular.GetID()));
+}
+
+TEST_F(TierManagerTest, StopBackgroundTransitionsDoesNotWaitForInterval) {
+    TierManager::Config config;
+    config.transition_interval_seconds = 3600.0f;
+    CreateManager(config);
+
+    UtilityCalculator calculator;
+    AccessTracker tracker;
+    manager_->StartBackgroundTransitions(&calculator, &tracker);
+    EXPECT_TRUE(manager_->IsBackgroundRunning());
+
+    auto start = std::chrono::steady_clock::now();
+    manager_->StopBackgroundTransitions();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    EXPECT_FALSE(manager_->IsBackgroundRunning());
+    EXPECT_LT(elapsed, std::chrono::seconds(1));
+}
+
+TEST_F(TierManagerTest, BackgroundTransitionsRunCycles) {
+    TierManager::Config config;
+    config.transition_interval_seconds = 0.02f;
+    CreateManager(config);
+
+    PatternNode unused = CreateTestPattern();
+    ASSERT_TRUE(manager_->StorePattern(unused, MemoryTier::ACTIVE));
+
+    UtilityCalculator calculator;
+    AccessTracker tracker;
+    tracker.RecordPatternAccess(unused.GetID(), Timestamp::Now() - std::chrono::hours(1000));
+    manager_->StartBackgroundTransitions(&calculator, &tracker);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (manager_->GetPatternTier(unused.GetID()) == MemoryTier::ACTIVE &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    manager_->StopBackgroundTransitions();
+
+    EXPECT_NE(MemoryTier::ACTIVE, manager_->GetPatternTier(unused.GetID()));
 }

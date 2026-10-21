@@ -1,6 +1,8 @@
 // File: tests/core/pattern_engine_test.cpp
 #include "core/pattern_engine.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
+#include <filesystem>
 
 namespace dpan {
 namespace {
@@ -358,18 +360,16 @@ TEST(PatternEngineTest, DifferentSimilarityMetrics) {
         EXPECT_NO_THROW(PatternEngine engine(config));
     }
 
-    // Test with manhattan
+    // Unsupported names are rejected instead of silently substituted
     {
         PatternEngine::Config config = CreateTestConfig();
         config.similarity_metric = "manhattan";
-        EXPECT_NO_THROW(PatternEngine engine(config));
+        EXPECT_THROW(PatternEngine engine(config), std::invalid_argument);
     }
-
-    // Test with unknown (should default to cosine)
     {
         PatternEngine::Config config = CreateTestConfig();
         config.similarity_metric = "unknown";
-        EXPECT_NO_THROW(PatternEngine engine(config));
+        EXPECT_THROW(PatternEngine engine(config), std::invalid_argument);
     }
 }
 
@@ -400,6 +400,41 @@ TEST(PatternEngineTest, IndexingEnabledVsDisabled) {
 
         auto results = engine.FindSimilarPatterns(data, 5);
         EXPECT_GE(results.size(), 0u);
+    }
+}
+
+TEST(PatternEngineTest, SnapshotSaveAndLoadMemoryBackend) {
+    auto path = test::UniqueTempPath("dpan_engine_snapshot") + ".bin";
+    std::filesystem::remove(path);
+
+    PatternEngine engine(CreateTestConfig());
+    FeatureVector fv(std::vector<float>{1.0f, 2.0f, 3.0f});
+    PatternID id = engine.CreatePattern(PatternData::FromFeatures(fv, DataModality::NUMERIC));
+    ASSERT_TRUE(engine.SaveSnapshot(path));
+
+    PatternEngine restored(CreateTestConfig());
+    EXPECT_FALSE(restored.GetPattern(id).has_value());
+    ASSERT_TRUE(restored.LoadSnapshot(path));
+    EXPECT_TRUE(restored.GetPattern(id).has_value());
+
+    EXPECT_FALSE(restored.LoadSnapshot(path + ".missing"));
+    std::filesystem::remove(path);
+}
+
+TEST(PatternEngineTest, ProcessInputUsesRequestedModality) {
+    PatternEngine::Config config = CreateTestConfig();
+    config.extraction_config.modality = DataModality::NUMERIC;
+    PatternEngine engine(config);
+
+    std::string text = "the quick brown fox jumps over the lazy dog";
+    std::vector<uint8_t> input(text.begin(), text.end());
+    auto result = engine.ProcessInput(input, DataModality::TEXT);
+
+    ASSERT_FALSE(result.created_patterns.empty());
+    for (const auto& id : result.created_patterns) {
+        auto pattern = engine.GetPattern(id);
+        ASSERT_TRUE(pattern.has_value());
+        EXPECT_EQ(DataModality::TEXT, pattern->GetData().GetModality());
     }
 }
 

@@ -117,21 +117,17 @@ SleepConsolidator::ConsolidationCycleResult SleepConsolidator::TriggerConsolidat
     result.start_time = Timestamp::Now();
     result.was_successful = true;
 
+    result.patterns_strengthened = 0;
+    result.patterns_pruned = 0;
+    result.associations_reorganized = 0;
+    result.average_utility_change = 0.0f;
+    result.memory_freed_bytes = 0;
+
     try {
-        // Note: In a real implementation, this would:
-        // 1. Call MemoryConsolidator for pattern merging
-        // 2. Call PatternPruner for aggressive pruning
-        // 3. Call utility strengthening for important patterns
-        //
-        // For now, we simulate the process
-
-        // Simulated consolidation work
-        result.patterns_strengthened = config_.top_patterns_to_strengthen;
-        result.patterns_pruned = 0;  // Would be determined by actual pruning
-        result.associations_reorganized = 0;  // Would be determined by actual consolidation
-        result.average_utility_change = config_.strengthening_factor;
-        result.memory_freed_bytes = 0;  // Would be calculated from actual operations
-
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        if (work_) {
+            work_(result);
+        }
     } catch (const std::exception& e) {
         result.was_successful = false;
         result.error_message = e.what();
@@ -200,6 +196,11 @@ float SleepConsolidator::CalculateStrengtheningBoost(float current_utility) cons
     // This gives more boost to patterns that have room to grow
     float room_to_grow = 1.0f - current_utility;
     return config_.strengthening_factor * room_to_grow;
+}
+
+void SleepConsolidator::SetConsolidationWork(ConsolidationWork work) {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    work_ = std::move(work);
 }
 
 void SleepConsolidator::EnterSleepState() {

@@ -68,8 +68,6 @@ add_executable(cli_benchmarks
     cli_benchmarks.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
 )
 
 target_link_libraries(cli_benchmarks
@@ -77,6 +75,7 @@ target_link_libraries(cli_benchmarks
         dpan_core
         dpan_storage
         dpan_association
+        dpan_learning
         sqlite3
         pthread
         GTest::gtest_main

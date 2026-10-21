@@ -1,6 +1,11 @@
 // File: tests/storage/pattern_database_test.cpp
 #include "storage/pattern_database.hpp"
+#include "storage/memory_backend.hpp"
+#include "storage/persistent_backend.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
+#include <filesystem>
+#include <fstream>
 #include <memory>
 
 namespace dpan {
@@ -253,10 +258,11 @@ TEST(PatternDatabaseTest, MaintenanceOperationsDontThrow) {
 TEST(PatternDatabaseTest, SnapshotOperationsReturnBoolean) {
     MockPatternDatabase db;
 
-    bool created = db.CreateSnapshot("/tmp/test_snapshot.bin");
+    std::string snapshot_path = test::UniqueTempPath("test_snapshot") + ".bin";
+    bool created = db.CreateSnapshot(snapshot_path);
     EXPECT_TRUE(created);
 
-    bool restored = db.RestoreSnapshot("/tmp/test_snapshot.bin");
+    bool restored = db.RestoreSnapshot(snapshot_path);
     EXPECT_TRUE(restored);
 }
 
@@ -264,9 +270,86 @@ TEST(PatternDatabaseTest, SnapshotOperationsReturnBoolean) {
 // Factory Function Tests
 // ============================================================================
 
-TEST(CreatePatternDatabaseTest, ThrowsNotImplemented) {
-    // Factory function is not yet implemented
-    EXPECT_THROW(CreatePatternDatabase("/path/to/config.json"), std::runtime_error);
+PatternData CreateTestPatternData() {
+    FeatureVector features(3);
+    features[0] = 1.0f;
+    features[1] = 2.0f;
+    features[2] = 3.0f;
+    return PatternData::FromFeatures(features, DataModality::NUMERIC);
+}
+
+std::string WriteConfigFile(const std::string& name, const std::string& content) {
+    std::string path = test::UniqueTempPath(name);
+    std::ofstream(path) << content;
+    return path;
+}
+
+TEST(CreatePatternDatabaseTest, ThrowsWhenFileMissing) {
+    EXPECT_THROW(CreatePatternDatabase("/nonexistent/dpan_config.json"), std::runtime_error);
+}
+
+TEST(CreatePatternDatabaseTest, CreatesMemoryBackendFromJson) {
+    auto path = WriteConfigFile("dpan_factory_memory.json", R"({
+  "backend": "memory",  // comment allowed
+  "memory": {
+    "initial_capacity": 500,
+    "enable_cache": true,
+    "cache_size": 50
+  }
+})");
+
+    auto db = CreatePatternDatabase(path);
+    ASSERT_NE(nullptr, db);
+    EXPECT_NE(nullptr, dynamic_cast<MemoryBackend*>(db.get()));
+
+    PatternNode node(PatternID::Generate(), CreateTestPatternData(), PatternType::ATOMIC);
+    EXPECT_TRUE(db->Store(node));
+    EXPECT_EQ(1u, db->Count());
+    std::filesystem::remove(path);
+}
+
+TEST(CreatePatternDatabaseTest, CreatesPersistentBackendFromYaml) {
+    auto db_path = test::UniqueTempPath("dpan_factory_test") + ".db";
+    std::filesystem::remove(db_path);
+    auto path = WriteConfigFile("dpan_factory_persistent.yaml",
+        "# storage settings\n"
+        "backend: persistent\n"
+        "persistent:\n"
+        "  db_path: \"" + db_path + "\"\n"
+        "  synchronous: normal\n");
+
+    PatternID id = PatternID::Generate();
+    {
+        auto db = CreatePatternDatabase(path);
+        ASSERT_NE(nullptr, db);
+        EXPECT_NE(nullptr, dynamic_cast<PersistentBackend*>(db.get()));
+        PatternNode node(id, CreateTestPatternData(), PatternType::ATOMIC);
+        EXPECT_TRUE(db->Store(node));
+    }
+    {
+        // Data persists across instances
+        auto db = CreatePatternDatabase(path);
+        EXPECT_TRUE(db->Exists(id));
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(db_path);
+}
+
+TEST(CreatePatternDatabaseTest, RejectsUnsupportedBackend) {
+    auto path = WriteConfigFile("dpan_factory_bad.json", R"({"backend": "rocksdb"})");
+    EXPECT_THROW(CreatePatternDatabase(path), std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+TEST(CreatePatternDatabaseTest, RejectsInvalidValues) {
+    auto path = WriteConfigFile("dpan_factory_invalid.json",
+                                R"({"backend": "memory", "memory": {"cache_size": "lots"}})");
+    EXPECT_THROW(CreatePatternDatabase(path), std::runtime_error);
+    std::filesystem::remove(path);
+
+    path = WriteConfigFile("dpan_factory_nopath.yaml", "backend: persistent\n");
+    EXPECT_THROW(CreatePatternDatabase(path), std::runtime_error);
+    std::filesystem::remove(path);
 }
 
 } // namespace

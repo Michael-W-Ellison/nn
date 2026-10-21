@@ -4,8 +4,6 @@ add_executable(dpan_cli_test
     dpan_cli_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/basic_attention.cpp
-    ${PROJECT_SOURCE_DIR}/src/learning/attention_utils.cpp
 )
 
 find_library(YAML_LIBRARY NAMES yaml libyaml PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu)
@@ -15,6 +13,7 @@ target_link_libraries(dpan_cli_test
         dpan_core
         dpan_storage
         dpan_association
+        dpan_learning
         sqlite3
         pthread
         gtest_main

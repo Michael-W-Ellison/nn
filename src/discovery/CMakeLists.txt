@@ -9,7 +9,8 @@ add_library(dpan_discovery
 )
 
 target_include_directories(dpan_discovery PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
 # Link to required libraries

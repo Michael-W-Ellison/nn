@@ -1,6 +1,7 @@
 // File: tests/memory/sleep_consolidator_test.cpp
 #include "memory/sleep_consolidator.hpp"
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 
@@ -177,10 +178,42 @@ TEST_F(SleepConsolidatorTest, ManualConsolidationTrigger) {
 
     EXPECT_TRUE(result.was_successful);
     EXPECT_GE(result.duration.count(), 0);  // Changed to >= since consolidation can be very fast
-    EXPECT_EQ(result.patterns_strengthened, consolidator_->GetConfig().top_patterns_to_strengthen);
+    // No consolidation work installed: nothing is reported as done
+    EXPECT_EQ(0u, result.patterns_strengthened);
 
     auto stats = consolidator_->GetStatistics();
     EXPECT_EQ(1u, stats.total_consolidation_cycles);
+}
+
+TEST_F(SleepConsolidatorTest, ConsolidationRunsInstalledWork) {
+    int calls = 0;
+    consolidator_->SetConsolidationWork([&calls](SleepConsolidator::ConsolidationCycleResult& result) {
+        calls++;
+        result.patterns_strengthened = 7;
+        result.patterns_pruned = 2;
+    });
+
+    auto result = consolidator_->TriggerConsolidation();
+
+    EXPECT_EQ(1, calls);
+    EXPECT_TRUE(result.was_successful);
+    EXPECT_EQ(7u, result.patterns_strengthened);
+    EXPECT_EQ(2u, result.patterns_pruned);
+
+    auto stats = consolidator_->GetStatistics();
+    EXPECT_EQ(7u, stats.total_patterns_strengthened);
+    EXPECT_EQ(2u, stats.total_patterns_pruned);
+}
+
+TEST_F(SleepConsolidatorTest, ConsolidationWorkFailureIsReported) {
+    consolidator_->SetConsolidationWork([](SleepConsolidator::ConsolidationCycleResult&) {
+        throw std::runtime_error("database unavailable");
+    });
+
+    auto result = consolidator_->TriggerConsolidation();
+
+    EXPECT_FALSE(result.was_successful);
+    EXPECT_EQ("database unavailable", result.error_message);
 }
 
 // ============================================================================
@@ -270,6 +303,9 @@ TEST_F(SleepConsolidatorTest, StatisticsInitiallyZero) {
 }
 
 TEST_F(SleepConsolidatorTest, StatisticsUpdatedAfterConsolidation) {
+    consolidator_->SetConsolidationWork([](SleepConsolidator::ConsolidationCycleResult& result) {
+        result.patterns_strengthened = 3;
+    });
     consolidator_->TriggerConsolidation();
 
     auto stats = consolidator_->GetStatistics();
@@ -323,7 +359,11 @@ TEST_F(SleepConsolidatorTest, FullConsolidationWorkflow) {
     auto patterns_to_strengthen = consolidator_->IdentifyPatternsToStrengthen(utilities);
     EXPECT_FALSE(patterns_to_strengthen.empty());
 
-    // Trigger consolidation
+    // Trigger consolidation, strengthening the identified patterns
+    consolidator_->SetConsolidationWork(
+        [&patterns_to_strengthen](SleepConsolidator::ConsolidationCycleResult& result) {
+            result.patterns_strengthened = patterns_to_strengthen.size();
+        });
     auto result = consolidator_->TriggerConsolidation();
     EXPECT_TRUE(result.was_successful);
 

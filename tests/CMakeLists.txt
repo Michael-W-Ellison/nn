@@ -1,6 +1,10 @@
 # Tests CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 
+# Included here so every test subdirectory inherits the module's variables
+# (gtest_discover_tests needs them in the calling directory's scope)
+include(GoogleTest)
+
 # Test subdirectories
 add_subdirectory(core)
 add_subdirectory(storage)
@@ -12,15 +16,15 @@ add_subdirectory(learning)
 add_subdirectory(integration)
 add_subdirectory(benchmarks)
 add_subdirectory(cli)
+add_subdirectory(nn)
 
-# Edge case tests (added for TDD analysis)
-# TODO: Fix API compatibility issues with FeatureVector and AssociationMatrix
-# add_executable(edge_case_tests edge_case_tests.cpp)
-# target_link_libraries(edge_case_tests PRIVATE
-#     dpan_core
-#     dpan_storage
-#     dpan_association
-#     dpan_memory
-#     gtest_main
-# )
-# add_test(NAME EdgeCaseTests COMMAND edge_case_tests)
+# Edge case tests
+add_executable(edge_case_tests edge_case_tests.cpp)
+target_link_libraries(edge_case_tests PRIVATE
+    dpan_core
+    dpan_storage
+    dpan_association
+    dpan_memory
+    GTest::gtest_main
+)
+gtest_discover_tests(edge_case_tests)

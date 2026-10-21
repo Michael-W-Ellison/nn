@@ -1,6 +1,7 @@
 // File: tests/storage/memory_backend_test.cpp
 #include "storage/memory_backend.hpp"
 #include <gtest/gtest.h>
+#include "../test_temp_path.hpp"
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -533,7 +534,7 @@ TEST(MemoryBackendTest, CreateSnapshotSucceeds) {
         backend.Store(CreateTestPattern());
     }
 
-    std::string snapshot_path = "/tmp/test_snapshot_" + std::to_string(std::time(nullptr)) + ".bin";
+    std::string snapshot_path = test::UniqueTempPath("test_snapshot") + ".bin";
     bool result = backend.CreateSnapshot(snapshot_path);
 
     EXPECT_TRUE(result);
@@ -543,7 +544,7 @@ TEST(MemoryBackendTest, CreateSnapshotSucceeds) {
 }
 
 TEST(MemoryBackendTest, SnapshotAndRestorePreservesData) {
-    std::string snapshot_path = "/tmp/test_snapshot_" + std::to_string(std::time(nullptr)) + ".bin";
+    std::string snapshot_path = test::UniqueTempPath("test_snapshot") + ".bin";
 
     std::vector<PatternID> ids;
 

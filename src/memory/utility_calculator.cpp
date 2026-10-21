@@ -178,21 +178,23 @@ float UtilityCalculator::CalculateAssociationScore(
 }
 
 float UtilityCalculator::CalculateConfidenceScore(const PatternNode& pattern) const {
-    // C(p) = pattern confidence
-    // For now, use a default value since PatternNode doesn't have confidence yet
-    // In future, this could be based on:
-    // - Pattern match quality
-    // - Number of successful predictions
-    // - Validation metrics
-
-    // Default confidence of 0.5 for all patterns
-    // TODO: Integrate with pattern quality metrics from Phase 1
-    return 0.5f;
+    // C(p) = pattern confidence, maintained on the node by pattern
+    // refinement/matching (defaults to 0.5 for new patterns)
+    return std::clamp(pattern.GetConfidenceScore(), 0.0f, 1.0f);
 }
 
 // ============================================================================
 // AccessStats
 // ============================================================================
+
+AccessStats AccessStatsFromNode(const PatternNode& pattern) {
+    AccessStats stats;
+    stats.access_count = pattern.GetAccessCount();
+    stats.creation_time = pattern.GetCreationTime();
+    stats.last_access = stats.access_count > 0 ? pattern.GetLastAccessed()
+                                               : pattern.GetCreationTime();
+    return stats;
+}
 
 void AccessStats::RecordAccess(Timestamp timestamp) {
     if (access_count == 0) {
@@ -287,6 +289,39 @@ const AccessStats* AccessTracker::GetPatternStats(PatternID pattern) const {
     }
 
     return &it->second;
+}
+
+std::optional<AccessStats> AccessTracker::GetPatternStatsSnapshot(PatternID pattern) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    auto it = pattern_stats_.find(pattern);
+    if (it == pattern_stats_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::optional<AccessStats> AccessTracker::GetAssociationStatsSnapshot(
+    PatternID source, PatternID target) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    auto it = association_stats_.find(std::make_pair(source, target));
+    if (it == association_stats_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash>
+AccessTracker::GetAssociationAccessCounts() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    std::unordered_map<std::pair<PatternID, PatternID>, size_t, PatternPairHash> counts;
+    counts.reserve(association_stats_.size());
+    for (const auto& [key, stats] : association_stats_) {
+        counts[key] = static_cast<size_t>(stats.access_count);
+    }
+    return counts;
 }
 
 const AccessStats* AccessTracker::GetAssociationStats(PatternID source, PatternID target) const {

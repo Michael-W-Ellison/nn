@@ -801,5 +801,26 @@ TEST(PersistentBackendTest, BatchWritePerformance) {
     CleanupDatabase(db_path);
 }
 
+TEST(PersistentBackendTest, OpeningDatabaseReservesStoredIDs) {
+    std::string db_path = GetTempDbPath();
+
+    PatternID far_ahead(PatternID::Generate().value() + 100000);
+    {
+        PersistentBackend::Config config;
+        config.db_path = db_path;
+        PersistentBackend backend(config);
+        ASSERT_TRUE(backend.Store(CreateTestPattern(far_ahead)));
+    }
+    {
+        // Simulates a restart: IDs generated after opening never collide
+        PersistentBackend::Config config;
+        config.db_path = db_path;
+        PersistentBackend backend(config);
+        EXPECT_GT(PatternID::Generate().value(), far_ahead.value());
+    }
+
+    CleanupDatabase(db_path);
+}
+
 } // namespace
 } // namespace dpan
