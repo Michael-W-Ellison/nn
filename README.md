@@ -4,9 +4,13 @@ DPAN is a C++17 library for learning from streams of data without a fixed
 network topology. It stores observed inputs as **patterns** (feature vectors
 with metadata), finds similar patterns, learns **associations** between
 patterns that co-occur, and manages memory by utility (pruning, tiered
-storage, decay and consolidation). It does not use backpropagation or
-gradient-trained layers; learning is incremental and driven by co-occurrence
-statistics and reinforcement.
+storage, decay and consolidation). This learning is incremental and driven
+by co-occurrence statistics and reinforcement.
+
+It also includes a conventional neural network module (dense layers trained
+with backpropagation) that works on its own and plugs into DPAN as a learned
+feature extractor, a learned similarity metric and a learned prediction
+scorer.
 
 ## Modules
 
@@ -19,6 +23,7 @@ statistics and reinforcement.
 | `dpan::association` | Co-occurrence tracking, association formation, reinforcement, competition, normalization, prediction, activation propagation |
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
+| `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
@@ -92,9 +97,24 @@ associations.FormNewAssociations(engine.GetDatabase());
 auto next = associations.PredictWithConfidence(id, 3);
 ```
 
+Neural network:
+
+```cpp
+#include "nn/sequential.hpp"
+
+using namespace dpan::nn;
+
+Sequential model;
+model.Emplace<Dense>(2, 8).Emplace<Tanh>().Emplace<Dense>(8, 1).Emplace<Sigmoid>();
+Adam optimizer(0.05f);
+model.Fit(inputs, targets, BinaryCrossEntropy(), optimizer);   // Matrix, one sample per row
+std::vector<float> output = model.Predict({1.0f, 0.0f});
+```
+
 ## Documentation
 
 - `docs/DPAN_User_Guide.md`, `docs/DPAN_API_Reference.md` — usage and API
+- `docs/DPAN_Neural_Network_Guide.md` — neural network module and its DPAN integration
 - `docs/DPAN_CLI_Guide.md`, `QUICK_START_CLI.md` — the interactive CLI
 - `docs/DPAN_Design_Document.md` — architecture and design
 

@@ -33,8 +33,13 @@ public:
         PatternExtractor::Config extraction_config;
         PatternMatcher::Config matching_config;
 
-        // Similarity metric selection
-        std::string similarity_metric{"context"};  // "context", "hausdorff", "temporal", etc.
+        // Similarity metric selection: "context", "cosine", "euclidean",
+        // "hausdorff", "chamfer", "temporal", "histogram", "spectral"
+        std::string similarity_metric{"context"};
+
+        // Custom metric (e.g. nn::EmbeddingSimilarity); overrides
+        // similarity_metric when set
+        std::shared_ptr<SimilarityMetric> similarity_metric_instance;
 
         // Engine options
         bool enable_auto_refinement{true};

@@ -43,6 +43,10 @@ target_link_libraries(time_series_patterns
     dpan_discovery
 )
 
+# Neural network module and its DPAN integration
+add_executable(neural_network_example nn/neural_network_example.cpp)
+target_link_libraries(neural_network_example dpan_nn dpan_storage)
+
 # Make examples available as build targets
 add_custom_target(examples
     DEPENDS
@@ -52,6 +56,7 @@ add_custom_target(examples
         basic_learning
         custom_formation_rules
         activation_propagation_demo
+        neural_network_example
 )
 
 message(STATUS "Example applications configured:")
@@ -61,4 +66,5 @@ message(STATUS "  - time_series_patterns: Time series pattern recognition")
 message(STATUS "  - basic_learning: Association learning basics")
 message(STATUS "  - custom_formation_rules: Custom association rules")
 message(STATUS "  - activation_propagation_demo: Activation propagation")
+message(STATUS "  - neural_network_example: Neural networks and DPAN integration")
 message(STATUS "Build all examples with: make examples")

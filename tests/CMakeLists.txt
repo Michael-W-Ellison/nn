@@ -16,6 +16,7 @@ add_subdirectory(learning)
 add_subdirectory(integration)
 add_subdirectory(benchmarks)
 add_subdirectory(cli)
+add_subdirectory(nn)
 
 # Edge case tests
 add_executable(edge_case_tests edge_case_tests.cpp)

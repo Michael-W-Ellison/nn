@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace dpan {
@@ -336,26 +337,53 @@ std::vector<const AssociationEdge*> AssociationLearningSystem::GetAssociations(
     }
 }
 
+std::vector<std::pair<PatternID, float>> AssociationLearningSystem::RankCandidates(
+    PatternID pattern,
+    const ContextVector* context
+) const {
+    std::shared_ptr<const PredictionScorer> scorer;
+    float weight;
+    {
+        std::lock_guard<std::mutex> lock(scorer_mutex_);
+        scorer = prediction_scorer_;
+        weight = prediction_scorer_weight_;
+    }
+
+    auto associations = matrix_.GetOutgoingAssociations(pattern);
+
+    std::vector<std::pair<PatternID, float>> ranked;
+    ranked.reserve(associations.size());
+
+    for (const auto* edge : associations) {
+        float strength = context ? edge->GetContextualStrength(*context) : edge->GetStrength();
+        float score = strength;
+        if (scorer) {
+            float learned = std::clamp(
+                scorer->Score(pattern, edge->GetTarget(), strength, context), 0.0f, 1.0f);
+            score = (1.0f - weight) * strength + weight * learned;
+        }
+        ranked.emplace_back(edge->GetTarget(), score);
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+        [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+
+    return ranked;
+}
+
 std::vector<PatternID> AssociationLearningSystem::Predict(
     PatternID pattern,
     size_t k,
     const ContextVector* context
 ) const {
-    auto associations = matrix_.GetOutgoingAssociations(pattern);
-
-    std::vector<const AssociationEdge*> sorted_assocs(associations.begin(), associations.end());
-    std::sort(sorted_assocs.begin(), sorted_assocs.end(),
-        [context](const AssociationEdge* a, const AssociationEdge* b) {
-            float strength_a = context ? a->GetContextualStrength(*context) : a->GetStrength();
-            float strength_b = context ? b->GetContextualStrength(*context) : b->GetStrength();
-            return strength_a > strength_b;
-        });
+    auto ranked = RankCandidates(pattern, context);
 
     std::vector<PatternID> predictions;
-    predictions.reserve(std::min(k, sorted_assocs.size()));
-
-    for (size_t i = 0; i < std::min(k, sorted_assocs.size()); ++i) {
-        predictions.push_back(sorted_assocs[i]->GetTarget());
+    predictions.reserve(std::min(k, ranked.size()));
+    for (size_t i = 0; i < std::min(k, ranked.size()); ++i) {
+        predictions.push_back(ranked[i].first);
     }
 
     {
@@ -371,20 +399,7 @@ std::vector<std::pair<PatternID, float>> AssociationLearningSystem::PredictWithC
     size_t k,
     const ContextVector* context
 ) const {
-    auto associations = matrix_.GetOutgoingAssociations(pattern);
-
-    std::vector<std::pair<PatternID, float>> predictions;
-    predictions.reserve(associations.size());
-
-    for (const auto* edge : associations) {
-        float strength = context ? edge->GetContextualStrength(*context) : edge->GetStrength();
-        predictions.emplace_back(edge->GetTarget(), strength);
-    }
-
-    std::sort(predictions.begin(), predictions.end(),
-        [](const auto& a, const auto& b) {
-            return a.second > b.second;
-        });
+    auto predictions = RankCandidates(pattern, context);
 
     if (predictions.size() > k) {
         predictions.resize(k);
@@ -559,6 +574,21 @@ AssociationLearningSystem::Config AssociationLearningSystem::GetConfig() const {
 void AssociationLearningSystem::SetAttentionMechanism(AttentionMechanism* attention) {
     std::lock_guard<std::mutex> lock(attention_mutex_);
     attention_mechanism_ = attention;
+}
+
+void AssociationLearningSystem::SetPredictionScorer(
+    std::shared_ptr<const PredictionScorer> scorer, float weight) {
+    if (weight < 0.0f || weight > 1.0f) {
+        throw std::invalid_argument("SetPredictionScorer: weight must be in [0, 1]");
+    }
+    std::lock_guard<std::mutex> lock(scorer_mutex_);
+    prediction_scorer_ = std::move(scorer);
+    prediction_scorer_weight_ = weight;
+}
+
+std::shared_ptr<const PredictionScorer> AssociationLearningSystem::GetPredictionScorer() const {
+    std::lock_guard<std::mutex> lock(scorer_mutex_);
+    return prediction_scorer_;
 }
 
 AttentionMechanism* AssociationLearningSystem::GetAttentionMechanism() const {

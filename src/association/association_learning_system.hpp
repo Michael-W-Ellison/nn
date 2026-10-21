@@ -4,6 +4,7 @@
 #include "association/association_matrix.hpp"
 #include "association/co_occurrence_tracker.hpp"
 #include "association/formation_rules.hpp"
+#include "association/prediction_scorer.hpp"
 #include "association/reinforcement_manager.hpp"
 #include "association/competitive_learner.hpp"
 #include "association/strength_normalizer.hpp"
@@ -221,7 +222,8 @@ public:
     ) const;
 
     /// Predict next patterns based on current pattern
-    /// Uses association strengths and activation propagation
+    /// Ranks outgoing associations by strength (context-adjusted when a
+    /// context is given), blended with the prediction scorer if one is set
     /// @param pattern Current pattern
     /// @param k Number of predictions to return
     /// @param context Optional context for context-sensitive prediction
@@ -353,6 +355,16 @@ public:
     /// @return Pointer to attention mechanism (nullptr if not set)
     AttentionMechanism* GetAttentionMechanism() const;
 
+    /// Set a scorer blended into Predict() and PredictWithConfidence():
+    ///   score = (1 - weight) * strength + weight * scorer.Score(...)
+    /// @param scorer Scorer (nullptr to disable)
+    /// @param weight Blend weight in [0, 1]
+    /// @throws std::invalid_argument if weight is outside [0, 1]
+    void SetPredictionScorer(std::shared_ptr<const PredictionScorer> scorer, float weight = 0.5f);
+
+    /// Current scorer (nullptr if not set)
+    std::shared_ptr<const PredictionScorer> GetPredictionScorer() const;
+
     // ========================================================================
     // Persistence
     // ========================================================================
@@ -383,6 +395,11 @@ private:
     AttentionMechanism* attention_mechanism_;
     mutable std::mutex attention_mutex_;
 
+    // Optional prediction scorer and its blend weight
+    std::shared_ptr<const PredictionScorer> prediction_scorer_;
+    float prediction_scorer_weight_{0.5f};
+    mutable std::mutex scorer_mutex_;
+
     // Activation history for temporal learning
     std::deque<std::pair<Timestamp, PatternID>> activation_history_;
     mutable std::mutex history_mutex_;
@@ -405,6 +422,11 @@ private:
 
     // Helper methods
     void UpdateActivationHistory(PatternID pattern, Timestamp timestamp);
+
+    /// Outgoing candidates of `pattern` with their (scorer-blended) scores,
+    /// best first
+    std::vector<std::pair<PatternID, float>> RankCandidates(
+        PatternID pattern, const ContextVector* context) const;
     void UpdateContextProfiles(const std::vector<PatternID>& activated,
                                const ContextVector& context, Timestamp timestamp);
     void TrimActivationHistory(Timestamp::Duration window, size_t max_size);

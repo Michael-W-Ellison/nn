@@ -41,7 +41,9 @@ void PatternEngine::InitializeComponents() {
     }
 
     // Create similarity metric
-    similarity_metric_ = CreateSimilarityMetric(config_.similarity_metric);
+    similarity_metric_ = config_.similarity_metric_instance
+        ? config_.similarity_metric_instance
+        : CreateSimilarityMetric(config_.similarity_metric);
 
     // Create pattern extractor
     extractor_ = std::make_unique<PatternExtractor>(config_.extraction_config);
