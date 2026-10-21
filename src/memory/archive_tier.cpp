@@ -9,6 +9,7 @@
 // Files without the magic are read as uncompressed (pre-compression format).
 
 #include "memory/memory_tier.hpp"
+#include "core/binary_io.hpp"
 #include <zlib.h>
 #include <cstring>
 #include <fstream>
@@ -39,9 +40,8 @@ bool WriteCompressed(const fs::path& filepath, const std::string& raw) {
     if (!file) {
         return false;
     }
-    uint64_t raw_size = raw.size();
     file.write(kArchiveMagic, sizeof(kArchiveMagic));
-    file.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
+    io::Write<uint64_t>(file, raw.size());
     file.write(compressed.data(), static_cast<std::streamsize>(compressed_size));
     return file.good();
 }
@@ -61,8 +61,11 @@ std::optional<std::string> ReadCompressed(const fs::path& filepath) {
         return contents;  // Uncompressed legacy file
     }
 
-    uint64_t raw_size;
-    std::memcpy(&raw_size, contents.data() + sizeof(kArchiveMagic), sizeof(raw_size));
+    std::istringstream header(contents.substr(sizeof(kArchiveMagic), sizeof(uint64_t)));
+    uint64_t raw_size = io::Read<uint64_t>(header);
+    if (raw_size > (uint64_t{1} << 34)) {
+        return std::nullopt;  // Corrupt header
+    }
 
     std::string raw(raw_size, '\0');
     uLongf dest_size = static_cast<uLongf>(raw_size);

@@ -109,47 +109,48 @@ const char* ToString(AssociationType type);
 // Parse AssociationType from string
 AssociationType ParseAssociationType(const std::string& str);
 
-// Timestamp: Microsecond-precision time point
+// Timestamp: Microsecond-precision point in time, stored as microseconds
+// since the Unix epoch (1970-01-01 UTC). Now() reads the process clock
+// (core/clock.hpp), which is the system clock unless a test or simulation
+// installs another one.
 class Timestamp {
 public:
-    using ClockType = std::chrono::steady_clock;
-    using TimePoint = ClockType::time_point;
     using Duration = std::chrono::microseconds;
 
-    // Create timestamp for current time
+    // Current time from the process clock
     static Timestamp Now();
 
-    // Create timestamp from microseconds since epoch
-    static Timestamp FromMicros(int64_t micros);
+    // Create timestamp from microseconds since the Unix epoch
+    static Timestamp FromMicros(int64_t micros) { return Timestamp(micros); }
 
-    // Default constructor creates zero timestamp
-    Timestamp() : time_point_(TimePoint{}) {}
+    // Default constructor creates the epoch timestamp (0)
+    Timestamp() = default;
 
-    // Get microseconds since epoch
-    int64_t ToMicros() const;
+    // Microseconds since the Unix epoch
+    int64_t ToMicros() const { return micros_; }
 
     // Get duration since another timestamp
     Duration operator-(const Timestamp& other) const {
-        return std::chrono::duration_cast<Duration>(time_point_ - other.time_point_);
+        return Duration(micros_ - other.micros_);
     }
 
     // Add duration to timestamp
     Timestamp operator+(Duration duration) const {
-        return Timestamp(time_point_ + duration);
+        return Timestamp(micros_ + duration.count());
     }
 
     // Subtract duration from timestamp
     Timestamp operator-(Duration duration) const {
-        return Timestamp(time_point_ - duration);
+        return Timestamp(micros_ - duration.count());
     }
 
     // Comparison operators
-    bool operator<(const Timestamp& other) const { return time_point_ < other.time_point_; }
-    bool operator>(const Timestamp& other) const { return time_point_ > other.time_point_; }
-    bool operator<=(const Timestamp& other) const { return time_point_ <= other.time_point_; }
-    bool operator>=(const Timestamp& other) const { return time_point_ >= other.time_point_; }
-    bool operator==(const Timestamp& other) const { return time_point_ == other.time_point_; }
-    bool operator!=(const Timestamp& other) const { return time_point_ != other.time_point_; }
+    bool operator<(const Timestamp& other) const { return micros_ < other.micros_; }
+    bool operator>(const Timestamp& other) const { return micros_ > other.micros_; }
+    bool operator<=(const Timestamp& other) const { return micros_ <= other.micros_; }
+    bool operator>=(const Timestamp& other) const { return micros_ >= other.micros_; }
+    bool operator==(const Timestamp& other) const { return micros_ == other.micros_; }
+    bool operator!=(const Timestamp& other) const { return micros_ != other.micros_; }
 
     // String conversion
     std::string ToString() const;
@@ -158,9 +159,15 @@ public:
     void Serialize(std::ostream& out) const;
     static Timestamp Deserialize(std::istream& in);
 
+    // Timestamp read from persisted data. Versions before the process clock
+    // stored time since boot (steady clock); those values (non-zero and
+    // before 2000-01-01) are replaced by the current time so old data does
+    // not look decades old. Zero ("never") is kept.
+    static Timestamp FromPersistedMicros(int64_t micros);
+
 private:
-    explicit Timestamp(TimePoint tp) : time_point_(tp) {}
-    TimePoint time_point_;
+    explicit Timestamp(int64_t micros) : micros_(micros) {}
+    int64_t micros_{0};
 };
 
 // ContextVector: Sparse representation of contextual information

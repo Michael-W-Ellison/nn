@@ -3,6 +3,7 @@
 // Implementation of Utility Calculator
 
 #include "memory/utility_calculator.hpp"
+#include "core/binary_io.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -231,32 +232,19 @@ Timestamp::Duration AccessStats::Age() const {
 }
 
 void AccessStats::Serialize(std::ostream& out) const {
-    out.write(reinterpret_cast<const char*>(&access_count), sizeof(access_count));
-
-    // Store as microseconds (Timestamp uses microseconds internally)
-    int64_t last_access_micros = last_access.ToMicros();
-    out.write(reinterpret_cast<const char*>(&last_access_micros), sizeof(last_access_micros));
-
-    int64_t creation_micros = creation_time.ToMicros();
-    out.write(reinterpret_cast<const char*>(&creation_micros), sizeof(creation_micros));
-
-    out.write(reinterpret_cast<const char*>(&avg_access_interval), sizeof(avg_access_interval));
+    io::Write<uint64_t>(out, access_count);
+    io::Write<int64_t>(out, last_access.ToMicros());
+    io::Write<int64_t>(out, creation_time.ToMicros());
+    io::Write<float>(out, avg_access_interval);
 }
 
 AccessStats AccessStats::Deserialize(std::istream& in) {
     AccessStats stats;
 
-    in.read(reinterpret_cast<char*>(&stats.access_count), sizeof(stats.access_count));
-
-    int64_t last_access_micros;
-    in.read(reinterpret_cast<char*>(&last_access_micros), sizeof(last_access_micros));
-    stats.last_access = Timestamp::FromMicros(last_access_micros);
-
-    int64_t creation_micros;
-    in.read(reinterpret_cast<char*>(&creation_micros), sizeof(creation_micros));
-    stats.creation_time = Timestamp::FromMicros(creation_micros);
-
-    in.read(reinterpret_cast<char*>(&stats.avg_access_interval), sizeof(stats.avg_access_interval));
+    stats.access_count = io::Read<uint64_t>(in);
+    stats.last_access = Timestamp::FromPersistedMicros(io::Read<int64_t>(in));
+    stats.creation_time = Timestamp::FromPersistedMicros(io::Read<int64_t>(in));
+    stats.avg_access_interval = io::Read<float>(in);
 
     return stats;
 }

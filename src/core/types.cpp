@@ -1,5 +1,7 @@
 // File: src/core/types.cpp
 #include "core/types.hpp"
+#include "core/binary_io.hpp"
+#include "core/clock.hpp"
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
@@ -28,13 +30,14 @@ std::string PatternID::ToString() const {
 }
 
 void PatternID::Serialize(std::ostream& out) const {
-    out.write(reinterpret_cast<const char*>(&value_), sizeof(value_));
+    io::Write<uint64_t>(out, value_);
 }
 
 PatternID PatternID::Deserialize(std::istream& in) {
     ValueType value = kInvalidID;
-    in.read(reinterpret_cast<char*>(&value), sizeof(value));
-    if (!in) {
+    try {
+        value = io::Read<uint64_t>(in);
+    } catch (const std::runtime_error&) {
         return PatternID();
     }
     ReserveThrough(value);
@@ -127,17 +130,15 @@ AssociationType ParseAssociationType(const std::string& str) {
 // Timestamp implementations
 
 Timestamp Timestamp::Now() {
-    return Timestamp(ClockType::now());
+    return CurrentClock().Now();
 }
 
-Timestamp Timestamp::FromMicros(int64_t micros) {
-    TimePoint tp{Duration(micros)};
-    return Timestamp(tp);
-}
-
-int64_t Timestamp::ToMicros() const {
-    auto duration = time_point_.time_since_epoch();
-    return std::chrono::duration_cast<Duration>(duration).count();
+Timestamp Timestamp::FromPersistedMicros(int64_t micros) {
+    constexpr int64_t kYear2000Micros = 946684800LL * 1000000LL;
+    if (micros > 0 && micros < kYear2000Micros) {
+        return Now();
+    }
+    return FromMicros(micros);
 }
 
 std::string Timestamp::ToString() const {
@@ -152,14 +153,11 @@ std::string Timestamp::ToString() const {
 }
 
 void Timestamp::Serialize(std::ostream& out) const {
-    int64_t micros = ToMicros();
-    out.write(reinterpret_cast<const char*>(&micros), sizeof(micros));
+    io::Write<int64_t>(out, ToMicros());
 }
 
 Timestamp Timestamp::Deserialize(std::istream& in) {
-    int64_t micros;
-    in.read(reinterpret_cast<char*>(&micros), sizeof(micros));
-    return FromMicros(micros);
+    return FromPersistedMicros(io::Read<int64_t>(in));
 }
 
 // ContextVector implementations
@@ -291,40 +289,22 @@ bool ContextVector::operator==(const ContextVector& other) const {
 }
 
 void ContextVector::Serialize(std::ostream& out) const {
-    // Write size
-    size_t size = data_.size();
-    out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    io::WriteSize(out, data_.size());
 
-    // Write each dimension-value pair
+    // Each dimension: name (length-prefixed), then value
     for (const auto& pair : data_) {
-        // Write dimension string length and data
-        size_t dim_len = pair.first.length();
-        out.write(reinterpret_cast<const char*>(&dim_len), sizeof(dim_len));
-        out.write(pair.first.data(), dim_len);
-
-        // Write value
-        out.write(reinterpret_cast<const char*>(&pair.second), sizeof(pair.second));
+        io::WriteString(out, pair.first);
+        io::Write<float>(out, pair.second);
     }
 }
 
 ContextVector ContextVector::Deserialize(std::istream& in) {
-    // Read size
-    size_t size;
-    in.read(reinterpret_cast<char*>(&size), sizeof(size));
+    size_t size = io::ReadSize(in);
 
     ContextVector result;
     for (size_t i = 0; i < size; ++i) {
-        // Read dimension
-        size_t dim_len;
-        in.read(reinterpret_cast<char*>(&dim_len), sizeof(dim_len));
-        std::string dimension(dim_len, '\0');
-        in.read(&dimension[0], dim_len);
-
-        // Read value
-        ValueType value;
-        in.read(reinterpret_cast<char*>(&value), sizeof(value));
-
-        result.Set(dimension, value);
+        std::string dimension = io::ReadString(in);
+        result.Set(dimension, io::Read<float>(in));
     }
 
     return result;

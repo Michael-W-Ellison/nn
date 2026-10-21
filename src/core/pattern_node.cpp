@@ -1,5 +1,6 @@
 // File: src/core/pattern_node.cpp
 #include "core/pattern_node.hpp"
+#include "core/binary_io.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
@@ -173,31 +174,22 @@ void PatternNode::Serialize(std::ostream& out) const {
     data_.Serialize(out);
 
     // Serialize PatternType
-    uint8_t type_byte = static_cast<uint8_t>(type_);
-    out.write(reinterpret_cast<const char*>(&type_byte), sizeof(type_byte));
+    io::Write<uint8_t>(out, static_cast<uint8_t>(type_));
 
     // Serialize activation parameters
-    float threshold = activation_threshold_.load(std::memory_order_relaxed);
-    float base_activation = base_activation_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&threshold), sizeof(threshold));
-    out.write(reinterpret_cast<const char*>(&base_activation), sizeof(base_activation));
+    io::Write<float>(out, activation_threshold_.load(std::memory_order_relaxed));
+    io::Write<float>(out, base_activation_.load(std::memory_order_relaxed));
 
     // Serialize statistics
-    int64_t creation_micros = creation_timestamp_.ToMicros();
-    uint64_t last_accessed = last_accessed_.load(std::memory_order_relaxed);
-    uint32_t access_count = access_count_.load(std::memory_order_relaxed);
-    float confidence = confidence_score_.load(std::memory_order_relaxed);
-
-    out.write(reinterpret_cast<const char*>(&creation_micros), sizeof(creation_micros));
-    out.write(reinterpret_cast<const char*>(&last_accessed), sizeof(last_accessed));
-    out.write(reinterpret_cast<const char*>(&access_count), sizeof(access_count));
-    out.write(reinterpret_cast<const char*>(&confidence), sizeof(confidence));
+    io::Write<int64_t>(out, creation_timestamp_.ToMicros());
+    io::Write<uint64_t>(out, last_accessed_.load(std::memory_order_relaxed));
+    io::Write<uint32_t>(out, access_count_.load(std::memory_order_relaxed));
+    io::Write<float>(out, confidence_score_.load(std::memory_order_relaxed));
 
     // Serialize sub-patterns
     {
         std::lock_guard<std::mutex> lock(sub_patterns_mutex_);
-        size_t sub_count = sub_patterns_.size();
-        out.write(reinterpret_cast<const char*>(&sub_count), sizeof(sub_count));
+        io::WriteSize(out, sub_patterns_.size());
 
         for (const auto& sub_id : sub_patterns_) {
             sub_id.Serialize(out);
@@ -213,39 +205,32 @@ PatternNode PatternNode::Deserialize(std::istream& in) {
     PatternData data = PatternData::Deserialize(in);
 
     // Deserialize PatternType
-    uint8_t type_byte;
-    in.read(reinterpret_cast<char*>(&type_byte), sizeof(type_byte));
-    PatternType type = static_cast<PatternType>(type_byte);
+    PatternType type = static_cast<PatternType>(io::Read<uint8_t>(in));
 
     // Create node
     PatternNode node(id, data, type);
 
     // Deserialize activation parameters
-    float threshold, base_activation;
-    in.read(reinterpret_cast<char*>(&threshold), sizeof(threshold));
-    in.read(reinterpret_cast<char*>(&base_activation), sizeof(base_activation));
+    float threshold = io::Read<float>(in);
+    float base_activation = io::Read<float>(in);
     node.activation_threshold_.store(threshold, std::memory_order_relaxed);
     node.base_activation_.store(base_activation, std::memory_order_relaxed);
 
     // Deserialize statistics
-    int64_t creation_micros;
-    uint64_t last_accessed;
-    uint32_t access_count;
-    float confidence;
+    int64_t creation_micros = io::Read<int64_t>(in);
+    uint64_t last_accessed = io::Read<uint64_t>(in);
+    uint32_t access_count = io::Read<uint32_t>(in);
+    float confidence = io::Read<float>(in);
 
-    in.read(reinterpret_cast<char*>(&creation_micros), sizeof(creation_micros));
-    in.read(reinterpret_cast<char*>(&last_accessed), sizeof(last_accessed));
-    in.read(reinterpret_cast<char*>(&access_count), sizeof(access_count));
-    in.read(reinterpret_cast<char*>(&confidence), sizeof(confidence));
-
-    node.creation_timestamp_ = Timestamp::FromMicros(creation_micros);
-    node.last_accessed_.store(last_accessed, std::memory_order_relaxed);
+    node.creation_timestamp_ = Timestamp::FromPersistedMicros(creation_micros);
+    node.last_accessed_.store(static_cast<uint64_t>(
+        Timestamp::FromPersistedMicros(static_cast<int64_t>(last_accessed)).ToMicros()),
+        std::memory_order_relaxed);
     node.access_count_.store(access_count, std::memory_order_relaxed);
     node.confidence_score_.store(confidence, std::memory_order_relaxed);
 
     // Deserialize sub-patterns
-    size_t sub_count;
-    in.read(reinterpret_cast<char*>(&sub_count), sizeof(sub_count));
+    size_t sub_count = io::ReadSize(in, uint64_t{1} << 32);
 
     for (size_t i = 0; i < sub_count; ++i) {
         PatternID sub_id = PatternID::Deserialize(in);

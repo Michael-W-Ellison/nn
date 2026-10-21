@@ -1,5 +1,6 @@
 // File: src/nn/sequential.cpp
 #include "nn/sequential.hpp"
+#include "core/binary_io.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -211,9 +212,8 @@ Sequential::History Sequential::Fit(const Matrix& input, const Matrix& target, c
 
 void Sequential::Serialize(std::ostream& out) const {
     out.write(kModelMagic, sizeof(kModelMagic));
-    out.write(reinterpret_cast<const char*>(&kModelVersion), sizeof(kModelVersion));
-    uint32_t count = static_cast<uint32_t>(layers_.size());
-    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    io::Write<uint32_t>(out, kModelVersion);
+    io::Write<uint32_t>(out, static_cast<uint32_t>(layers_.size()));
     for (const auto& layer : layers_) {
         layer->Serialize(out);
     }
@@ -225,14 +225,12 @@ Sequential Sequential::Deserialize(std::istream& in) {
     if (!in || std::memcmp(magic, kModelMagic, sizeof(magic)) != 0) {
         throw std::runtime_error("Sequential::Deserialize: not a DPAN model");
     }
-    uint32_t version = 0;
-    in.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (!in || version != kModelVersion) {
+    uint32_t version = io::Read<uint32_t>(in);
+    if (version != kModelVersion) {
         throw std::runtime_error("Sequential::Deserialize: unsupported model version");
     }
-    uint32_t count = 0;
-    in.read(reinterpret_cast<char*>(&count), sizeof(count));
-    if (!in || count > 100000) {
+    uint32_t count = io::Read<uint32_t>(in);
+    if (count > 100000) {
         throw std::runtime_error("Sequential::Deserialize: invalid layer count");
     }
     Sequential model;

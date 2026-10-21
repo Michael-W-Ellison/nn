@@ -61,3 +61,31 @@ gtest_discover_tests(context_vector_test)
 gtest_discover_tests(pattern_data_test)
 gtest_discover_tests(pattern_node_test)
 gtest_discover_tests(pattern_engine_test)
+
+# Process clock and fake-clock reproducibility
+add_executable(clock_test
+    clock_test.cpp
+)
+
+target_link_libraries(clock_test
+    dpan_core
+    dpan_association
+    dpan_memory
+    GTest::gtest_main
+)
+
+gtest_discover_tests(clock_test)
+
+# Portable serialization fixtures
+add_executable(binary_io_test
+    binary_io_test.cpp
+)
+
+target_link_libraries(binary_io_test
+    dpan_core
+    dpan_association
+    dpan_nn
+    GTest::gtest_main
+)
+
+gtest_discover_tests(binary_io_test)

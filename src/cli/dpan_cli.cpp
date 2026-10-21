@@ -11,6 +11,7 @@
 // - Session persistence
 
 #include "dpan_cli.hpp"
+#include "core/binary_io.hpp"
 #include "cli/cli_config.hpp"
 #include "storage/memory_backend.hpp"
 #include "learning/basic_attention.hpp"
@@ -1054,15 +1055,11 @@ void DPANCli::SaveSession() {
         std::ofstream out(mapping_file, std::ios::binary);
 
         size_t count = text_to_pattern_.size();
-        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        io::WriteSize(out, count);
 
         for (const auto& [text, pattern_id] : text_to_pattern_) {
-            size_t text_len = text.size();
-            out.write(reinterpret_cast<const char*>(&text_len), sizeof(text_len));
-            out.write(text.data(), text_len);
-
-            uint64_t id_val = pattern_id.value();
-            out.write(reinterpret_cast<const char*>(&id_val), sizeof(id_val));
+            io::WriteString(out, text);
+            io::Write<uint64_t>(out, pattern_id.value());
         }
 
         std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
@@ -1096,26 +1093,24 @@ void DPANCli::LoadSessionIfExists() {
         if (std::filesystem::exists(mapping_file)) {
             std::ifstream in(mapping_file, std::ios::binary);
 
-            size_t count;
-            in.read(reinterpret_cast<char*>(&count), sizeof(count));
+            size_t count = 0;
+            try {
+                count = io::ReadSize(in);
+                for (size_t i = 0; i < count; ++i) {
+                    std::string text = io::ReadString(in);
+                    uint64_t id_val = io::Read<uint64_t>(in);
+                    PatternID::ReserveThrough(id_val);
 
-            for (size_t i = 0; i < count; ++i) {
-                size_t text_len;
-                in.read(reinterpret_cast<char*>(&text_len), sizeof(text_len));
-
-                std::string text(text_len, '\0');
-                in.read(&text[0], text_len);
-
-                uint64_t id_val;
-                in.read(reinterpret_cast<char*>(&id_val), sizeof(id_val));
-
-                PatternID pattern_id(id_val);
-                text_to_pattern_[text] = pattern_id;
-                pattern_to_text_[pattern_id] = text;
+                    PatternID pattern_id(id_val);
+                    text_to_pattern_[text] = pattern_id;
+                    pattern_to_text_[pattern_id] = text;
+                }
+                std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
+                         << "Loaded " << count << " text mappings\n";
+            } catch (const std::runtime_error& e) {
+                std::cout << C(Color::YELLOW) << "Text mappings file is corrupt (" << e.what()
+                         << "); loaded " << text_to_pattern_.size() << " mappings\n" << C(Color::RESET);
             }
-
-            std::cout << C(Color::GREEN) << "✓ " << C(Color::RESET)
-                     << "Loaded " << count << " text mappings\n";
         }
 
         auto stats = engine_->GetStatistics();
