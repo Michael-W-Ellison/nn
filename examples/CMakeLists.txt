@@ -47,6 +47,10 @@ target_link_libraries(time_series_patterns
 add_executable(neural_network_example nn/neural_network_example.cpp)
 target_link_libraries(neural_network_example dpan_nn dpan_storage)
 
+# Drop-in agent
+add_executable(agent_example agent/agent_example.cpp)
+target_link_libraries(agent_example dpan_agent)
+
 # Make examples available as build targets
 add_custom_target(examples
     DEPENDS
@@ -57,6 +61,7 @@ add_custom_target(examples
         custom_formation_rules
         activation_propagation_demo
         neural_network_example
+        agent_example
 )
 
 message(STATUS "Example applications configured:")
@@ -67,4 +72,5 @@ message(STATUS "  - basic_learning: Association learning basics")
 message(STATUS "  - custom_formation_rules: Custom association rules")
 message(STATUS "  - activation_propagation_demo: Activation propagation")
 message(STATUS "  - neural_network_example: Neural networks and DPAN integration")
+message(STATUS "  - agent_example: Drop-in agent (classification and anomalies)")
 message(STATUS "Build all examples with: make examples")

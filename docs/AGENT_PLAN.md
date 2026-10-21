@@ -110,7 +110,7 @@ prediction carries a confidence value.
    The buffer holds 50,000 samples by default, drops low-utility samples
    first (memory manager utility scores), keeps classes balanced, and keeps
    recent samples alongside a random sample of older ones.
-3. **Training cadence:** every 8 observations, one mini-batch of 32, half
+3. **Training cadence:** every 8 observations, one mini-batch of 64, half
    newest samples and half replay. Gradient clipping (norm 5), then Adam
    with a learning rate that drops when progress plateaus.
 4. **Mixed channels:** losses from all heads with samples are summed, each
@@ -174,7 +174,8 @@ integration test with a fixed seed and a fake clock.
 |---|---|
 | 0. Groundwork | Complete. Clock (`core/clock.hpp`), little-endian serialization (`core/binary_io.hpp`) with byte-level fixtures, optimizer `SaveState`/`LoadState`, `ClipGradientNorm`, learning-rate schedules, `AssociationLearningSystem::AddAssociation`/`SetAssociationStrength`/`RemoveAssociation`, CMake options `DPAN_WITH_SQLITE` and `DPAN_WITH_ZLIB`. |
 | 1. Spec and encoders | Complete. `src/agent/environment.hpp` (spec, `Value`, validation), `src/agent/encoders.hpp` (encoders, `ObservationEncoder`). Notes below. |
-| 2–8 | Not started |
+| 2. Agent: supervised and self-supervised | Complete. `src/agent/agent.hpp`. Reference environments A–D pass (results and notes below). |
+| 3–8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -210,3 +211,75 @@ Decisions made where sections 1–2 do not specify:
   ACTION outputs must list their actions. OUTCOME feedback may train CLASS
   or ACTION outputs.
 - Encoder state is not yet saved (Phase 5).
+
+### Phase 2 results
+
+Reference environments (`tests/agent/reference_environments_test.cpp`,
+default `AgentConfig`, fixed seeds, `ManualClock`):
+
+| | Criterion | Result |
+|---|---|---|
+| A | Accuracy ≥ 90%: samples 2,000–6,000; the 200 samples ending 1,000 after the drift; samples 7,000–9,000 | 98.7%, 97.5%, 98.0% |
+| B | Test error ≤ 1.2× an offline model of the same shape (Adam, up to 300 epochs, early stopping) | 1.14× |
+| C | Next-value error ≤ 0.8× the last-value baseline (steps 3,000–6,000) | 0.11× (MSE 0.016 vs 0.148) |
+| D | Area under the ROC curve ≥ 0.9 (2% injected anomalies of three kinds) | 0.97 |
+
+### Phase 2 implementation notes
+
+- **Components.** `AgentNetwork` (per-channel embeddings, trunk, one head
+  per output), `AnomalyAutoencoder`, `PatternMemory` (DPAN side),
+  `ReplayBuffer`. `Agent` owns them and holds pending steps for delayed
+  feedback.
+- **Batch size 64** instead of 32: with 32, B reached 1.22× (no blend weight
+  between the two sides reached 1.2×); with 64, 1.14×. Decided with the
+  user. Default learning rate 3e-3, halved after 10 checks of 200 training
+  steps without improvement, not below 1e-4.
+- **Pattern memory.** Fused states are projected to 64 dimensions (fixed
+  Gaussian random projection) and stored as prototypes with PatternIDs. A
+  state joins its nearest prototype when closer than half the running
+  typical nearest distance; otherwise it becomes a new prototype; at
+  capacity (10,000) the least recently used one is replaced. Search is
+  exact (linear scan of the projected prototypes), not LSH. Prototypes are
+  not mirrored into a `PatternDatabase` yet (needed for the memory manager
+  in Phase 4).
+- **Sequences.** Transitions between consecutive prototypes are
+  associations in an `AssociationLearningSystem` (CAUSAL edges, set through
+  `AddAssociation`/`SetAssociationStrength`, strengths approximating
+  transition probabilities); its time-window co-occurrence learning and
+  automatic maintenance are not used.
+- **Short- and long-term pattern votes.** The pattern side votes with all
+  prototypes and with only those given one of the output's last 1,000
+  labels, and uses whichever has been more accurate recently (as in
+  SAM-kNN). Without this, A did not recover after its drift: old prototypes
+  kept their labels. The network does not detect drift yet (Phase 4); after
+  A's drift its accuracy is still about 43% 3,000 samples later, and the
+  blend relies on the pattern side.
+- **Blending.** CLASS: weights proportional to the squared running
+  accuracies. VALUE and NEXT_OBSERVATION: inversely proportional to the
+  running standardized squared errors. Running estimates use rate 0.02 and
+  are measured on each sample before learning from it. Before a head has
+  200 samples its weight is 0. (An error-minimizing weight from the error
+  covariance was tried; its estimates were too noisy and it did worse.)
+- **NEXT_OBSERVATION** predicts the next values of the NUMERIC and
+  TIME_SERIES inputs (in input units), not the whole fused state; other
+  input types are not predicted. The pattern side predicts the remembered
+  input values of the likely next prototypes.
+- **ANOMALY** scores are computed when the observation arrives, before the
+  agent learns from it: the percentile of the autoencoder reconstruction
+  error and of the distance to the nearest prototype, each against the
+  last 1,000 scores, averaged once the autoencoder has 200 samples (pattern
+  distance only before). The autoencoder bottleneck is a quarter of the
+  input size, between 1 and 64.
+- **OUTCOME** feedback refers to the class `Predict` last returned for the
+  step (or the current prediction). Correct: trained as a label. Incorrect:
+  trained as a negative example (loss −log(1 − p)), and the prototype's
+  weight for that class is lowered. A CLASS output trained only by OUTCOME
+  must list its classes; its network head predicts from the start so that
+  outcomes have predictions to refer to.
+- **Replay.** Samples are stored sparsely. When the buffer is full, a new
+  sample replaces one of 8 random candidates: the one from the most
+  frequent class, oldest first. Utility scores from the memory manager are
+  not used yet (Phase 4).
+- **Not in Phase 2:** ACTION outputs and REWARD feedback (rejected at
+  construction; Phase 3), `Save`/`Load` (Phase 5). `SetClock` sets the
+  process-wide clock.

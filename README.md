@@ -24,7 +24,7 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
-| `dpan::agent` | Drop-in learner, in progress (`docs/AGENT_PLAN.md`): `EnvironmentSpec` and its validation, input encoders and `ObservationEncoder` |
+| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes and the stream itself, and predicts classes, values, next observations and anomaly scores. Actions (reinforcement) and saving are not implemented yet. |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
@@ -85,6 +85,30 @@ target_link_libraries(my_app PRIVATE dpan::dpan)
 
 Headers are included by module path, e.g. `#include "core/pattern_engine.hpp"`.
 `examples/consumer/` is a complete project that builds either way.
+
+## Drop-in agent
+
+Describe the environment once, then stream observations and send feedback
+when it is available (`examples/agent/agent_example.cpp`):
+
+```cpp
+#include "agent/agent.hpp"
+using namespace dpan::agent;
+
+EnvironmentSpec spec;
+spec.inputs = {{"reading", InputType::NUMERIC}, {"source", InputType::CATEGORICAL}};
+spec.outputs = {{"state", OutputType::CLASS}, {"unusual", OutputType::ANOMALY}};
+spec.feedback = {{"label", FeedbackType::LABEL, "state"}};
+Agent agent(spec);
+
+StepId step = agent.Observe({{"reading", std::vector<float>{2.1f, 0.2f}}, {"source", std::string("a")}});
+Prediction state = agent.Predict(step, "state");      // label, probabilities, confidence
+float unusual = agent.Predict(step, "unusual").score;  // percentile among recent observations
+agent.Feedback(step, "label", std::string("hot"));     // may arrive later
+```
+
+Sizes, value ranges, vocabularies and (unless listed) class names are
+learned from the data. See `docs/AGENT_PLAN.md` for what is implemented.
 
 ## Example
 

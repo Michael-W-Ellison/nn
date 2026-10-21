@@ -227,6 +227,9 @@ public:
     /// Encoding values per series
     size_t PerSeriesSize() const { return 2 * window_ + 3; }
 
+    /// Running statistics of one series' values
+    const RunningStats& SeriesStatistics(size_t series) const { return state_.at(series).stats; }
+
 private:
     struct Series {
         RunningStats stats;
