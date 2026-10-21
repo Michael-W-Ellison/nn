@@ -326,6 +326,35 @@ const AssociationMatrix& AssociationLearningSystem::GetAssociationMatrix() const
     return matrix_;
 }
 
+AssociationMatrix& AssociationLearningSystem::GetAssociationMatrix() {
+    return matrix_;
+}
+
+bool AssociationLearningSystem::AddAssociation(const AssociationEdge& edge) {
+    return matrix_.AddAssociation(edge);
+}
+
+bool AssociationLearningSystem::AddAssociation(PatternID source, PatternID target,
+                                               AssociationType type, float strength) {
+    return matrix_.AddAssociation(AssociationEdge(source, target, type, strength));
+}
+
+bool AssociationLearningSystem::SetAssociationStrength(PatternID source, PatternID target,
+                                                       float strength) {
+    std::lock_guard<std::mutex> lock(reinforcement_mutex_);
+    const auto* edge = matrix_.GetAssociation(source, target);
+    if (!edge) {
+        return false;
+    }
+    auto updated = edge->Clone();
+    updated->SetStrength(strength);
+    return matrix_.UpdateAssociation(source, target, *updated);
+}
+
+bool AssociationLearningSystem::RemoveAssociation(PatternID source, PatternID target) {
+    return matrix_.RemoveAssociation(source, target);
+}
+
 std::vector<const AssociationEdge*> AssociationLearningSystem::GetAssociations(
     PatternID pattern,
     bool outgoing

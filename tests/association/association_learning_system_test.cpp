@@ -302,7 +302,7 @@ TEST(AssociationLearningSystemTest, ReinforceCorrectPrediction) {
 
     // Manually add an association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.5f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     float initial_strength = system.GetAssociationMatrix().GetAssociation(p1, p2)->GetStrength();
 
@@ -326,7 +326,7 @@ TEST(AssociationLearningSystemTest, ReinforceIncorrectPrediction) {
 
     // Manually add an association p1 -> p2
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.7f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     float initial_strength = system.GetAssociationMatrix().GetAssociation(p1, p2)->GetStrength();
 
@@ -350,7 +350,7 @@ TEST(AssociationLearningSystemTest, ReinforceBatchProcessesMultiple) {
     // Create some associations
     for (size_t i = 0; i < patterns.size() - 1; ++i) {
         AssociationEdge edge(patterns[i], patterns[i + 1], AssociationType::CAUSAL, 0.5f);
-        const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+        system.GetAssociationMatrix().AddAssociation(edge);
     }
 
     // Batch reinforce
@@ -378,7 +378,7 @@ TEST(AssociationLearningSystemTest, ApplyDecayWeakensAssociations) {
 
     // Create association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     float initial_strength = system.GetAssociationMatrix().GetAssociation(p1, p2)->GetStrength();
 
@@ -404,8 +404,8 @@ TEST(AssociationLearningSystemTest, PruneWeakAssociationsRemovesWeak) {
     AssociationEdge strong(p1, p2, AssociationType::CAUSAL, 0.8f);
     AssociationEdge weak(p1, p3, AssociationType::CAUSAL, 0.02f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(strong);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(weak);
+    system.GetAssociationMatrix().AddAssociation(strong);
+    system.GetAssociationMatrix().AddAssociation(weak);
 
     EXPECT_EQ(2u, system.GetAssociationCount());
 
@@ -425,8 +425,8 @@ TEST(AssociationLearningSystemTest, CompactReducesMemoryFootprint) {
 
     // Add and remove associations
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.5f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).RemoveAssociation(p1, p2);
+    system.GetAssociationMatrix().AddAssociation(edge);
+    system.GetAssociationMatrix().RemoveAssociation(p1, p2);
 
     // Compact should not crash
     EXPECT_NO_THROW(system.Compact());
@@ -460,8 +460,8 @@ TEST(AssociationLearningSystemTest, GetAssociationsReturnsOutgoing) {
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.6f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     auto outgoing = system.GetAssociations(p1, true);
 
@@ -480,8 +480,8 @@ TEST(AssociationLearningSystemTest, GetAssociationsReturnsIncoming) {
     AssociationEdge edge1(p1, p3, AssociationType::CAUSAL, 0.8f);
     AssociationEdge edge2(p2, p3, AssociationType::CAUSAL, 0.6f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     auto incoming = system.GetAssociations(p3, false);
 
@@ -502,9 +502,9 @@ TEST(AssociationLearningSystemTest, PredictReturnsTopK) {
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.7f);
     AssociationEdge edge3(p1, p4, AssociationType::CAUSAL, 0.5f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge3);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge3);
 
     auto predictions = system.Predict(p1, 2);
 
@@ -525,8 +525,8 @@ TEST(AssociationLearningSystemTest, PredictWithConfidenceReturnsScores) {
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.9f);
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.5f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     auto predictions = system.PredictWithConfidence(p1, 2);
 
@@ -547,8 +547,8 @@ TEST(AssociationLearningSystemTest, PropagateActivationSpreadsThroughNetwork) {
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
     AssociationEdge edge2(p2, p3, AssociationType::CAUSAL, 0.7f);
 
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     auto results = system.PropagateActivation(p1, 1.0f, 3);
 
@@ -586,7 +586,7 @@ TEST(AssociationLearningSystemTest, StatisticsUpdateAfterOperations) {
 
     // Add association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.5f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     auto after_association = system.GetStatistics();
     EXPECT_GT(after_association.total_associations, initial_stats.total_associations);
@@ -616,7 +616,7 @@ TEST(AssociationLearningSystemTest, SaveAndLoadRoundTrip) {
 
     // Add association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     // Save
     std::string filepath = test::UniqueTempPath("test_learning_system") + ".bin";
@@ -719,7 +719,7 @@ TEST(AssociationLearningSystemTest, LargeScaleAssociations) {
     // Create associations between many patterns
     for (size_t i = 0; i < patterns.size() - 1; ++i) {
         AssociationEdge edge(patterns[i], patterns[i + 1], AssociationType::CAUSAL, 0.5f);
-        const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+        system.GetAssociationMatrix().AddAssociation(edge);
     }
 
     EXPECT_EQ(99u, system.GetAssociationCount());
@@ -788,7 +788,7 @@ TEST(AssociationLearningSystemTest, BackwardsCompatibleWithoutAttention) {
 
     // Create association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     // Predictions should work without attention
     auto predictions = system.Predict(p1, 5);
@@ -845,8 +845,8 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionFallbackWhenNoAttention)
     // Create associations
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.6f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     ContextVector context;
 
@@ -878,8 +878,8 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionUsesAttentionMechanism) 
     // Create associations with different strengths
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.9f);
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.3f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     // Set association strengths in mock
     mock_attention.SetAssociationStrength(p2, 0.9f);
@@ -920,7 +920,7 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionCombinesScoresCorrectly)
 
     // Create association
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     // Set association strength in mock
     mock_attention.SetAssociationStrength(p2, 0.8f);
@@ -954,8 +954,8 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionUsesContext) {
     // Create associations
     AssociationEdge edge1(p1, p2, AssociationType::CAUSAL, 0.8f);
     AssociationEdge edge2(p1, p3, AssociationType::CAUSAL, 0.6f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge1);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge2);
+    system.GetAssociationMatrix().AddAssociation(edge1);
+    system.GetAssociationMatrix().AddAssociation(edge2);
 
     // Set association strengths
     mock_attention.SetAssociationStrength(p2, 0.8f);
@@ -990,7 +990,7 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionReturnsRankedPredictions
     float strengths[] = {0.9f, 0.7f, 0.5f, 0.3f, 0.1f};
     for (size_t i = 0; i < targets.size(); ++i) {
         AssociationEdge edge(p1, targets[i], AssociationType::CAUSAL, strengths[i]);
-        const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+        system.GetAssociationMatrix().AddAssociation(edge);
         mock_attention.SetAssociationStrength(targets[i], strengths[i]);
     }
 
@@ -1037,7 +1037,7 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionConfigurableWeights) {
     PatternID p2 = CreateTestPattern();
 
     AssociationEdge edge(p1, p2, AssociationType::CAUSAL, 0.8f);
-    const_cast<AssociationMatrix&>(system.GetAssociationMatrix()).AddAssociation(edge);
+    system.GetAssociationMatrix().AddAssociation(edge);
 
     mock_attention.SetAssociationStrength(p2, 0.8f);
 
@@ -1080,7 +1080,7 @@ TEST(AssociationLearningSystemTest, PredictWithAttentionConfigurableWeights) {
 
 TEST(AssociationLearningSystemTest, MaintenanceAppliesCompetitionAndNormalization) {
     AssociationLearningSystem system;
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     PatternID a = CreateTestPattern();
     PatternID b = CreateTestPattern();
@@ -1098,7 +1098,7 @@ TEST(AssociationLearningSystemTest, MaintenanceAppliesCompetitionAndNormalizatio
 
 TEST(AssociationLearningSystemTest, StatisticsReportActualStrengths) {
     AssociationLearningSystem system;
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     PatternID a = CreateTestPattern();
     PatternID b = CreateTestPattern();
@@ -1116,7 +1116,7 @@ TEST(AssociationLearningSystemTest, StatisticsReportActualStrengths) {
 
 TEST(AssociationLearningSystemTest, ConcurrentReinforceAndPredict) {
     AssociationLearningSystem system;
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     std::vector<PatternID> patterns;
     for (int i = 0; i < 10; ++i) {
@@ -1196,7 +1196,7 @@ TEST(AssociationLearningSystemTest, ActivationContextIsLearnedByAssociations) {
     config.enable_auto_maintenance = false;
     config.reinforcement.learning_rate = 0.5f;
     AssociationLearningSystem system(config);
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     PatternID a = CreateTestPattern();
     PatternID b = CreateTestPattern();
@@ -1223,6 +1223,33 @@ TEST(AssociationLearningSystemTest, ActivationContextIsLearnedByAssociations) {
     ASSERT_EQ(1u, in_kitchen.size());
     ASSERT_EQ(1u, in_garage.size());
     EXPECT_GT(in_kitchen[0].second, in_garage[0].second);
+}
+
+TEST(AssociationLearningSystemTest, DirectAssociationEditing) {
+    AssociationLearningSystem system;
+    PatternID a = CreateTestPattern();
+    PatternID b = CreateTestPattern();
+
+    EXPECT_TRUE(system.AddAssociation(a, b, AssociationType::FUNCTIONAL, 0.4f));
+    EXPECT_FALSE(system.AddAssociation(a, b));  // Already exists
+    EXPECT_TRUE(system.AddAssociation(AssociationEdge(b, a, AssociationType::CAUSAL, 0.7f)));
+    EXPECT_EQ(2u, system.GetAssociationCount());
+
+    const auto* edge = system.GetAssociationMatrix().GetAssociation(a, b);
+    ASSERT_NE(nullptr, edge);
+    EXPECT_EQ(AssociationType::FUNCTIONAL, edge->GetType());
+    EXPECT_FLOAT_EQ(0.4f, edge->GetStrength());
+
+    EXPECT_TRUE(system.SetAssociationStrength(a, b, 0.9f));
+    EXPECT_FLOAT_EQ(0.9f, edge->GetStrength());
+    EXPECT_TRUE(system.SetAssociationStrength(a, b, 3.0f));  // Clamped
+    EXPECT_FLOAT_EQ(1.0f, edge->GetStrength());
+    EXPECT_FALSE(system.SetAssociationStrength(a, PatternID::Generate(), 0.5f));
+
+    EXPECT_EQ(b, system.Predict(a, 1)[0]);
+    EXPECT_TRUE(system.RemoveAssociation(a, b));
+    EXPECT_FALSE(system.RemoveAssociation(a, b));
+    EXPECT_TRUE(system.Predict(a, 1).empty());
 }
 
 } // namespace

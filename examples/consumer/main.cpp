@@ -56,7 +56,7 @@ int main() {
     // 3. Memory management over the same database and associations
     MemoryManager memory;
     memory.Initialize(&engine.GetDatabase(),
-                      const_cast<AssociationMatrix*>(&associations.GetAssociationMatrix()),
+                      &associations.GetAssociationMatrix(),
                       std::make_shared<CosineSimilarity>());
     memory.RecordPatternAccess(ids[0]);
     memory.PerformMaintenance();

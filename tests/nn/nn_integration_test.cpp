@@ -292,7 +292,7 @@ TEST_F(NeuralPredictionScorerTest, ReranksAssociationPredictions) {
     ASSERT_TRUE(have_good && have_bad);
 
     AssociationLearningSystem system;
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
     matrix.AddAssociation(AssociationEdge(source, bad, AssociationType::CAUSAL, 0.55f));
     matrix.AddAssociation(AssociationEdge(source, good, AssociationType::CAUSAL, 0.5f));
 
