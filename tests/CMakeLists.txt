@@ -21,6 +21,9 @@ if(DPAN_WITH_SQLITE)
 endif()
 add_subdirectory(nn)
 add_subdirectory(agent)
+if(TARGET dpan_c)
+    add_subdirectory(capi)
+endif()
 
 # Edge case tests
 add_executable(edge_case_tests edge_case_tests.cpp)

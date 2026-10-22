@@ -65,3 +65,7 @@ Thumbs.db
 *.db-wal
 *.db.associations
 *.db.mappings
+
+# Python
+__pycache__/
+*.pyc

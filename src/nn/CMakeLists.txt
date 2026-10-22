@@ -4,7 +4,7 @@
 # their integration with DPAN (learned encoders, similarity and prediction
 # scoring)
 
-add_library(dpan_nn
+add_library(dpan_nn STATIC
     matrix.cpp
     compute.cpp
     layers.cpp

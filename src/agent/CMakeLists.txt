@@ -3,13 +3,15 @@
 # Agent module: drop-in learner configured by an environment spec
 # (docs/AGENT_PLAN.md).
 
-add_library(dpan_agent
+add_library(dpan_agent STATIC
     environment.cpp
     encoders.cpp
     network.cpp
     pattern_memory.cpp
     replay_buffer.cpp
     agent.cpp
+    json.cpp
+    spec_json.cpp
 )
 
 target_include_directories(dpan_agent PUBLIC

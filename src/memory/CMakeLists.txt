@@ -2,7 +2,7 @@
 #
 # Memory module: Utility-based memory management
 
-add_library(dpan_memory
+add_library(dpan_memory STATIC
     utility_calculator.cpp
     adaptive_thresholds.cpp
     utility_tracker.cpp

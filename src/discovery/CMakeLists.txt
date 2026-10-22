@@ -1,7 +1,7 @@
 # File: src/discovery/CMakeLists.txt
 
 # Discovery library
-add_library(dpan_discovery
+add_library(dpan_discovery STATIC
     pattern_extractor.cpp
     pattern_matcher.cpp
     pattern_creator.cpp

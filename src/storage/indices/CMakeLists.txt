@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Indices library
-add_library(dpan_indices
+add_library(dpan_indices STATIC
     temporal_index.cpp
 )
 

@@ -181,7 +181,8 @@ integration test with a fixed seed and a fake clock.
 | 4. Robustness and self-tuning | Complete. Drift detection and recovery, trunk widening, rollback, memory budgets, metrics hook (results and notes below). |
 | 5. Full persistence | Complete. `Agent::Save` / `Agent::Load`: one versioned checkpoint; a loaded agent continues exactly as the saved one (results and notes below). |
 | 6. Images and speed | Complete. `Conv2D`, `MaxPool2D`, `Flatten` (`src/nn/convolution.hpp`), optional BLAS and multithreaded matrix products (`src/nn/compute.hpp`), convolutional image embeddings in the agent. Reference environment G passes (results and notes below). |
-| 7–8 | Not started |
+| 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
+| 8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -583,3 +584,68 @@ learning rate; their results are unchanged.
 - **Checkpoint.** Version 2: the configuration holds `max_image_size` and
   `image_embedding_size`, and embeddings are stored as layer sequences.
   Version 1 checkpoints are rejected.
+
+### Phase 7 results
+
+| Check | Result |
+|---|---|
+| A–F through the Python bindings (`python/tests/test_reference.py`; ctest `python.*`, labels `python` and `reference`) | All pass: A 0.9895 / 0.9950 / 0.9850; B ratio 1.139; C ratio 0.119; D 0.971; E 97 of 100; F solved at episode 716 (best average 195.26) |
+| C example (`examples/c_api/agent_c_example.c`, compiled as C99; ctest `agent_c_example`) | Runs: classification 1000 of the last 1000 correct; gridworld 20 of 20 greedy episodes on a shortest path after save and load |
+| C API tests (`tests/capi/c_api_test.cpp`, linked only to `dpan_c`) | 6 tests pass: status codes and messages, per-thread error message, builder and JSON observations give identical results, save/load gives identical actions and Q-values, images and vector targets |
+| Python API tests (`python/tests/test_api.py`) | 6 tests pass |
+| JSON tests (`tests/agent/json_test.cpp`) | 10 tests pass, including numbers under a decimal-comma C++ locale |
+| Installed package | A C program built with `find_package(DPAN)` and `dpan::c_api` (`examples/consumer/c_main.c`) links only `libdpan_c.so` and runs |
+| `libdpan_c.so` exports | The 29 `dpan_*` functions only (linker version script) |
+| GCC 13.3 build with `DPAN_BUILD_PYTHON=ON` | All 1,954 tests pass (the million-step test excluded) |
+| Clang 18.1 build with `DPAN_BUILD_PYTHON=ON` | All 1,954 tests pass (the million-step test excluded) |
+| `BUILD_SHARED_LIBS=ON` | Configures and builds (before this phase it stopped with a CMake dependency-cycle error); 1,934 tests pass (long, reference, robustness and performance labels excluded). `examples/consumer` built with `add_subdirectory` and `BUILD_SHARED_LIBS=ON` runs both programs. |
+| Warnings (`-Wall -Wextra -Wpedantic`, GCC and Clang) | None in the new sources, except one from pybind11's `PYBIND11_MODULE` macro under Clang `-Wpedantic` |
+| Windows, macOS | Not built or tested |
+
+The Python environments use NumPy's random generator, so their data differ
+from the C++ tests'. Run outside the test suite at three other seeds each
+(seed + 1, + 2, + 3): B ratios 1.047, 1.100, 1.133 (pass); E 100, 100, 100
+(pass); F solved at episode 528, then not solved within 1,000 episodes
+(best averages 187.6 and 158.0). F's sensitivity to the seed is the one
+recorded in Phase 6.
+
+### Phase 7 implementation notes
+
+- **Shared library.** The module libraries are static (core, storage,
+  similarity and discovery depend on each other, which CMake allows only
+  between static libraries); they are now declared `STATIC`, so a parent
+  project with `BUILD_SHARED_LIBS=ON` can still add DPAN. The shared library
+  is the C API, `dpan_c` (`DPAN_BUILD_C_API`, default ON, CMake target
+  `dpan::c_api`, versioned `libdpan_c.so.0.1`). It contains the agent and the
+  modules it uses; on ELF platforms a version script exports only `dpan_*`.
+  It does not depend on SQLite or zlib.
+- **C API** (`src/capi/dpan_c.h`). Opaque `dpan_agent` and
+  `dpan_observation` handles. The spec and configuration are JSON; an
+  observation is built with typed setters (number, vector, text, image) or
+  given as JSON; feedback as a number, vector, text or JSON value;
+  predictions and statistics are returned as JSON. `dpan_agent_act` returns
+  the action's name (owned by the agent) and index. Every function returns
+  a `dpan_status`; `dpan_last_error()` holds the message per thread. Strings
+  returned through `char**` are freed with `dpan_string_free`.
+  `dpan_clock_use_manual` / `dpan_clock_advance` / `dpan_clock_use_system`
+  control the process clock.
+- **JSON** (`src/agent/json.hpp`, `src/agent/spec_json.hpp`). A small parser
+  and writer (no dependency): duplicate members, unknown members and
+  unknown type names are errors that name their place (`inputs[2]: unknown
+  member "sizes"`); numbers are read and written in the classic locale.
+  Config fields are read by their C++ names, with type and range checks.
+- **Python** (`DPAN_BUILD_PYTHON`, default OFF). Package `dpan` with the
+  extension `dpan._core` (pybind11 2.13.6 from the system or fetched),
+  written to `<build>/python/dpan`; `DPAN_PYTHON_INSTALL_DIR` installs it.
+  `dpan.Agent(spec, config)` takes dicts or JSON text; observation values
+  are numbers, strings, sequences or NumPy arrays (1-D vector, 2-D or 3-D
+  image as height × width [× channels]), `None` for a missing channel.
+  `Prediction` has attributes; `stats()`, `spec` and `config` are dicts.
+  Errors: invalid spec, config or value → `ValueError` or `TypeError`;
+  unknown step → `IndexError`; wrong order (e.g. a reward before `act`) →
+  `RuntimeError`; `save` failure → `OSError`. The GIL is released while
+  the agent works. `use_manual_clock`, `advance_clock(seconds)`,
+  `use_system_clock` control the process clock.
+- **Tests.** `python.*` tests run with `python3 -m unittest` (no pytest);
+  the reference ones have the label `reference`, so `ctest -LE reference`
+  skips them as it skips the C++ ones.

@@ -45,3 +45,7 @@ gtest_discover_tests(agent_persistence_test PROPERTIES TIMEOUT 600)
 add_executable(agent_performance_test performance_test.cpp)
 target_link_libraries(agent_performance_test dpan_agent GTest::gtest_main)
 gtest_discover_tests(agent_performance_test PROPERTIES LABELS performance RUN_SERIAL TRUE)
+
+add_executable(agent_json_test json_test.cpp)
+target_link_libraries(agent_json_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_json_test)
