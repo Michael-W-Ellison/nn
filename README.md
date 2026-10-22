@@ -24,7 +24,7 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, 2-D convolution, max pooling, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
-| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. `Save`/`Load` write one checkpoint from which an agent continues exactly. |
+| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses discrete actions (Double DQN) and continuous actions (TD3). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. `Save`/`Load` write one checkpoint from which an agent continues exactly. |
 | `dpan::c_api` | C interface to the agent (`src/capi/dpan_c.h`): a shared library with an opaque handle; spec and configuration as JSON |
 | `dpan` (Python) | Python bindings to the agent (`python/`, pybind11, NumPy arrays as inputs) |
 | `dpan::dpan` | All C++ libraries above |
@@ -131,6 +131,20 @@ agent.Feedback(step, "reward", -0.04);
 agent.EndEpisode(true);                              // when the episode ends (true = terminal)
 ```
 
+Continuous actions (values within bounds) are learned with TD3:
+
+```cpp
+OutputSpec torque{"torque", OutputType::CONTINUOUS_ACTION};
+torque.size = 1;
+torque.low = {-2.0f};
+torque.high = {2.0f};
+spec.outputs = {torque};
+spec.feedback = {{"reward", FeedbackType::REWARD, "torque"}};
+...
+std::vector<float> u = agent.ActContinuous(step, "torque");   // ActContinuous(step, "torque", false): greedy
+agent.Feedback(step, "reward", reward);
+```
+
 Save and restore everything learned (a loaded agent continues exactly as
 the saved one would):
 
@@ -187,6 +201,11 @@ p = agent.predict(step, "kind")          # p.label, p.probabilities, p.confidenc
 agent.feedback(step, "label", "b")
 agent.save("agent.dpag"); restored = dpan.Agent.load("agent.dpag")
 ```
+
+Actions: `agent.act(step, output)` returns the name of a discrete action;
+`agent.act_continuous(step, output)` returns the values of a
+`continuous_action` output. In C: `dpan_agent_act` and
+`dpan_agent_act_continuous`.
 
 Values may be numbers, strings, sequences or NumPy arrays (1-D: vector;
 2-D or 3-D: image, height × width [× channels]); `None` marks a missing

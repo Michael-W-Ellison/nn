@@ -147,5 +147,33 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(agent.stats(), loaded.stats())
 
 
+    def test_continuous_actions(self):
+        agent = dpan.Agent({
+            "inputs": [{"name": "x", "type": "numeric", "size": 1}],
+            "feedback": [{"name": "reward", "type": "reward", "output": "arm"}],
+            "outputs": [{"name": "arm", "type": "continuous_action", "size": 2,
+                         "low": [-1, 10], "high": [1, 20]}],
+        })
+        self.assertEqual([-1, 10], agent.spec["outputs"][0]["low"])
+        for i in range(100):
+            step = agent.observe({"x": 0.5})
+            action = agent.act_continuous(step, "arm")
+            self.assertEqual(2, len(action))
+            self.assertTrue(-1 <= action[0] <= 1 and 10 <= action[1] <= 20)
+            self.assertEqual(action, agent.act_continuous(step, "arm"))
+            agent.feedback(step, "reward", -action[0] ** 2)
+            agent.end_episode(True)
+        step = agent.observe({"x": 0.5})
+        with self.assertRaises(ValueError):
+            agent.act(step, "arm")
+        with self.assertRaises(RuntimeError):  # reward before an action
+            agent.feedback(step, "reward", 1.0)
+        p = agent.predict(step, "arm")
+        self.assertEqual("continuous_action", p.type)
+        self.assertEqual(2, len(p.values))
+        self.assertEqual(p.values, agent.act_continuous(step, "arm", explore=False))
+        self.assertEqual("continuous_action", agent.stats()["outputs"][0]["type"])
+
+
 if __name__ == "__main__":
     unittest.main()

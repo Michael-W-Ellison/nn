@@ -1,5 +1,6 @@
 // File: src/agent/agent.cpp
 #include "agent/agent.hpp"
+#include "agent/actor_critic.hpp"
 
 #include "agent/agent_testing.hpp"
 #include "core/binary_io.hpp"
@@ -71,6 +72,14 @@ void CheckConfig(const AgentConfig& c) {
     require(c.exploration_start >= 0.0f && c.exploration_start <= 1.0f && c.exploration_end >= 0.0f &&
                 c.exploration_end <= c.exploration_start,
             "exploration rates must satisfy 0 <= exploration_end <= exploration_start <= 1");
+    require(c.continuous_hidden > 0, "continuous_hidden must be > 0");
+    require(c.continuous_actor_learning_rate > 0.0f && c.continuous_critic_learning_rate > 0.0f,
+            "continuous learning rates must be > 0");
+    require(c.continuous_exploration_noise >= 0.0f && c.continuous_target_noise >= 0.0f &&
+                c.continuous_noise_clip >= 0.0f,
+            "continuous noise settings must be >= 0");
+    require(c.continuous_policy_delay > 0, "continuous_policy_delay must be > 0");
+    require(c.continuous_tau > 0.0f && c.continuous_tau <= 1.0f, "continuous_tau must be in (0, 1]");
     ValidateEncoderConfig(c.encoder);
 }
 
@@ -127,7 +136,9 @@ float Percentile(const std::deque<float>& baseline, float x) {
 
 constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 2: image settings in the config; embeddings stored as layer sequences
-constexpr uint32_t kCheckpointVersion = 2;
+// 3: CONTINUOUS_ACTION outputs (bounds in the spec, TD3 settings, actor-critics,
+//    continuous actions in samples and pending steps)
+constexpr uint32_t kCheckpointVersion = 3;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -183,6 +194,8 @@ void SaveSpec(std::ostream& out, const EnvironmentSpec& spec) {
         io::Write<uint8_t>(out, static_cast<uint8_t>(o.type));
         WriteStrings(out, o.classes_or_actions);
         io::WriteSize(out, o.size);
+        WriteVector(out, o.low);
+        WriteVector(out, o.high);
     }
 }
 
@@ -207,9 +220,11 @@ EnvironmentSpec LoadSpec(std::istream& in) {
     spec.outputs.resize(io::ReadSize(in, 1u << 16));
     for (auto& o : spec.outputs) {
         o.name = io::ReadString(in, 1u << 16);
-        o.type = ReadEnum(in, OutputType::ANOMALY);
+        o.type = ReadEnum(in, OutputType::CONTINUOUS_ACTION);
         o.classes_or_actions = ReadStrings(in);
         o.size = io::ReadSize(in);
+        o.low = ReadVector<float>(in);
+        o.high = ReadVector<float>(in);
     }
     return spec;
 }
@@ -272,6 +287,15 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.encoder.max_image_size);
     io::WriteSize(out, c.encoder.image_embedding_size);
     io::WriteSize(out, c.encoder.max_tracked_categories);
+    io::WriteSize(out, c.continuous_hidden);
+    io::Write<float>(out, c.continuous_actor_learning_rate);
+    io::Write<float>(out, c.continuous_critic_learning_rate);
+    io::WriteSize(out, c.continuous_random_steps);
+    io::Write<float>(out, c.continuous_exploration_noise);
+    io::Write<float>(out, c.continuous_target_noise);
+    io::Write<float>(out, c.continuous_noise_clip);
+    io::WriteSize(out, c.continuous_policy_delay);
+    io::Write<float>(out, c.continuous_tau);
 }
 
 AgentConfig LoadConfig(std::istream& in) {
@@ -333,6 +357,15 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.max_image_size = io::ReadSize(in);
     c.encoder.image_embedding_size = io::ReadSize(in);
     c.encoder.max_tracked_categories = io::ReadSize(in);
+    c.continuous_hidden = io::ReadSize(in);
+    c.continuous_actor_learning_rate = io::Read<float>(in);
+    c.continuous_critic_learning_rate = io::Read<float>(in);
+    c.continuous_random_steps = io::ReadSize(in);
+    c.continuous_exploration_noise = io::Read<float>(in);
+    c.continuous_target_noise = io::Read<float>(in);
+    c.continuous_noise_clip = io::Read<float>(in);
+    c.continuous_policy_delay = io::ReadSize(in);
+    c.continuous_tau = io::Read<float>(in);
     return c;
 }
 
@@ -397,6 +430,7 @@ struct Agent::Impl {
         int head{-1};        // network head
         int class_slot{-1};  // index among CLASS outputs (pattern memory)
         int value_slot{-1};  // index among VALUE outputs
+        int continuous_slot{-1};  // index among CONTINUOUS_ACTION outputs (actor_critics)
         bool learn_classes{false};
         bool outcome_only{false};  // CLASS trained by OUTCOME feedback only
         std::vector<std::string> classes;  // class names, or action names for ACTION
@@ -439,6 +473,7 @@ struct Agent::Impl {
         SamplePtr sample;
         std::map<size_t, size_t> predicted;  // output -> class returned by Predict
         std::map<size_t, size_t> actions;    // output -> action chosen by Act
+        std::map<size_t, std::vector<float>> continuous_actions;  // output -> action chosen by ActContinuous
         bool transition_complete{false};     // next state or terminal known (ACTION)
         float anomaly{0.5f};
         float anomaly_neural_weight{0.0f};
@@ -489,6 +524,9 @@ struct Agent::Impl {
                     state.action_ids.push_back(PatternID::Generate());
                 }
                 has_actions = true;
+            } else if (state.spec->type == OutputType::CONTINUOUS_ACTION) {
+                state.continuous_slot = static_cast<int>(continuous_outputs.size());
+                continuous_outputs.push_back(i);
             }
             outputs.push_back(std::move(state));
         }
@@ -577,6 +615,20 @@ struct Agent::Impl {
             autoencoder = std::make_unique<AnomalyAutoencoder>(encoder.OutputSize(), config.learning_rate,
                                                                config.seed + 3);
         }
+        actor_critics.clear();
+        for (size_t index : continuous_outputs) {
+            ActorCriticConfig ac;
+            ac.hidden = config.continuous_hidden;
+            ac.actor_learning_rate = config.continuous_actor_learning_rate;
+            ac.critic_learning_rate = config.continuous_critic_learning_rate;
+            ac.tau = config.continuous_tau;
+            ac.target_noise = config.continuous_target_noise;
+            ac.noise_clip = config.continuous_noise_clip;
+            ac.policy_delay = config.continuous_policy_delay;
+            ac.seed = config.seed + 100 + static_cast<uint32_t>(actor_critics.size()) * 10;
+            actor_critics.push_back(
+                std::make_unique<ActorCritic>(encoder.OutputSize(), outputs[index].spec->size, ac));
+        }
         patterns = MakePatternMemory();
         AllocateMemory();
         TakeSnapshot();
@@ -610,7 +662,10 @@ struct Agent::Impl {
     size_t ModelBytes() const {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
         size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
-        return parameters * 4 * sizeof(float) * copies;
+        size_t bytes = parameters * 4 * sizeof(float) * copies;
+        // Actor-critics: live, target and snapshot copies
+        for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
+        return bytes;
     }
 
     /// Upper bound for one pending step, including its sample (which may
@@ -620,8 +675,12 @@ struct Agent::Impl {
         size_t fused = encoder.OutputSize();
         size_t heads = network ? network->HeadCount() : 0;
         size_t entry = sizeof(Pending) + 256 + (fused + config.pattern_dimension + observed_size) * sizeof(float);
+        size_t continuous = 0;
+        for (size_t index : continuous_outputs) {
+            continuous += sizeof(ContinuousTarget) + 64 + 3 * outputs[index].spec->size * sizeof(float);
+        }
         size_t sample = sizeof(Sample) + 32 + 2 * fused * (sizeof(uint32_t) + sizeof(float)) +
-                        heads * sizeof(HeadTarget) + (observed_size + 16) * sizeof(float);
+                        heads * sizeof(HeadTarget) + (observed_size + 16) * sizeof(float) + continuous;
         return entry + sample;
     }
 
@@ -635,6 +694,7 @@ struct Agent::Impl {
         };
         for (const auto& entry : pending) {
             bytes += sizeof(Pending) + 256 + (entry.fused.size() + entry.point.size() + entry.observed.size()) * sizeof(float);
+            for (const auto& [index, action] : entry.continuous_actions) bytes += 64 + action.size() * sizeof(float);
             add_sample(entry.sample);
         }
         for (const auto& sample : newest) add_sample(sample);
@@ -744,12 +804,17 @@ struct Agent::Impl {
     // -------------------------------------------------------------- safety
 
     bool ModelsFinite() {
+        for (auto& ac : actor_critics) {
+            if (!ac->AllFinite()) return false;
+        }
         return (!network || network->AllFinite()) && (!autoencoder || autoencoder->AllFinite());
     }
 
     void TakeSnapshot() {
         if (network) snapshot_network = std::make_unique<AgentNetwork>(*network);
         if (autoencoder) snapshot_autoencoder = std::make_unique<AnomalyAutoencoder>(*autoencoder);
+        snapshot_actor_critics.clear();
+        for (const auto& ac : actor_critics) snapshot_actor_critics.push_back(std::make_unique<ActorCritic>(*ac));
         last_snapshot = steps;
     }
 
@@ -759,6 +824,9 @@ struct Agent::Impl {
             if (target_network) target_network = std::make_unique<AgentNetwork>(*snapshot_network);
         }
         if (snapshot_autoencoder) autoencoder = std::make_unique<AnomalyAutoencoder>(*snapshot_autoencoder);
+        for (size_t i = 0; i < snapshot_actor_critics.size() && i < actor_critics.size(); ++i) {
+            actor_critics[i] = std::make_unique<ActorCritic>(*snapshot_actor_critics[i]);
+        }
         std::fill(head_loss.begin(), head_loss.end(), kNaN);
         ApplyLearningRate();
         rollbacks++;
@@ -1040,14 +1108,76 @@ struct Agent::Impl {
         return out.classes[action];
     }
 
+    // ------------------------------------------------- continuous actions
+
+    /// Bound of dimension i of a CONTINUOUS_ACTION output ([-1, 1] by default)
+    static float Low(const OutputSpec& spec, size_t i) { return spec.low.empty() ? -1.0f : spec.low[i]; }
+    static float High(const OutputSpec& spec, size_t i) { return spec.high.empty() ? 1.0f : spec.high[i]; }
+
+    /// [-1, 1] -> the output's bounds
+    static std::vector<float> ToBounds(const OutputSpec& spec, const float* normalized) {
+        std::vector<float> action(spec.size);
+        for (size_t i = 0; i < spec.size; ++i) {
+            action[i] = Low(spec, i) + (normalized[i] + 1.0f) * 0.5f * (High(spec, i) - Low(spec, i));
+        }
+        return action;
+    }
+
+    /// Exploration noise std now (1 during the uniform random start)
+    float ContinuousExploration(const OutputState& out) const {
+        return out.acts < config.continuous_random_steps ? 1.0f : config.continuous_exploration_noise;
+    }
+
+    std::vector<float> ActContinuousLocked(StepId step, size_t index, bool explore) {
+        Pending& entry = FindPending(step);
+        OutputState& out = outputs[index];
+        auto existing = entry.continuous_actions.find(index);
+        if (existing != entry.continuous_actions.end()) return existing->second;
+
+        const size_t n = out.spec->size;
+        std::vector<float> normalized(n);
+        std::uniform_real_distribution<float> uniform(-1.0f, 1.0f);
+        bool random = !entry.encoded || (explore && out.acts < config.continuous_random_steps);
+        if (explore) out.acts++;
+        if (random) {
+            for (auto& a : normalized) a = uniform(rng);
+        } else {
+            const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
+            nn::Matrix greedy = ac.Act(Row(entry.fused));
+            std::normal_distribution<float> noise(0.0f, config.continuous_exploration_noise);
+            for (size_t i = 0; i < n; ++i) {
+                float a = greedy(0, i);
+                if (explore && config.continuous_exploration_noise > 0.0f) a += noise(rng);
+                normalized[i] = std::clamp(a, -1.0f, 1.0f);
+            }
+        }
+        std::vector<float> action = ToBounds(*out.spec, normalized.data());
+        entry.continuous_actions[index] = action;
+        if (entry.encoded) {
+            entry.sample->continuous[static_cast<size_t>(out.continuous_slot)].action = std::move(normalized);
+            last_acted_step = step;
+        }
+        return action;
+    }
+
+    static bool HasActions(const Pending& entry) {
+        return !entry.actions.empty() || !entry.continuous_actions.empty();
+    }
+
     /// A transition becomes trainable once its next state or its end is known
     void CompleteTransition(Pending& entry) {
-        if (entry.actions.empty() || !entry.encoded) return;
+        if (!HasActions(entry) || !entry.encoded) return;
         if (!entry.transition_complete) {
             entry.transition_complete = true;
             for (const auto& [index, action] : entry.actions) outputs[index].samples++;
+            for (const auto& [index, action] : entry.continuous_actions) outputs[index].samples++;
         }
         MakeTrainable(entry.sample);
+    }
+
+    void LearnContinuousReward(Pending& entry, OutputState& out, float reward) {
+        entry.sample->continuous[static_cast<size_t>(out.continuous_slot)].reward += reward;
+        if (entry.transition_complete) MakeTrainable(entry.sample);
     }
 
     void LearnReward(Pending& entry, OutputState& out, size_t index, float reward) {
@@ -1117,6 +1247,17 @@ struct Agent::Impl {
                 prediction.confidence = std::min(1.0f, static_cast<float>(pattern_baseline.size()) /
                                                            static_cast<float>(config.anomaly_baseline));
                 break;
+            case OutputType::CONTINUOUS_ACTION: {
+                const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
+                nn::Matrix state = Row(entry.fused);
+                nn::Matrix greedy = ac.Act(state);
+                prediction.available = true;
+                prediction.values = ToBounds(*out.spec, greedy.Data());
+                prediction.score = ac.Value(state, greedy)[0];
+                prediction.confidence = 1.0f - std::min(1.0f, ContinuousExploration(out));
+                prediction.neural_weight = ac.Updates() > 0 ? 1.0f : 0.0f;
+                break;
+            }
             case OutputType::ACTION: {
                 size_t greedy = GreedyAction(entry, out, nullptr);
                 float epsilon = Exploration(out);
@@ -1246,6 +1387,11 @@ struct Agent::Impl {
             throw std::logic_error("Feedback '" + name + "' for step " + std::to_string(step) +
                                    ": no action of output '" + out.spec->name + "' was chosen for it (call Act first)");
         }
+        if (out.spec->type == OutputType::CONTINUOUS_ACTION && entry.continuous_actions.count(fb->second.output) == 0) {
+            throw std::logic_error("Feedback '" + name + "' for step " + std::to_string(step) +
+                                   ": no action of output '" + out.spec->name +
+                                   "' was chosen for it (call ActContinuous first)");
+        }
 
         if (!entry.encoded) {
             ignored_feedback++;
@@ -1255,6 +1401,10 @@ struct Agent::Impl {
 
         if (out.spec->type == OutputType::ACTION) {
             LearnReward(entry, out, fb->second.output, type == FeedbackType::OUTCOME ? (correct ? 1.0f : -1.0f) : reward);
+            return;
+        }
+        if (out.spec->type == OutputType::CONTINUOUS_ACTION) {
+            LearnContinuousReward(entry, out, type == FeedbackType::OUTCOME ? (correct ? 1.0f : -1.0f) : reward);
             return;
         }
 
@@ -1332,6 +1482,7 @@ struct Agent::Impl {
             entry.sample->step = step;
             entry.sample->SetFused(entry.fused);
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
+            entry.sample->continuous.resize(actor_critics.size());
 
             if (has_anomaly) {
                 entry.sample->reconstruct = true;
@@ -1344,7 +1495,7 @@ struct Agent::Impl {
                 if (previous && previous->encoded) {
                     patterns->RecordTransition(previous->pattern, entry.pattern);
                     if (next_output >= 0) LearnNext(*previous, entry.observed);
-                    if (!previous->actions.empty()) {
+                    if (HasActions(*previous)) {
                         previous->sample->SetNext(*entry.sample);
                         previous->sample->next_sample = entry.sample;
                         CompleteTransition(*previous);
@@ -1491,8 +1642,39 @@ struct Agent::Impl {
         }
     }
 
+    /// One TD3 update for a CONTINUOUS_ACTION output from the batch's
+    /// complete transitions; returns the critic loss (NaN if none)
+    float TrainContinuous(size_t slot, const std::vector<SamplePtr>& batch) {
+        const size_t width = encoder.OutputSize();
+        const size_t n = outputs[continuous_outputs[slot]].spec->size;
+        std::vector<const Sample*> rows;
+        for (const auto& sample : batch) {
+            if (!sample->continuous[slot].action.empty() && (sample->has_next || sample->terminal)) {
+                rows.push_back(sample.get());
+            }
+        }
+        if (rows.empty()) return kNaN;
+        ActorCritic::Batch b{nn::Matrix(rows.size(), width), nn::Matrix(rows.size(), n),
+                             std::vector<float>(rows.size()), nn::Matrix(rows.size(), width),
+                             std::vector<float>(rows.size())};
+        for (size_t r = 0; r < rows.size(); ++r) {
+            const Sample& sample = *rows[r];
+            sample.Fill(b.states.Data() + r * width, width);
+            std::copy(sample.continuous[slot].action.begin(), sample.continuous[slot].action.end(),
+                      b.actions.Data() + r * n);
+            b.rewards[r] = sample.continuous[slot].reward;
+            if (sample.terminal) {
+                b.discounts[r] = 0.0f;
+            } else {
+                sample.FillNext(b.next_states.Data() + r * width, width);
+                b.discounts[r] = config.discount;
+            }
+        }
+        return actor_critics[slot]->Train(b, rng).critic;
+    }
+
     void Train() {
-        if (replay.Size() == 0 || (!network && !autoencoder)) return;
+        if (replay.Size() == 0 || (!network && !autoencoder && actor_critics.empty())) return;
 
         // New samples: not yet trained ones, and while recovering from a
         // drift also random recent ones, up to the share; the rest replay
@@ -1580,6 +1762,14 @@ struct Agent::Impl {
             }
         }
 
+        for (size_t slot = 0; slot < actor_critics.size(); ++slot) {
+            // Q-learning targets move with the critics, so the loss is not
+            // compared with divergence_loss (rewards set its scale); only
+            // non-finite values roll back
+            float loss = TrainContinuous(slot, batch);
+            diverged = diverged || std::isinf(loss);
+        }
+
         training_steps++;
         if (diverged || !ModelsFinite()) {
             Rollback();
@@ -1645,6 +1835,10 @@ struct Agent::Impl {
                 io::Write<uint8_t>(out, a ? 1 : 0);
                 if (a) a->Serialize(out);
             }
+            for (const auto* list : {&actor_critics, &snapshot_actor_critics}) {
+                io::WriteSize(out, list->size());
+                for (const auto& ac : *list) ac->Serialize(out);
+            }
             patterns->SaveState(out);
         }
 
@@ -1682,6 +1876,11 @@ struct Agent::Impl {
             io::Write<uint64_t>(out, id_of(entry.sample.get()));
             SaveIndexMap(out, entry.predicted);
             SaveIndexMap(out, entry.actions);
+            io::WriteSize(out, entry.continuous_actions.size());
+            for (const auto& [index, action] : entry.continuous_actions) {
+                io::WriteSize(out, index);
+                WriteVector(out, action);
+            }
             io::Write<uint8_t>(out, entry.transition_complete ? 1 : 0);
             io::Write<float>(out, entry.anomaly);
             io::Write<float>(out, entry.anomaly_neural_weight);
@@ -1747,6 +1946,20 @@ struct Agent::Impl {
             for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
                 *a = io::Read<uint8_t>(in) ? AnomalyAutoencoder::Deserialize(in) : nullptr;
             }
+            for (auto* list : {&actor_critics, &snapshot_actor_critics}) {
+                list->resize(io::ReadSize(in, 1u << 16));
+                for (auto& ac : *list) ac = ActorCritic::Deserialize(in);
+            }
+            if (actor_critics.size() != continuous_outputs.size() ||
+                snapshot_actor_critics.size() != continuous_outputs.size()) {
+                throw std::runtime_error("Agent checkpoint: actor-critics do not match the spec");
+            }
+            for (size_t slot = 0; slot < actor_critics.size(); ++slot) {
+                if (actor_critics[slot]->StateSize() != encoder.OutputSize() ||
+                    actor_critics[slot]->ActionSize() != outputs[continuous_outputs[slot]].spec->size) {
+                    throw std::runtime_error("Agent checkpoint: actor-critic sizes do not match the spec");
+                }
+            }
             if (network && network->HeadCount() != heads.size()) {
                 throw std::runtime_error("Agent checkpoint: network heads do not match the spec");
             }
@@ -1792,6 +2005,11 @@ struct Agent::Impl {
             entry.sample = lookup(io::Read<uint64_t>(in));
             entry.predicted = LoadIndexMap(in);
             entry.actions = LoadIndexMap(in);
+            size_t continuous_count = io::ReadSize(in, 1u << 16);
+            for (size_t c = 0; c < continuous_count; ++c) {
+                size_t index = io::ReadSize(in, 1u << 16);
+                entry.continuous_actions[index] = ReadVector<float>(in);
+            }
             entry.transition_complete = io::Read<uint8_t>(in) != 0;
             entry.anomaly = io::Read<float>(in);
             entry.anomaly_neural_weight = io::Read<float>(in);
@@ -1860,6 +2078,11 @@ struct Agent::Impl {
             } else if (out.spec->type == OutputType::ACTION) {
                 o.neural_weight = out.samples >= m.config.cold_start_samples ? 1.0f : 0.0f;
                 o.exploration = m.Exploration(out);
+            } else if (out.spec->type == OutputType::CONTINUOUS_ACTION) {
+                bool trained = !m.actor_critics.empty() &&
+                               m.actor_critics[static_cast<size_t>(out.continuous_slot)]->Updates() > 0;
+                o.neural_weight = trained ? 1.0f : 0.0f;
+                o.exploration = m.ContinuousExploration(out);
             } else if (m.network && out.head >= 0) {
                 o.neural_weight = m.BlendWeight(out, out.samples > 0,
                                                 out.Pattern(out.spec->type == OutputType::CLASS).Measured(),
@@ -1881,6 +2104,9 @@ struct Agent::Impl {
     std::vector<size_t> value_sizes;
     int next_output{-1};
     bool has_anomaly{false};
+    std::vector<size_t> continuous_outputs;  // output index of each CONTINUOUS_ACTION output
+    std::vector<std::unique_ptr<ActorCritic>> actor_critics;           // one per CONTINUOUS_ACTION output
+    std::vector<std::unique_ptr<ActorCritic>> snapshot_actor_critics;  // last healthy copies
 
     std::vector<size_t> observed_channels;
     std::vector<size_t> observed_offsets;
@@ -1957,8 +2183,9 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         }
     }
     CheckConfig(config);
-    bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(),
-                                   [](const OutputSpec& output) { return output.type == OutputType::ACTION; });
+    bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(), [](const OutputSpec& output) {
+        return output.type == OutputType::ACTION || output.type == OutputType::CONTINUOUS_ACTION;
+    });
     if (has_actions) {
         config.train_every = config.action_train_every;
         config.learning_rate = config.action_learning_rate;
@@ -2003,6 +2230,7 @@ bool AgentTestAccess::InjectNaN(Agent& agent) {
     std::vector<nn::Parameter> parameters;
     if (m.network) parameters = m.network->AllParameters();
     else if (m.autoencoder) parameters = m.autoencoder->Parameters();
+    else if (!m.actor_critics.empty()) parameters = m.actor_critics.front()->ActorParameters();
     if (parameters.empty()) return false;
     parameters.front().value->Data()[0] = std::numeric_limits<float>::quiet_NaN();
     return true;
@@ -2027,10 +2255,26 @@ std::string Agent::Act(StepId step, const std::string& action_output, bool explo
     std::lock_guard<std::mutex> lock(impl_->mutex);
     for (size_t i = 0; i < impl_->outputs.size(); ++i) {
         if (impl_->outputs[i].spec->name != action_output) continue;
+        if (impl_->outputs[i].spec->type == OutputType::CONTINUOUS_ACTION) {
+            throw std::invalid_argument("Output '" + action_output +
+                                        "' is a CONTINUOUS_ACTION output; use ActContinuous");
+        }
         if (impl_->outputs[i].spec->type != OutputType::ACTION) {
             throw std::invalid_argument("Output '" + action_output + "' is not an ACTION output");
         }
         return impl_->ActLocked(step, i, explore);
+    }
+    throw std::invalid_argument("Unknown output '" + action_output + "'");
+}
+
+std::vector<float> Agent::ActContinuous(StepId step, const std::string& action_output, bool explore) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for (size_t i = 0; i < impl_->outputs.size(); ++i) {
+        if (impl_->outputs[i].spec->name != action_output) continue;
+        if (impl_->outputs[i].spec->type != OutputType::CONTINUOUS_ACTION) {
+            throw std::invalid_argument("Output '" + action_output + "' is not a CONTINUOUS_ACTION output");
+        }
+        return impl_->ActContinuousLocked(step, i, explore);
     }
     throw std::invalid_argument("Unknown output '" + action_output + "'");
 }

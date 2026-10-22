@@ -207,6 +207,44 @@ TEST_F(CApiTest, ImagesAndVectorFeedback) {
     dpan_agent_free(agent);
 }
 
+TEST_F(CApiTest, ContinuousActions) {
+    const char* spec = R"({
+      "inputs": [{"name": "x", "type": "numeric", "size": 1}],
+      "feedback": [{"name": "reward", "type": "reward", "output": "arm"},
+                   {"name": "bonus", "type": "reward", "output": "move"}],
+      "outputs": [{"name": "arm", "type": "continuous_action", "size": 2, "low": [-1, 10], "high": [1, 20]},
+                  {"name": "move", "type": "action", "actions": ["a", "b"]}]})";
+    dpan_agent* agent = nullptr;
+    ASSERT_EQ(DPAN_OK, dpan_agent_create(spec, nullptr, &agent)) << dpan_last_error();
+    dpan_step step = 0;
+    float values[2] = {0.0f, 0.0f};
+    size_t count = 0;
+    for (int i = 0; i < 100; ++i) {
+        ASSERT_EQ(DPAN_OK, dpan_agent_observe_json(agent, R"({"x": 0.5})", &step));
+        ASSERT_EQ(DPAN_OK, dpan_agent_act_continuous(agent, step, "arm", 1, values, 2, &count));
+        ASSERT_EQ(2u, count);
+        ASSERT_GE(values[0], -1.0f);
+        ASSERT_LE(values[0], 1.0f);
+        ASSERT_GE(values[1], 10.0f);
+        ASSERT_LE(values[1], 20.0f);
+        ASSERT_EQ(DPAN_OK, dpan_agent_feedback_number(agent, step, "reward", -values[0] * values[0]));
+        ASSERT_EQ(DPAN_OK, dpan_agent_end_episode(agent, 1));
+    }
+    ASSERT_EQ(DPAN_OK, dpan_agent_observe_json(agent, R"({"x": 0.5})", &step));
+    float small[1];
+    EXPECT_EQ(DPAN_INVALID_ARGUMENT, dpan_agent_act_continuous(agent, step, "arm", 1, small, 1, &count));
+    EXPECT_NE(std::string::npos, std::string(dpan_last_error()).find("room for 2"));
+    EXPECT_EQ(DPAN_LOGIC_ERROR, dpan_agent_feedback_number(agent, step, "reward", 1.0));  // nothing chosen
+    EXPECT_EQ(DPAN_INVALID_ARGUMENT, dpan_agent_act_continuous(agent, step, "move", 1, values, 2, &count));
+    const char* move = nullptr;
+    EXPECT_EQ(DPAN_INVALID_ARGUMENT, dpan_agent_act(agent, step, "arm", 1, &move, nullptr));
+    ASSERT_EQ(DPAN_OK, dpan_agent_act_continuous(agent, step, "arm", 0, values, 2, nullptr));
+    char* prediction = nullptr;
+    ASSERT_EQ(DPAN_OK, dpan_agent_predict_json(agent, step, "arm", &prediction));
+    EXPECT_NE(std::string::npos, Take(prediction).find(R"("type":"continuous_action")"));
+    dpan_agent_free(agent);
+}
+
 TEST_F(CApiTest, Version) { EXPECT_STRNE("", dpan_version()); }
 
 }  // namespace

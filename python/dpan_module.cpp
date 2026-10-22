@@ -107,8 +107,10 @@ PYBIND11_MODULE(_core, m) {
         .def_readonly("classes", &Prediction::classes)
         .def_readonly("probabilities", &Prediction::probabilities)
         .def_readonly("values", &Prediction::values,
-                      "VALUE: predictions. ACTION: Q-values. NEXT_OBSERVATION: next numeric input values")
-        .def_readonly("score", &Prediction::score, "ANOMALY: percentile among recent observations (0-1)")
+                      "VALUE: predictions. ACTION: Q-values. NEXT_OBSERVATION: next numeric input values. "
+                      "CONTINUOUS_ACTION: greedy action")
+        .def_readonly("score", &Prediction::score,
+                      "ANOMALY: percentile among recent observations (0-1). CONTINUOUS_ACTION: critic value")
         .def_readonly("confidence", &Prediction::confidence)
         .def_readonly("neural_weight", &Prediction::neural_weight)
         .def("to_dict", [](const Prediction& p) { return FromJsonText(dpan::agent::PredictionToJson(p)); })
@@ -145,6 +147,14 @@ PYBIND11_MODULE(_core, m) {
                 return agent.Act(step, output, explore);
             },
             "step"_a, "output"_a, "explore"_a = true, "Choose an action of an ACTION output; returns its name")
+        .def(
+            "act_continuous",
+            [](Agent& agent, StepId step, const std::string& output, bool explore) {
+                py::gil_scoped_release release;
+                return agent.ActContinuous(step, output, explore);
+            },
+            "step"_a, "output"_a, "explore"_a = true,
+            "Choose the action of a CONTINUOUS_ACTION output; returns its values (list) within the bounds")
         .def(
             "feedback",
             [](Agent& agent, StepId step, const std::string& feedback, const py::object& value) {

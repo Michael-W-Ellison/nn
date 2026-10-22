@@ -71,7 +71,8 @@ public:
     Matrix Forward(const Matrix& input, bool training = true);
 
     /// Backpropagate dLoss/dOutput through all layers, accumulating gradients
-    void Backward(const Matrix& grad_output);
+    /// @return dLoss/dInput
+    Matrix Backward(const Matrix& grad_output);
 
     void ZeroGradients();
 

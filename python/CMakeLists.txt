@@ -42,7 +42,7 @@ if(DPAN_INSTALL)
     endif()
 endif()
 
-# Reference environments A-F and API tests through the bindings
+# Reference environments A-F and I and API tests through the bindings
 if(DPAN_BUILD_TESTS)
     set(DPAN_PYTHON_TESTS
         test_api
@@ -52,6 +52,7 @@ if(DPAN_BUILD_TESTS)
         test_reference.ReferenceTest.test_d_anomaly_detection
         test_reference.ReferenceTest.test_e_gridworld
         test_reference.ReferenceTest.test_f_cart_pole
+        test_reference.ReferenceTest.test_i_pendulum_swing_up
     )
     foreach(test IN LISTS DPAN_PYTHON_TESTS)
         string(REGEX REPLACE ".*\\.test_" "" short "${test}")

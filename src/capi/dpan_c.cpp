@@ -5,6 +5,7 @@
 #include "agent/spec_json.hpp"
 #include "core/clock.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -176,6 +177,25 @@ dpan_status dpan_agent_act(dpan_agent* agent, dpan_step step, const char* output
             }
         }
         throw std::logic_error("action '" + chosen + "' is not in the spec");
+    });
+}
+
+dpan_status dpan_agent_act_continuous(dpan_agent* agent, dpan_step step, const char* output, int explore,
+                                      float* values, size_t capacity, size_t* count) {
+    return Guard([&] {
+        Require(agent, "agent");
+        Require(output, "output");
+        for (const auto& spec : agent->agent.Spec().outputs) {
+            if (spec.name != output || spec.type != dpan::agent::OutputType::CONTINUOUS_ACTION) continue;
+            if (!values || capacity < spec.size) {
+                throw std::invalid_argument("output '" + spec.name + "' needs room for " + std::to_string(spec.size) +
+                                            " values");
+            }
+        }
+        // Unknown or non-continuous outputs are reported by ActContinuous
+        std::vector<float> action = agent->agent.ActContinuous(step, output, explore != 0);
+        std::copy(action.begin(), action.end(), values);
+        if (count) *count = action.size();
     });
 }
 

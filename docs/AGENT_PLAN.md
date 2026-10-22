@@ -24,14 +24,15 @@ namespace dpan::agent {
 
 enum class InputType    { NUMERIC, CATEGORICAL, TEXT, IMAGE, TIME_SERIES };
 enum class FeedbackType { LABEL, TARGET, REWARD, OUTCOME };
-enum class OutputType   { CLASS, VALUE, ACTION, NEXT_OBSERVATION, ANOMALY };
+enum class OutputType   { CLASS, VALUE, ACTION, NEXT_OBSERVATION, ANOMALY, CONTINUOUS_ACTION };
 
 struct InputSpec    { std::string name; InputType type; size_t size = 0;            // 0 = infer from data
                       std::vector<std::string> categories;                          // empty = open vocabulary
                       size_t width = 0, height = 0, image_channels = 1; };
 struct FeedbackSpec { std::string name; FeedbackType type; std::string output; };    // which output it trains
 struct OutputSpec   { std::string name; OutputType type;
-                      std::vector<std::string> classes_or_actions; size_t size = 1; };
+                      std::vector<std::string> classes_or_actions; size_t size = 1;
+                      std::vector<float> low, high; };                              // CONTINUOUS_ACTION bounds
 
 struct EnvironmentSpec { std::vector<InputSpec> inputs; std::vector<FeedbackSpec> feedback;
                          std::vector<OutputSpec> outputs; };
@@ -44,6 +45,7 @@ public:
     StepId Observe(const std::map<std::string, Value>& observation);                 // missing channels allowed
     Prediction Predict(StepId step, const std::string& output) const;                // value + confidence
     std::string Act(StepId step, const std::string& action_output);                  // discrete action
+    std::vector<float> ActContinuous(StepId step, const std::string& action_output); // continuous action
     void Feedback(StepId step, const std::string& feedback, const Value& value);    // may arrive later
     void EndEpisode();
     bool Save(const std::string& path) const;  static Agent Load(const std::string& path);
@@ -89,6 +91,7 @@ loss.
 | LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent accuracy |
 | TARGET → VALUE | Regression head, MSE loss | Average of the k nearest patterns' targets | Same weighting, by recent error |
 | REWARD → ACTION | Double DQN: Q-value head (Huber loss), target network synced every 500 training steps, 3-step returns cut at exploratory actions, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties and choose during the cold start |
+| REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.1 of the half-range) | — | The actor's action, scaled to the bounds |
 | OUTCOME (correct/incorrect) | A correct outcome counts as the label for the earlier prediction; an incorrect one is a negative example for the predicted class | `Reinforce(correct)` on associations; the neural prediction scorer is trained on outcomes | As above |
 | No feedback → NEXT_OBSERVATION | Head predicting the next fused state, MSE loss | Association sequence prediction | Neural head, with an association fallback |
 | No feedback → ANOMALY | Autoencoder reconstruction error | Distance to the nearest stored pattern | Score converted to a percentile against a running baseline |
@@ -160,6 +163,7 @@ integration test with a fixed seed and a fake clock.
 | F | Cart-pole (simulator included in the tests) | numeric → REWARD → ACTION | Average reward ≥ 195 over 100 episodes, reached within 1,000 episodes |
 | G | Small images (synthetic shapes, up to 64×64) | IMAGE and categorical → LABEL → CLASS | Accuracy ≥ 95% |
 | H | Mixed: text and numeric inputs, label and outcome feedback | combination | Accuracy ≥ 85% |
+| I | Pendulum swing-up (Pendulum-v1 dynamics, simulator included in the tests) | numeric → REWARD → CONTINUOUS_ACTION | Mean return of 20 greedy episodes ≥ −200 after 200 training episodes |
 
 ## 7. Known limits
 
@@ -182,7 +186,7 @@ integration test with a fixed seed and a fake clock.
 | 5. Full persistence | Complete. `Agent::Save` / `Agent::Load`: one versioned checkpoint; a loaded agent continues exactly as the saved one (results and notes below). |
 | 6. Images and speed | Complete. `Conv2D`, `MaxPool2D`, `Flatten` (`src/nn/convolution.hpp`), optional BLAS and multithreaded matrix products (`src/nn/compute.hpp`), convolutional image embeddings in the agent. Reference environment G passes (results and notes below). |
 | 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
-| 8 | Not started |
+| 8. Continuous actions | Complete. `CONTINUOUS_ACTION` outputs with bounds (`OutputSpec::low` / `high`), learned with TD3 (`src/agent/actor_critic.hpp`); `Agent::ActContinuous`, `dpan_agent_act_continuous`, Python `act_continuous`. Reference environment I passes (results and notes below). |
 
 ### Phase 1 implementation notes
 
@@ -649,3 +653,70 @@ recorded in Phase 6.
 - **Tests.** `python.*` tests run with `python3 -m unittest` (no pytest);
   the reference ones have the label `reference`, so `ctest -LE reference`
   skips them as it skips the C++ ones.
+
+### Phase 8 results
+
+| Check | Result |
+|---|---|
+| I: pendulum swing-up (`tests/agent/reference_environments_test.cpp`, seed 81) | Mean return of 20 greedy episodes −111.3 (threshold −200); last 20 training episodes −176.3; 44,000 steps, about 50 s |
+| I in the BLAS build | −110.5 |
+| I through the Python bindings (`python.i_pendulum_swing_up`, NumPy data) | −153.9 |
+| A–G | The same results as before this phase, in the default and the BLAS build |
+| TD3 unit tests (`tests/agent/actor_critic_test.cpp`) | One-step task: the actor is within 0.15 of the best action, and its action is in the top 5% of the critic's values; bootstrapping through the target critics; save/load and copies continue identically; delayed actor updates |
+| Agent tests (`tests/agent/continuous_test.cpp`) | Spec validation and JSON, bounds, repeated `ActContinuous` calls, wrong calls rejected, a one-step task learned within 0.6 (action range 0–10), rollback of non-finite weights |
+| Persistence (`PersistenceTest.ContinuousActionLearnerContinuesExactlyMidEpisode`) | Saved mid-episode, after the random start: identical over 1,500 further steps. Leaving out the restored pending actions, or changing the restored update counter, makes it fail. |
+| C API (`CApiTest.ContinuousActions`), Python API (`test_continuous_actions`) | Pass |
+| GCC and Clang builds | All 1,968 tests pass (the million-step test excluded) |
+| BLAS build | 1,958 of 1,960 pass before a fix to the TD3 unit test, which then passes. The other failure, `CliBenchmark.DetailedPrediction_Overhead` (a timing benchmark this phase did not change), passed 3 of 3 times when run alone. |
+
+I at other seeds (outside the test suite): C++ seeds 1–16 give −147.1,
+−144.1, −154.1, −156.7, −131.5, −171.1, −181.5, −157.1, **−210.6**, −131.7,
+−129.9, −134.1, −136.7, −159.9, −168.9, −154.1 (15 of 16 pass); through
+Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
+
+### Phase 8 implementation notes
+
+- **Spec.** `OutputType::CONTINUOUS_ACTION` with `size` values and bounds
+  `low` / `high` (both empty = [−1, 1]); trained by REWARD or OUTCOME (±1)
+  feedback. JSON: `{"type": "continuous_action", "size": n, "low": [...],
+  "high": [...]}`.
+- **Learner** (`src/agent/actor_critic.hpp`). TD3 on the fused state: actor
+  (2 × 64 ReLU, tanh output) and two critics (2 × 64 ReLU on [state,
+  action]), each with a target copy; one critic update per training step
+  (mean squared error toward reward + discount × min of the target critics
+  at the smoothed target action, noise std 0.2 clipped to 0.5); every 2nd
+  step the actor follows the first critic's gradient and the targets move
+  by τ = 0.005. Adam, learning rate 1e-3 for both; no gradient clipping.
+  Actions are in [−1, 1] inside and scaled to the bounds outside. One-step
+  returns (the discrete learner's multi-step returns are not used).
+- **Acting.** `Agent::ActContinuous(step, output, explore)`: uniform random
+  actions for the first `continuous_random_steps` (1,000) exploring calls,
+  then the actor's action plus Gaussian noise (std
+  `continuous_exploration_noise` = 0.1 of the half-range), clipped to the
+  bounds; without explore, the actor's action. Calling it again for the
+  same step returns the same action. `Act` on such an output (and
+  `ActContinuous` on an ACTION output) throws `std::invalid_argument`.
+- **Prediction.** `values` is the greedy action, `score` the first critic's
+  value of it, `confidence` 1 − the exploration noise (0 during the random
+  start). `Stats().outputs[i].exploration` is the noise std (1 during the
+  random start). The pattern memory has no part in continuous actions.
+- **Settings.** `continuous_hidden`, `continuous_actor_learning_rate`,
+  `continuous_critic_learning_rate`, `continuous_random_steps`,
+  `continuous_exploration_noise`, `continuous_target_noise`,
+  `continuous_noise_clip`, `continuous_policy_delay`, `continuous_tau`;
+  `discount`, `batch_size` and the action settings (`action_train_every`:
+  training every observation) are shared with discrete actions.
+- **Safety and memory.** The actor-critics are in the snapshots and the
+  rollback; non-finite weights or losses roll back. Their loss is not
+  compared with `divergence_loss`, because its scale follows the rewards
+  (pendulum Q-values reach about −1,600). Their parameters count toward the
+  memory budget (live, target and snapshot copies).
+- **Checkpoint.** Version 3: bounds in the spec, the TD3 settings, the
+  actor-critics with their optimizer state and update counters, the actions
+  in samples and pending steps. Version 2 checkpoints are rejected.
+- **APIs.** C: `dpan_agent_act_continuous(agent, step, output, explore,
+  values, capacity, count)`; it checks `capacity` before choosing. Python:
+  `agent.act_continuous(step, output, explore=True)` returns a list.
+- **Supporting change.** `nn::Sequential::Backward` returns the gradient
+  with respect to its input (the actor update needs it through the critic).
+

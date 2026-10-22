@@ -11,6 +11,7 @@ add_library(dpan_agent STATIC
     replay_buffer.cpp
     agent.cpp
     json.cpp
+    actor_critic.cpp
     spec_json.cpp
 )
 

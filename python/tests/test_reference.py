@@ -1,5 +1,5 @@
-"""Reference environments A-F (docs/AGENT_PLAN.md, section 6) through the
-Python bindings.
+"""Reference environments A-F and I (docs/AGENT_PLAN.md, section 6) through
+the Python bindings.
 
 The environments and pass criteria are those of
 tests/agent/reference_environments_test.cpp. The data comes from NumPy's
@@ -260,6 +260,45 @@ class ReferenceTest(unittest.TestCase):
                   else "not solved in 1000 episodes")
         print(f"F: {result} (best 100-episode average {best:.2f}, {agent.stats()['steps']} steps)")
         self.assertGreater(solved_at, 0)
+
+
+    # ------------------------------------------------------------------
+    # I: pendulum swing-up (Pendulum-v1): angle theta (0 = upright), speed
+    # limited to +-8, torque in [-2, 2], steps of 0.05 s. Input (cos theta,
+    # sin theta, speed); reward -(theta^2 + 0.1 speed^2 + 0.001 torque^2).
+    # Episodes start at a uniform angle and a speed in [-1, 1] and are cut
+    # off after 200 steps. 200 training episodes, then 20 greedy episodes.
+    # Pass: their mean return >= -200.
+    def test_i_pendulum_swing_up(self):
+        agent = dpan.Agent({
+            "inputs": [{"name": "state", "type": "numeric", "size": 3}],
+            "feedback": [{"name": "reward", "type": "reward", "output": "torque"}],
+            "outputs": [{"name": "torque", "type": "continuous_action", "size": 1,
+                         "low": [-2], "high": [2]}],
+        })
+        rng = np.random.default_rng(81)
+
+        def episode(explore):
+            theta, speed = rng.uniform(-math.pi, math.pi), rng.uniform(-1.0, 1.0)
+            total = 0.0
+            for _ in range(200):
+                step = agent.observe({"state": [math.cos(theta), math.sin(theta), speed]})
+                torque = min(2.0, max(-2.0, agent.act_continuous(step, "torque", explore)[0]))
+                angle = math.remainder(theta, 2 * math.pi)
+                reward = -(angle ** 2 + 0.1 * speed ** 2 + 0.001 * torque ** 2)
+                speed = min(8.0, max(-8.0, speed + (15.0 * math.sin(theta) + 3.0 * torque) * 0.05))
+                theta += speed * 0.05
+                agent.feedback(step, "reward", reward)
+                total += reward
+                dpan.advance_clock(1)
+            agent.end_episode(False)  # time limit: not terminal
+            return total
+
+        for _ in range(200):
+            episode(True)
+        greedy = sum(episode(False) for _ in range(20)) / 20
+        print(f"I: mean return of 20 greedy episodes {greedy:.1f} ({agent.stats()['steps']} steps)")
+        self.assertGreaterEqual(greedy, -200.0)
 
 
 def _cart_pole_step(state, push_right):

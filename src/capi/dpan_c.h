@@ -103,6 +103,14 @@ DPAN_C_API dpan_status dpan_agent_predict_json(const dpan_agent* agent, dpan_ste
 DPAN_C_API dpan_status dpan_agent_act(dpan_agent* agent, dpan_step step, const char* output, int explore,
                                       const char** action, size_t* index);
 
+/* Chooses the action of a CONTINUOUS_ACTION output (explore: nonzero =
+ * random start, then added noise). Writes the output's `size` values,
+ * within its bounds, to values[0 .. size-1] and size to *count (if not
+ * NULL). Fails with DPAN_INVALID_ARGUMENT, choosing nothing, if capacity is
+ * smaller than size. */
+DPAN_C_API dpan_status dpan_agent_act_continuous(dpan_agent* agent, dpan_step step, const char* output, int explore,
+                                                 float* values, size_t capacity, size_t* count);
+
 /* Feedback for a step: a number (label index, target, reward, outcome), a
  * vector (target of several values), a text (class name) or a JSON value */
 DPAN_C_API dpan_status dpan_agent_feedback_number(dpan_agent* agent, dpan_step step, const char* feedback,

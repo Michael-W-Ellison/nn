@@ -21,7 +21,8 @@
 // step is the next state; EndEpisode(true) marks the last action terminal.
 // The network learns Q-values (Double DQN); state -> action associations
 // reinforced by reward sign break ties and choose actions during the cold
-// start.
+// start. ActContinuous() chooses the action of a CONTINUOUS_ACTION output
+// (values within bounds); a TD3 actor-critic on the fused state learns it.
 //
 // Save/Load write and read one versioned checkpoint of everything learned.
 //
@@ -76,6 +77,19 @@ struct AgentConfig {
     float exploration_start{1.0f};       ///< Probability of a random action at first...
     float exploration_end{0.05f};        ///< ...falling linearly to this
     size_t exploration_steps{10000};     ///< ...over this many exploring Act calls per output
+
+    // Continuous actions (TD3). The actor and two critics read the fused
+    // state; actions are scaled to [-1, 1] inside, to each output's bounds
+    // outside. Uses discount, batch_size and action_train_every.
+    size_t continuous_hidden{64};                 ///< Units per hidden layer (actor and critics)
+    float continuous_actor_learning_rate{1e-3f};
+    float continuous_critic_learning_rate{1e-3f};
+    size_t continuous_random_steps{1000};         ///< First exploring ActContinuous calls: uniform random actions
+    float continuous_exploration_noise{0.1f};     ///< Then Gaussian noise of this std (fraction of the half-range)
+    float continuous_target_noise{0.2f};          ///< Target policy smoothing noise (fraction of the half-range)
+    float continuous_noise_clip{0.5f};
+    size_t continuous_policy_delay{2};            ///< Critic updates per actor update
+    float continuous_tau{0.005f};                 ///< Rate at which target networks follow the live ones
 
     // Concept drift (section 4, rule 5): a Page-Hinkley test on each
     // output's prequential network loss (ANOMALY: reconstruction error;
@@ -179,7 +193,8 @@ struct OutputStats {
     float neural_quality{0.0f};
     float pattern_quality{0.0f};
     float neural_weight{0.0f};  ///< Current blend weight of the neural side
-    float exploration{0.0f};    ///< ACTION: current probability of a random action
+    float exploration{0.0f};    ///< ACTION: current probability of a random action.
+                                ///< CONTINUOUS_ACTION: noise std (fraction of the half-range; 1 = uniform random)
     uint32_t drift_events{0};
     bool recovering{false};     ///< Recovering from a detected drift
 };
@@ -241,12 +256,22 @@ public:
     /// @throws std::out_of_range if the step is unknown or has expired
     std::string Act(StepId step, const std::string& action_output, bool explore = true);
 
+    /// Choose the action of a CONTINUOUS_ACTION output for an open step:
+    /// `size` values within the output's bounds. With explore, uniform
+    /// random actions for the first continuous_random_steps exploring calls,
+    /// then the actor's action plus Gaussian noise; otherwise the actor's
+    /// action. Calling it again for the same step and output returns the
+    /// action already chosen.
+    /// @throws std::invalid_argument for an unknown output or one that is not CONTINUOUS_ACTION
+    /// @throws std::out_of_range if the step is unknown or has expired
+    std::vector<float> ActContinuous(StepId step, const std::string& action_output, bool explore = true);
+
     /// Feedback for an open step:
     ///   LABEL    class name (string) or index of a declared class (number)
     ///   TARGET   number or vector of the output's size
-    ///   REWARD   number: reward for the action Act chose at that step
-    ///            (rewards for one step add up)
-    ///   OUTCOME  ACTION outputs: reward +1 (nonzero) or -1 (zero).
+    ///   REWARD   number: reward for the action Act (or ActContinuous) chose
+    ///            at that step (rewards for one step add up)
+    ///   OUTCOME  ACTION and CONTINUOUS_ACTION outputs: reward +1 (nonzero) or -1 (zero).
     ///            CLASS outputs: number: nonzero = the prediction for that step was correct.
     ///            Refers to the class last returned by Predict for the step
     ///            (or the current prediction if Predict was not called).
@@ -254,8 +279,9 @@ public:
     ///            classes; it predicts from the first step.
     /// @throws std::invalid_argument for an unknown feedback name or bad value
     /// @throws std::out_of_range if the step is unknown or has expired
-    /// @throws std::logic_error for REWARD/OUTCOME on an ACTION output when
-    ///         Act was not called for the step
+    /// @throws std::logic_error for REWARD/OUTCOME on an ACTION (or
+    ///         CONTINUOUS_ACTION) output when Act (ActContinuous) was not
+    ///         called for the step
     void Feedback(StepId step, const std::string& feedback, const Value& value);
 
     /// End the current episode: clears time-series windows and sequence

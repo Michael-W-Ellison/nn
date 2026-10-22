@@ -79,6 +79,18 @@ std::vector<std::string> GetStrings(const Json& object, const char* key, const s
     return out;
 }
 
+std::vector<float> GetNumbers(const Json& object, const char* key, const std::string& where) {
+    std::vector<float> out;
+    const Json* value = object.Find(key);
+    if (!value) return out;
+    if (!value->IsArray()) Fail(where, std::string("\"") + key + "\" must be an array of numbers");
+    for (const Json& item : value->AsArray()) {
+        if (!item.IsNumber()) Fail(where, std::string("\"") + key + "\" must be an array of numbers");
+        out.push_back(static_cast<float>(item.AsNumber()));
+    }
+    return out;
+}
+
 template <typename Enum, size_t N>
 Enum ParseEnum(const std::string& name, const Enum (&values)[N], const std::string& where) {
     std::string wanted = Upper(name);
@@ -95,7 +107,8 @@ constexpr InputType kInputTypes[] = {InputType::NUMERIC, InputType::CATEGORICAL,
 constexpr FeedbackType kFeedbackTypes[] = {FeedbackType::LABEL, FeedbackType::TARGET, FeedbackType::REWARD,
                                            FeedbackType::OUTCOME};
 constexpr OutputType kOutputTypes[] = {OutputType::CLASS, OutputType::VALUE, OutputType::ACTION,
-                                       OutputType::NEXT_OBSERVATION, OutputType::ANOMALY};
+                                       OutputType::NEXT_OBSERVATION, OutputType::ANOMALY,
+                                       OutputType::CONTINUOUS_ACTION};
 
 const Json::Array& GetList(const Json& root, const char* key) {
     static const Json::Array kEmpty;
@@ -177,6 +190,15 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, exploration_start),
         DPAN_FIELD(AgentConfig, exploration_end),
         DPAN_FIELD(AgentConfig, exploration_steps),
+        DPAN_FIELD(AgentConfig, continuous_hidden),
+        DPAN_FIELD(AgentConfig, continuous_actor_learning_rate),
+        DPAN_FIELD(AgentConfig, continuous_critic_learning_rate),
+        DPAN_FIELD(AgentConfig, continuous_random_steps),
+        DPAN_FIELD(AgentConfig, continuous_exploration_noise),
+        DPAN_FIELD(AgentConfig, continuous_target_noise),
+        DPAN_FIELD(AgentConfig, continuous_noise_clip),
+        DPAN_FIELD(AgentConfig, continuous_policy_delay),
+        DPAN_FIELD(AgentConfig, continuous_tau),
         DPAN_FIELD(AgentConfig, detect_drift),
         DPAN_FIELD(AgentConfig, drift_delta),
         DPAN_FIELD(AgentConfig, drift_threshold),
@@ -294,13 +316,15 @@ EnvironmentSpec SpecFromJson(const std::string& text) {
     for (size_t i = 0; i < outputs.size(); ++i) {
         std::string where = "outputs[" + std::to_string(i) + "]";
         const Json& item = outputs[i];
-        CheckMembers(item, where, {"name", "type", "classes", "actions", "size"});
+        CheckMembers(item, where, {"name", "type", "classes", "actions", "size", "low", "high"});
         OutputSpec output;
         output.name = GetString(item, "name", where, true);
         output.type = ParseEnum(GetString(item, "type", where, true), kOutputTypes, where);
         if (item.Find("classes") && item.Find("actions")) Fail(where, "give \"classes\" or \"actions\", not both");
         output.classes_or_actions = GetStrings(item, item.Find("actions") ? "actions" : "classes", where);
         output.size = GetSize(item, "size", where, 1);
+        output.low = GetNumbers(item, "low", where);
+        output.high = GetNumbers(item, "high", where);
         spec.outputs.push_back(std::move(output));
     }
     return spec;
@@ -338,6 +362,11 @@ std::string SpecToJson(const EnvironmentSpec& spec) {
         if (output.type == OutputType::ACTION) item.Set("actions", Strings(output.classes_or_actions));
         if (output.type == OutputType::CLASS) item.Set("classes", Strings(output.classes_or_actions));
         if (output.type == OutputType::VALUE) item.Set("size", output.size);
+        if (output.type == OutputType::CONTINUOUS_ACTION) {
+            item.Set("size", output.size);
+            item.Set("low", Numbers(output.low));
+            item.Set("high", Numbers(output.high));
+        }
         outputs.Push(std::move(item));
     }
     return root.Dump();

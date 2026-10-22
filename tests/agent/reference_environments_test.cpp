@@ -513,6 +513,90 @@ TEST_F(ReferenceTest, G_SmallImages) {
     EXPECT_GE(accuracy, 0.95);
 }
 
+// ============================================================================
+// I: pendulum swing-up (continuous action)
+// ============================================================================
+//
+// The Pendulum-v1 task: angle theta (0 = upright), speed limited to +-8,
+// gravity 10, mass 1, length 1, steps of 0.05 s, torque in [-2, 2]. Input:
+// (cos theta, sin theta, speed). Reward -(theta^2 + 0.1 speed^2 + 0.001
+// torque^2), theta normalized to [-pi, pi]. Episodes start at a uniform
+// angle and a speed in [-1, 1] and are cut off after 200 steps (not
+// terminal). 200 training episodes with exploration, then 20 episodes with
+// the greedy action. Pass: their mean return >= -200.
+
+class Pendulum {
+public:
+    explicit Pendulum(uint32_t seed) : rng_(seed) {}
+
+    void Reset() {
+        theta_ = std::uniform_real_distribution<double>(-kPi, kPi)(rng_);
+        speed_ = std::uniform_real_distribution<double>(-1.0, 1.0)(rng_);
+    }
+
+    std::vector<float> State() const {
+        return {static_cast<float>(std::cos(theta_)), static_cast<float>(std::sin(theta_)),
+                static_cast<float>(speed_)};
+    }
+
+    /// Applies the torque; returns the reward
+    double Step(double torque) {
+        const double gravity = 10.0, mass = 1.0, length = 1.0, dt = 0.05;
+        torque = std::clamp(torque, -2.0, 2.0);
+        double angle = std::remainder(theta_, 2.0 * kPi);
+        double cost = angle * angle + 0.1 * speed_ * speed_ + 0.001 * torque * torque;
+        speed_ += (3.0 * gravity / (2.0 * length) * std::sin(theta_) + 3.0 / (mass * length * length) * torque) * dt;
+        speed_ = std::clamp(speed_, -8.0, 8.0);
+        theta_ += speed_ * dt;
+        return -cost;
+    }
+
+private:
+    std::mt19937 rng_;
+    double theta_{0.0};
+    double speed_{0.0};
+};
+
+TEST_F(ReferenceTest, I_PendulumSwingUp) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"state", InputType::NUMERIC, 3}};
+    OutputSpec torque;
+    torque.name = "torque";
+    torque.type = OutputType::CONTINUOUS_ACTION;
+    torque.size = 1;
+    torque.low = {-2.0f};
+    torque.high = {2.0f};
+    spec.outputs = {torque};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "torque"}};
+    Agent agent(spec);
+
+    Pendulum pendulum(81);
+    auto run_episode = [&](bool explore) {
+        pendulum.Reset();
+        double total = 0.0;
+        for (int t = 0; t < 200; ++t) {
+            StepId step = agent.Observe({{"state", pendulum.State()}});
+            double reward = pendulum.Step(agent.ActContinuous(step, "torque", explore)[0]);
+            agent.Feedback(step, "reward", reward);
+            total += reward;
+            Tick();
+        }
+        agent.EndEpisode(false);  // time limit: not terminal
+        return total;
+    };
+
+    double last_training = 0.0;
+    for (int episode = 0; episode < 200; ++episode) {
+        double total = run_episode(true);
+        if (episode >= 180) last_training += total / 20.0;
+    }
+    double greedy = 0.0;
+    for (int episode = 0; episode < 20; ++episode) greedy += run_episode(false) / 20.0;
+    std::cout << "I: mean return of 20 greedy episodes " << greedy << " (last 20 training episodes "
+              << last_training << ", " << agent.Stats().steps << " steps)\n";
+    EXPECT_GE(greedy, -200.0);
+}
+
 }  // namespace
 }  // namespace agent
 }  // namespace dpan

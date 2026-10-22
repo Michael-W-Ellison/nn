@@ -20,6 +20,12 @@
 namespace dpan {
 namespace agent {
 
+/// What one sample teaches one CONTINUOUS_ACTION output (TD3)
+struct ContinuousTarget {
+    std::vector<float> action;  ///< In [-1, 1]; empty = no action chosen
+    float reward{0.0f};
+};
+
 struct Sample {
     uint64_t step{0};
 
@@ -30,6 +36,9 @@ struct Sample {
     /// One entry per network head (raw units for regressors; the agent
     /// standardizes them when it trains)
     std::vector<HeadTarget> targets;
+
+    /// One entry per CONTINUOUS_ACTION output
+    std::vector<ContinuousTarget> continuous;
 
     /// Trains the anomaly autoencoder
     bool reconstruct{false};

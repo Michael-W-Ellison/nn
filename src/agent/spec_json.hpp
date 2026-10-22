@@ -14,7 +14,8 @@
 //                 {"name": "move", "type": "action", "actions": ["left", "right"]},
 //                 {"name": "y", "type": "value", "size": 1},
 //                 {"name": "next", "type": "next_observation"},
-//                 {"name": "unusual", "type": "anomaly"}]}
+//                 {"name": "unusual", "type": "anomaly"},
+//                 {"name": "torque", "type": "continuous_action", "size": 1, "low": [-2], "high": [2]}]}
 // Type names are case-insensitive. Members other than "name" and "type" are
 // optional (defaults as in environment.hpp). Unknown members are errors.
 //

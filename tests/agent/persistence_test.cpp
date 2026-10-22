@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -298,6 +299,77 @@ TEST(PersistenceTest, ReinforcementLearnerContinuesExactlyMidEpisode) {
     Trace a, b;
     RunGrid(original, grid, 3000, a);
     RunGrid(restored, grid_copy, 3000, b);
+    ExpectIdentical(a, b);
+}
+
+// ============================================================================
+// Continuous actions (TD3)
+// ============================================================================
+
+/// Pendulum swing-up (as in reference environment I)
+struct Pendulum {
+    std::mt19937 rng{91};
+    double theta{0.0}, speed{0.0};
+    int t{0};
+
+    void Reset() {
+        theta = std::uniform_real_distribution<double>(-3.14159265358979, 3.14159265358979)(rng);
+        speed = std::uniform_real_distribution<double>(-1.0, 1.0)(rng);
+        t = 0;
+    }
+    std::vector<float> State() const {
+        return {static_cast<float>(std::cos(theta)), static_cast<float>(std::sin(theta)), static_cast<float>(speed)};
+    }
+    double Step(double torque) {
+        double angle = std::remainder(theta, 2 * 3.14159265358979);
+        double cost = angle * angle + 0.1 * speed * speed + 0.001 * torque * torque;
+        speed = std::clamp(speed + (15.0 * std::sin(theta) + 3.0 * torque) * 0.05, -8.0, 8.0);
+        theta += speed * 0.05;
+        ++t;
+        return -cost;
+    }
+};
+
+void RunPendulum(Agent& agent, Pendulum& pendulum, int count, Trace& trace) {
+    for (int i = 0; i < count; ++i) {
+        StepId step = agent.Observe({{"state", pendulum.State()}});
+        auto torque = agent.ActContinuous(step, "torque", pendulum.t % 50 != 7);
+        for (float v : torque) trace.Add(v);
+        trace.Add(agent.Predict(step, "torque"));
+        agent.Feedback(step, "reward", pendulum.Step(torque[0]));
+        if (pendulum.t == 200) {
+            agent.EndEpisode(false);
+            pendulum.Reset();
+        }
+    }
+    trace.Add(agent.Stats());
+}
+
+TEST(PersistenceTest, ContinuousActionLearnerContinuesExactlyMidEpisode) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"state", InputType::NUMERIC, 3}};
+    OutputSpec torque;
+    torque.name = "torque";
+    torque.type = OutputType::CONTINUOUS_ACTION;
+    torque.low = {-2.0f};
+    torque.high = {2.0f};
+    spec.outputs = {torque};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "torque"}};
+    AgentConfig config;
+    config.continuous_random_steps = 500;
+    config.snapshot_interval = 700;  // snapshots on both sides of the save
+    Agent original(spec, config);
+    Pendulum pendulum;
+    pendulum.Reset();
+    Trace before;
+    RunPendulum(original, pendulum, 1333, before);
+    ASSERT_GT(pendulum.t, 0) << "test should save in the middle of an episode";
+
+    Agent restored = Copy(original);
+    Pendulum pendulum_copy = pendulum;
+    Trace a, b;
+    RunPendulum(original, pendulum, 1500, a);
+    RunPendulum(restored, pendulum_copy, 1500, b);
     ExpectIdentical(a, b);
 }
 

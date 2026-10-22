@@ -50,6 +50,8 @@ size_t Sample::MemoryBytes() const {
     bytes += (values.size() + next_values.size()) * sizeof(float);
     bytes += targets.size() * sizeof(HeadTarget);
     for (const auto& target : targets) bytes += target.values.size() * sizeof(float);
+    bytes += continuous.size() * sizeof(ContinuousTarget);
+    for (const auto& target : continuous) bytes += target.action.size() * sizeof(float);
     return bytes;
 }
 
@@ -83,6 +85,11 @@ void Sample::Save(std::ostream& out) const {
         io::Write<float>(out, t.reward);
         io::Write<uint8_t>(out, t.exploratory ? 1 : 0);
     }
+    io::WriteSize(out, continuous.size());
+    for (const auto& t : continuous) {
+        WriteVector(out, t.action);
+        io::Write<float>(out, t.reward);
+    }
     io::Write<uint8_t>(out, reconstruct ? 1 : 0);
     WriteVector(out, next_indices);
     WriteVector(out, next_values);
@@ -105,6 +112,11 @@ std::shared_ptr<Sample> Sample::Load(std::istream& in) {
         t.action = io::Read<int32_t>(in);
         t.reward = io::Read<float>(in);
         t.exploratory = io::Read<uint8_t>(in) != 0;
+    }
+    sample->continuous.resize(io::ReadSize(in, 1u << 16));
+    for (auto& t : sample->continuous) {
+        t.action = ReadVector<float>(in);
+        t.reward = io::Read<float>(in);
     }
     sample->reconstruct = io::Read<uint8_t>(in) != 0;
     sample->next_indices = ReadVector<uint32_t>(in);
