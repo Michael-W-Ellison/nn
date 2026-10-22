@@ -5,7 +5,9 @@
 
 #include "core/pattern_engine.hpp"
 #include "storage/memory_backend.hpp"
+#ifdef DPAN_HAS_SQLITE
 #include "storage/persistent_backend.hpp"
+#endif
 #include "similarity/contextual_similarity.hpp"
 #include "similarity/geometric_similarity.hpp"
 #include "similarity/statistical_similarity.hpp"
@@ -308,6 +310,7 @@ TEST(IntegrationTest, MemoryBackendFullWorkflow) {
     EXPECT_EQ(stats.composite_patterns, 0u);
 }
 
+#ifdef DPAN_HAS_SQLITE
 TEST(IntegrationTest, PersistentBackendFullWorkflow) {
     std::string db_path = test::UniqueTempPath("dpan_integration_persistent_test") + ".db";
 
@@ -352,6 +355,12 @@ TEST(IntegrationTest, PersistentBackendFullWorkflow) {
         std::filesystem::remove(db_path);
     }
 }
+#else
+TEST(IntegrationTest, PersistentBackendUnavailableWithoutSqlite) {
+    auto config = CreateTestEngineConfig("persistent");
+    EXPECT_THROW(PatternEngine engine(config), std::invalid_argument);
+}
+#endif
 
 // ============================================================================
 // Similarity Metric Integration Tests

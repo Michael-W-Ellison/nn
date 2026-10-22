@@ -396,6 +396,158 @@ TEST(NNOptimizerTest, RejectsInvalidHyperparametersAndMismatchedParameters) {
     EXPECT_NO_THROW(adam.Step(b.Parameters()));
 }
 
+// ============================================================================
+// Optimizer state, gradient clipping, learning-rate schedules
+// ============================================================================
+
+template <typename OptimizerType>
+void ExpectResumeIsExact(OptimizerType first_optimizer, OptimizerType fresh_optimizer) {
+    Matrix x = RandomMatrix(16, 3, 70);
+    Matrix y = RandomMatrix(16, 2, 71);
+    MeanSquaredError mse;
+
+    Sequential model;
+    model.Emplace<Dense>(3, 4, Initialization::XAVIER, 1).Emplace<Tanh>().Emplace<Dense>(4, 2, Initialization::XAVIER, 2);
+    for (int i = 0; i < 5; ++i) {
+        model.TrainBatch(x, y, mse, first_optimizer);
+    }
+
+    // Snapshot model and optimizer mid-training
+    std::stringstream model_state, optimizer_state;
+    model.Serialize(model_state);
+    first_optimizer.SaveState(optimizer_state);
+
+    // Continue the original
+    for (int i = 0; i < 5; ++i) {
+        model.TrainBatch(x, y, mse, first_optimizer);
+    }
+
+    // Resume from the snapshot with a differently configured optimizer
+    Sequential resumed = Sequential::Deserialize(model_state);
+    fresh_optimizer.LoadState(optimizer_state);
+    for (int i = 0; i < 5; ++i) {
+        resumed.TrainBatch(x, y, mse, fresh_optimizer);
+    }
+
+    ExpectMatrixNear(model.Predict(x), resumed.Predict(x), 0.0f);
+    EXPECT_EQ(first_optimizer.LearningRate(), fresh_optimizer.LearningRate());
+}
+
+TEST(NNOptimizerTest, AdamResumesExactlyFromSavedState) {
+    ExpectResumeIsExact(Adam(0.01f, 0.8f, 0.99f), Adam(0.5f));
+}
+
+TEST(NNOptimizerTest, SgdResumesExactlyFromSavedState) {
+    ExpectResumeIsExact(SGD(0.05f, 0.9f, 0.001f), SGD(0.5f));
+}
+
+TEST(NNOptimizerTest, LoadStateRejectsOtherOptimizerType) {
+    std::stringstream state;
+    SGD(0.1f).SaveState(state);
+    Adam adam;
+    EXPECT_THROW(adam.LoadState(state), std::runtime_error);
+
+    std::stringstream truncated(std::string("\x04\0\0\0\0\0\0\0Adam", 12));
+    EXPECT_THROW(adam.LoadState(truncated), std::runtime_error);
+}
+
+TEST(NNOptimizerTest, ClipGradientNormScalesToLimit) {
+    Sequential model;
+    model.Emplace<Dense>(2, 2, Initialization::XAVIER, 1);
+    auto params = model.Parameters();
+    params[0].gradient->Fill(3.0f);  // 4 values
+    params[1].gradient->Fill(4.0f);  // 2 values: norm = sqrt(4*9 + 2*16) = sqrt(68)
+
+    EXPECT_NEAR(std::sqrt(68.0f), GradientNorm(params), 1e-5f);
+    EXPECT_NEAR(std::sqrt(68.0f), ClipGradientNorm(params, 2.0f), 1e-5f);
+    EXPECT_NEAR(2.0f, GradientNorm(params), 1e-5f);
+    // Direction is preserved
+    EXPECT_NEAR(3.0f / 4.0f, (*params[0].gradient)(0, 0) / (*params[1].gradient)(0, 0), 1e-5f);
+
+    // Below the limit, or disabled: unchanged
+    ClipGradientNorm(params, 10.0f);
+    EXPECT_NEAR(2.0f, GradientNorm(params), 1e-5f);
+    ClipGradientNorm(params, 0.0f);
+    EXPECT_NEAR(2.0f, GradientNorm(params), 1e-5f);
+}
+
+TEST(NNOptimizerTest, ClippingKeepsAggressiveTrainingFinite) {
+    Matrix x = RandomMatrix(32, 4, 80, 10.0f);
+    Matrix y = RandomMatrix(32, 1, 81, 100.0f);
+
+    auto final_loss = [&](float clip) {
+        Sequential model;
+        model.Emplace<Dense>(4, 8, Initialization::XAVIER, 1).Emplace<Dense>(8, 1, Initialization::XAVIER, 2);
+        SGD sgd(0.05f);
+        Sequential::FitOptions options;
+        options.epochs = 30;
+        options.batch_size = 8;
+        options.gradient_clip_norm = clip;
+        return model.Fit(x, y, MeanSquaredError(), sgd, options).train_loss.back();
+    };
+
+    EXPECT_FALSE(std::isfinite(final_loss(0.0f)));  // Diverges without clipping
+    EXPECT_TRUE(std::isfinite(final_loss(1.0f)));
+}
+
+TEST(NNScheduleTest, ScheduleFormulas) {
+    StepDecay step(10, 0.5f);
+    EXPECT_FLOAT_EQ(1.0f, step.NextRate(9, 1.0f, 1.0f, 0.0f));
+    EXPECT_FLOAT_EQ(0.5f, step.NextRate(10, 1.0f, 1.0f, 0.0f));
+    EXPECT_FLOAT_EQ(0.25f, step.NextRate(25, 1.0f, 1.0f, 0.0f));
+
+    ExponentialDecay exponential(0.9f);
+    EXPECT_NEAR(0.81f, exponential.NextRate(2, 1.0f, 1.0f, 0.0f), 1e-6f);
+
+    CosineAnnealing cosine(100, 0.1f);
+    EXPECT_NEAR(1.0f, cosine.NextRate(0, 1.0f, 1.0f, 0.0f), 1e-6f);
+    EXPECT_NEAR(0.55f, cosine.NextRate(50, 1.0f, 1.0f, 0.0f), 1e-6f);
+    EXPECT_NEAR(0.1f, cosine.NextRate(100, 1.0f, 1.0f, 0.0f), 1e-6f);
+
+    EXPECT_THROW(StepDecay(0, 0.5f), std::invalid_argument);
+    EXPECT_THROW(ExponentialDecay(1.5f), std::invalid_argument);
+    EXPECT_THROW(CosineAnnealing(0), std::invalid_argument);
+    EXPECT_THROW(ReduceOnPlateau(1.0f), std::invalid_argument);
+}
+
+TEST(NNScheduleTest, ReduceOnPlateauWaitsForPatience) {
+    ReduceOnPlateau plateau(0.5f, 2, 0.1f);
+    float rate = 1.0f;
+    rate = plateau.NextRate(1, 1.0f, rate, 1.0f);   // Improvement
+    EXPECT_FLOAT_EQ(1.0f, rate);
+    rate = plateau.NextRate(2, 1.0f, rate, 1.0f);   // No improvement (1)
+    EXPECT_FLOAT_EQ(1.0f, rate);
+    rate = plateau.NextRate(3, 1.0f, rate, 1.0f);   // No improvement (2): reduce
+    EXPECT_FLOAT_EQ(0.5f, rate);
+    rate = plateau.NextRate(4, 1.0f, rate, 0.5f);   // Improvement resets
+    rate = plateau.NextRate(5, 1.0f, rate, 0.6f);
+    rate = plateau.NextRate(6, 1.0f, rate, 0.6f);
+    EXPECT_FLOAT_EQ(0.25f, rate);
+    for (int i = 0; i < 10; ++i) {
+        rate = plateau.NextRate(7 + i, 1.0f, rate, 0.6f);
+    }
+    EXPECT_FLOAT_EQ(0.1f, rate);  // Floor
+}
+
+TEST(NNScheduleTest, FitAppliesScheduleEachEpoch) {
+    Matrix x = RandomMatrix(16, 2, 90);
+    Matrix y = RandomMatrix(16, 1, 91);
+    Sequential model;
+    model.Emplace<Dense>(2, 1, Initialization::XAVIER, 1);
+    SGD sgd(0.1f);
+    Sequential::FitOptions options;
+    options.epochs = 4;
+    options.learning_rate_schedule = std::make_shared<ExponentialDecay>(0.5f);
+    auto history = model.Fit(x, y, MeanSquaredError(), sgd, options);
+
+    ASSERT_EQ(4u, history.learning_rate.size());
+    EXPECT_FLOAT_EQ(0.1f, history.learning_rate[0]);
+    EXPECT_FLOAT_EQ(0.05f, history.learning_rate[1]);
+    EXPECT_FLOAT_EQ(0.025f, history.learning_rate[2]);
+    EXPECT_FLOAT_EQ(0.0125f, history.learning_rate[3]);
+    EXPECT_FLOAT_EQ(0.00625f, sgd.LearningRate());
+}
+
 }  // namespace
 }  // namespace nn
 }  // namespace dpan

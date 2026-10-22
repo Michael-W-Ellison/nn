@@ -146,7 +146,7 @@ int main() {
 
     // Manually trigger association formation
     // (In a real application, this might happen automatically or periodically)
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     // Create associations based on the learned sequence
     AssociationEdge edge_ab(pattern_a, pattern_b, AssociationType::CAUSAL, 0.7f);

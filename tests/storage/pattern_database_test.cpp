@@ -1,7 +1,9 @@
 // File: tests/storage/pattern_database_test.cpp
 #include "storage/pattern_database.hpp"
 #include "storage/memory_backend.hpp"
+#ifdef DPAN_HAS_SQLITE
 #include "storage/persistent_backend.hpp"
+#endif
 #include <gtest/gtest.h>
 #include "../test_temp_path.hpp"
 #include <filesystem>
@@ -308,6 +310,7 @@ TEST(CreatePatternDatabaseTest, CreatesMemoryBackendFromJson) {
     std::filesystem::remove(path);
 }
 
+#ifdef DPAN_HAS_SQLITE
 TEST(CreatePatternDatabaseTest, CreatesPersistentBackendFromYaml) {
     auto db_path = test::UniqueTempPath("dpan_factory_test") + ".db";
     std::filesystem::remove(db_path);
@@ -334,6 +337,14 @@ TEST(CreatePatternDatabaseTest, CreatesPersistentBackendFromYaml) {
     std::filesystem::remove(path);
     std::filesystem::remove(db_path);
 }
+#else
+TEST(CreatePatternDatabaseTest, PersistentBackendUnavailableWithoutSqlite) {
+    auto path = WriteConfigFile("dpan_factory_nosqlite.yaml",
+                                "backend: persistent\npersistent:\n  db_path: x.db\n");
+    EXPECT_THROW(CreatePatternDatabase(path), std::runtime_error);
+    std::filesystem::remove(path);
+}
+#endif
 
 TEST(CreatePatternDatabaseTest, RejectsUnsupportedBackend) {
     auto path = WriteConfigFile("dpan_factory_bad.json", R"({"backend": "rocksdb"})");

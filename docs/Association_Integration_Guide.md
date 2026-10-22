@@ -200,8 +200,8 @@ public:
         auto similar = FindSimilarPatterns(*pattern_node, threshold);
 
         // Create categorical associations
-        auto& matrix = const_cast<AssociationMatrix&>(
-            assoc_system_.GetAssociationMatrix());
+        auto& matrix = 
+            assoc_system_.GetAssociationMatrix();
 
         for (const auto& [similar_id, similarity] : similar) {
             AssociationEdge edge(pattern, similar_id,
@@ -321,8 +321,8 @@ public:
         }
 
         // Form causal associations
-        auto& matrix = const_cast<AssociationMatrix&>(
-            assoc_system_.GetAssociationMatrix());
+        auto& matrix = 
+            assoc_system_.GetAssociationMatrix();
 
         for (size_t i = 0; i < sequence.size() - 1; ++i) {
             AssociationEdge edge(sequence[i], sequence[i + 1],

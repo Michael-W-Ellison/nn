@@ -340,7 +340,7 @@ TEST(LearningSystemStressTest, ContinuousLearning_100k_Activations) {
         // Occasionally form associations
         if (i % 100 == 0) {
             for (size_t j = 0; j < batch.size() - 1; ++j) {
-                auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+                auto& matrix = system.GetAssociationMatrix();
                 AssociationEdge edge(batch[j], batch[j + 1],
                                    AssociationType::CAUSAL, 0.5f);
                 matrix.AddAssociation(edge);
@@ -383,7 +383,7 @@ TEST(LearningSystemStressTest, MassivePredictions) {
     }
 
     // Create associations
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
     for (size_t i = 0; i < patterns.size(); ++i) {
         for (size_t j = 0; j < 20; ++j) {
             size_t tgt_idx = (i + j + 1) % patterns.size();

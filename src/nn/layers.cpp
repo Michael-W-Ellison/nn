@@ -1,5 +1,6 @@
 // File: src/nn/layers.cpp
 #include "nn/layers.hpp"
+#include "core/binary_io.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,33 +14,26 @@ namespace nn {
 namespace {
 
 void WriteString(std::ostream& out, const std::string& s) {
-    uint32_t length = static_cast<uint32_t>(s.size());
-    out.write(reinterpret_cast<const char*>(&length), sizeof(length));
-    out.write(s.data(), length);
+    io::Write<uint32_t>(out, static_cast<uint32_t>(s.size()));
+    io::WriteBytes(out, s.data(), s.size());
 }
 
 std::string ReadString(std::istream& in) {
-    uint32_t length = 0;
-    in.read(reinterpret_cast<char*>(&length), sizeof(length));
-    if (!in || length > 256) {
+    uint32_t length = io::Read<uint32_t>(in);
+    if (length > 256) {
         throw std::runtime_error("Layer::Deserialize: invalid layer type");
     }
     std::string s(length, '\0');
-    in.read(s.data(), length);
+    io::ReadBytes(in, s.data(), length);
     return s;
 }
 
 void WriteFloat(std::ostream& out, float value) {
-    out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    io::Write<float>(out, value);
 }
 
 float ReadFloat(std::istream& in) {
-    float value = 0.0f;
-    in.read(reinterpret_cast<char*>(&value), sizeof(value));
-    if (!in) {
-        throw std::runtime_error("Layer::Deserialize: truncated data");
-    }
-    return value;
+    return io::Read<float>(in);
 }
 
 }  // namespace

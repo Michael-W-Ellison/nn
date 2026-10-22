@@ -209,8 +209,25 @@ public:
     // Query & Prediction
     // ========================================================================
 
-    /// Get association matrix (read-only access)
+    /// Get association matrix
     const AssociationMatrix& GetAssociationMatrix() const;
+
+    /// Mutable access for components that maintain the associations
+    /// directly (e.g. MemoryManager). The matrix is internally synchronized.
+    AssociationMatrix& GetAssociationMatrix();
+
+    /// Add an association directly (e.g. known relationships or prior
+    /// knowledge); returns false if it already exists
+    bool AddAssociation(const AssociationEdge& edge);
+    bool AddAssociation(PatternID source, PatternID target,
+                        AssociationType type = AssociationType::CAUSAL, float strength = 0.5f);
+
+    /// Set an existing association's strength (clamped to [0, 1]);
+    /// returns false if it does not exist
+    bool SetAssociationStrength(PatternID source, PatternID target, float strength);
+
+    /// Remove an association; returns false if it does not exist
+    bool RemoveAssociation(PatternID source, PatternID target);
 
     /// Get all associations for a pattern
     /// @param pattern Source pattern

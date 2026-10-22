@@ -55,6 +55,10 @@ target_link_libraries(memory_tier_test
     GTest::gtest_main
 )
 
+if(DPAN_WITH_ZLIB)
+    target_compile_definitions(memory_tier_test PRIVATE DPAN_HAS_ZLIB=1)
+endif()
+
 gtest_discover_tests(memory_tier_test)
 
 # TierManager test executable

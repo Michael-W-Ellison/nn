@@ -128,7 +128,7 @@ int main() {
     std::cout << "Step 3: Creating typed associations..." << std::endl;
     std::cout << std::endl;
 
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
 
     // CAUSAL associations (X causes Y)
     std::cout << "Creating CAUSAL associations (cause-effect):" << std::endl;

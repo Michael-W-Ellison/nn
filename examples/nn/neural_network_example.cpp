@@ -115,7 +115,7 @@ void LearnedPredictionScoring() {
     scorer->Train();
 
     AssociationLearningSystem system;
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
     matrix.AddAssociation(AssociationEdge(warm[0], cold[1], AssociationType::CAUSAL, 0.6f));
     matrix.AddAssociation(AssociationEdge(warm[0], warm[1], AssociationType::CAUSAL, 0.5f));
 

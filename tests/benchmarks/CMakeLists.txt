@@ -61,36 +61,38 @@ target_link_libraries(concurrency_tests
 
 gtest_discover_tests(concurrency_tests)
 
-# CLI benchmarks
-find_library(YAML_LIBRARY NAMES yaml libyaml PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu)
+# CLI benchmarks (the CLI uses PersistentBackend)
+if(DPAN_WITH_SQLITE)
+    find_library(YAML_LIBRARY NAMES yaml libyaml PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu)
 
-add_executable(cli_benchmarks
-    cli_benchmarks.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
-)
+    add_executable(cli_benchmarks
+        cli_benchmarks.cpp
+        ${PROJECT_SOURCE_DIR}/src/cli/dpan_cli.cpp
+        ${PROJECT_SOURCE_DIR}/src/cli/cli_config.cpp
+    )
 
-target_link_libraries(cli_benchmarks
-    PRIVATE
-        dpan_core
-        dpan_storage
-        dpan_association
-        dpan_learning
-        sqlite3
-        pthread
-        GTest::gtest_main
-        ${YAML_LIBRARY}
-)
+    target_link_libraries(cli_benchmarks
+        PRIVATE
+            dpan_core
+            dpan_storage
+            dpan_association
+            dpan_learning
+            sqlite3
+            pthread
+            GTest::gtest_main
+            ${YAML_LIBRARY}
+    )
 
-target_include_directories(cli_benchmarks
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/include
-        ${PROJECT_SOURCE_DIR}/src
-)
+    target_include_directories(cli_benchmarks
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src
+    )
 
-target_compile_definitions(cli_benchmarks
-    PRIVATE
-        DPAN_CLI_TEST_BUILD
-)
+    target_compile_definitions(cli_benchmarks
+        PRIVATE
+            DPAN_CLI_TEST_BUILD
+    )
 
-gtest_discover_tests(cli_benchmarks)
+    gtest_discover_tests(cli_benchmarks)
+endif()

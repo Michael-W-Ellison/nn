@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 # Core library
 add_library(dpan_core
     types.cpp
+    clock.cpp
     pattern_data.cpp
     pattern_node.cpp
     pattern_engine.cpp

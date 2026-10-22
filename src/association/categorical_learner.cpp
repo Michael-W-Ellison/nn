@@ -295,15 +295,15 @@ void CategoricalLearner::InitializeCentroids(size_t k) {
     }
 
     // Use k-means++ initialization
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(config_.seed);
 
-    // Collect all patterns
+    // Collect all patterns (sorted so the result does not depend on hash order)
     std::vector<PatternID> patterns;
     patterns.reserve(pattern_features_.size());
     for (const auto& [pattern, _] : pattern_features_) {
         patterns.push_back(pattern);
     }
+    std::sort(patterns.begin(), patterns.end());
 
     // Choose first centroid randomly
     std::uniform_int_distribution<size_t> dist(0, patterns.size() - 1);

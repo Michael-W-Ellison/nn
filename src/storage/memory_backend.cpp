@@ -1,5 +1,6 @@
 // File: src/storage/memory_backend.cpp
 #include "storage/memory_backend.hpp"
+#include "core/binary_io.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -352,11 +353,8 @@ bool MemoryBackend::CreateSnapshot(const std::string& path) {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
         // Write header: version and pattern count
-        uint32_t version = 1;
-        uint64_t count = patterns_.size();
-
-        file.write(reinterpret_cast<const char*>(&version), sizeof(version));
-        file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        io::Write<uint32_t>(file, 1);  // Version
+        io::Write<uint64_t>(file, patterns_.size());
 
         // Write each pattern
         for (const auto& [id, node] : patterns_) {
@@ -378,11 +376,8 @@ bool MemoryBackend::RestoreSnapshot(const std::string& path) {
         }
 
         // Read header
-        uint32_t version;
-        uint64_t count;
-
-        file.read(reinterpret_cast<char*>(&version), sizeof(version));
-        file.read(reinterpret_cast<char*>(&count), sizeof(count));
+        uint32_t version = io::Read<uint32_t>(file);
+        uint64_t count = io::Read<uint64_t>(file);
 
         if (version != 1) {
             return false;  // Unsupported version

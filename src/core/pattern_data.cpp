@@ -1,5 +1,6 @@
 // File: src/core/pattern_data.cpp
 #include "core/pattern_data.hpp"
+#include "core/binary_io.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -139,17 +140,15 @@ bool FeatureVector::operator==(const FeatureVector& other) const {
 }
 
 void FeatureVector::Serialize(std::ostream& out) const {
-    size_t dim = data_.size();
-    out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
-    out.write(reinterpret_cast<const char*>(data_.data()), dim * sizeof(ValueType));
+    io::WriteSize(out, data_.size());
+    io::WriteArray<float>(out, data_.data(), data_.size());
 }
 
 FeatureVector FeatureVector::Deserialize(std::istream& in) {
-    size_t dim;
-    in.read(reinterpret_cast<char*>(&dim), sizeof(dim));
+    size_t dim = io::ReadSize(in, uint64_t{1} << 32);
 
     FeatureVector result(dim);
-    in.read(reinterpret_cast<char*>(result.data_.data()), dim * sizeof(ValueType));
+    io::ReadArray<float>(in, result.data_.data(), dim);
     return result;
 }
 
@@ -232,41 +231,21 @@ std::vector<uint8_t> PatternData::GetRawData() const {
 
 void PatternData::Serialize(std::ostream& out) const {
     // Write modality
-    uint8_t modality_byte = static_cast<uint8_t>(modality_);
-    out.write(reinterpret_cast<const char*>(&modality_byte), sizeof(modality_byte));
-
-    // Write original size
-    out.write(reinterpret_cast<const char*>(&original_size_), sizeof(original_size_));
-
-    // Write compressed data size
-    size_t compressed_size = compressed_data_.size();
-    out.write(reinterpret_cast<const char*>(&compressed_size), sizeof(compressed_size));
-
-    // Write compressed data
-    if (compressed_size > 0) {
-        out.write(reinterpret_cast<const char*>(compressed_data_.data()), compressed_size);
-    }
+    io::Write<uint8_t>(out, static_cast<uint8_t>(modality_));
+    io::WriteSize(out, original_size_);
+    io::WriteSize(out, compressed_data_.size());
+    io::WriteBytes(out, compressed_data_.data(), compressed_data_.size());
 }
 
 PatternData PatternData::Deserialize(std::istream& in) {
     // Read modality
-    uint8_t modality_byte;
-    in.read(reinterpret_cast<char*>(&modality_byte), sizeof(modality_byte));
+    PatternData pattern(static_cast<DataModality>(io::Read<uint8_t>(in)));
 
-    PatternData pattern(static_cast<DataModality>(modality_byte));
+    pattern.original_size_ = io::ReadSize(in);
 
-    // Read original size
-    in.read(reinterpret_cast<char*>(&pattern.original_size_), sizeof(pattern.original_size_));
-
-    // Read compressed data size
-    size_t compressed_size;
-    in.read(reinterpret_cast<char*>(&compressed_size), sizeof(compressed_size));
-
-    // Read compressed data
-    if (compressed_size > 0) {
-        pattern.compressed_data_.resize(compressed_size);
-        in.read(reinterpret_cast<char*>(pattern.compressed_data_.data()), compressed_size);
-    }
+    // Compressed data
+    pattern.compressed_data_.resize(io::ReadSize(in));
+    io::ReadBytes(in, pattern.compressed_data_.data(), pattern.compressed_data_.size());
 
     return pattern;
 }

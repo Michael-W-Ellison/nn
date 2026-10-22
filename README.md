@@ -24,12 +24,14 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
+| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. Saving is not implemented yet. |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
 
 - CMake ≥ 3.20 and a C++17 compiler (GCC or Clang)
-- SQLite3 and zlib development packages
+- SQLite3 and zlib development packages (optional, see `DPAN_WITH_SQLITE`
+  and `DPAN_WITH_ZLIB`)
 - libyaml (only for the `dpan_cli` tool)
 - Network access on first configure when building tests (GoogleTest is fetched)
 
@@ -39,6 +41,7 @@ scorer.
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build -j8          # run the test suite
+ctest --test-dir build -j8 -LE long # without the ~5-minute million-step test
 ```
 
 Options (defaults are ON when DPAN is the top-level project, OFF when it is
@@ -50,6 +53,15 @@ added with `add_subdirectory`):
 | `DPAN_BUILD_EXAMPLES` | Build programs in `examples/` |
 | `DPAN_BUILD_CLI` | Build the interactive `dpan_cli` |
 | `DPAN_INSTALL` | Install rules and the `DPAN` CMake package (default ON) |
+| `DPAN_WITH_SQLITE` | Build the SQLite `PersistentBackend` (default ON). When OFF, the `persistent`/`sqlite` database types throw, and `dpan_cli` is not built. |
+| `DPAN_WITH_ZLIB` | Compress archive-tier files (default ON). When OFF, archive files are written uncompressed and compressed files written by a zlib build cannot be read. |
+
+### Time
+
+All timestamps come from a process-wide clock (`core/clock.hpp`). By
+default it is the system clock (microseconds since the Unix epoch). Install
+a `ManualClock` with `SetClock` or `ScopedClock` to drive time from a
+simulation or to make runs reproducible.
 
 ## Using DPAN in another project
 
@@ -74,6 +86,42 @@ target_link_libraries(my_app PRIVATE dpan::dpan)
 
 Headers are included by module path, e.g. `#include "core/pattern_engine.hpp"`.
 `examples/consumer/` is a complete project that builds either way.
+
+## Drop-in agent
+
+Describe the environment once, then stream observations and send feedback
+when it is available (`examples/agent/agent_example.cpp`):
+
+```cpp
+#include "agent/agent.hpp"
+using namespace dpan::agent;
+
+EnvironmentSpec spec;
+spec.inputs = {{"reading", InputType::NUMERIC}, {"source", InputType::CATEGORICAL}};
+spec.outputs = {{"state", OutputType::CLASS}, {"unusual", OutputType::ANOMALY}};
+spec.feedback = {{"label", FeedbackType::LABEL, "state"}};
+Agent agent(spec);
+
+StepId step = agent.Observe({{"reading", std::vector<float>{2.1f, 0.2f}}, {"source", std::string("a")}});
+Prediction state = agent.Predict(step, "state");      // label, probabilities, confidence
+float unusual = agent.Predict(step, "unusual").score;  // percentile among recent observations
+agent.Feedback(step, "label", std::string("hot"));     // may arrive later
+```
+
+Actions are learned from rewards:
+
+```cpp
+spec.outputs = {{"move", OutputType::ACTION, {"up", "down", "left", "right"}}};
+spec.feedback = {{"reward", FeedbackType::REWARD, "move"}};
+...
+StepId step = agent.Observe({{"position", std::vector<float>{x, y}}});
+std::string move = agent.Act(step, "move");          // explores; Act(step, "move", false) is greedy
+agent.Feedback(step, "reward", -0.04);
+agent.EndEpisode(true);                              // when the episode ends (true = terminal)
+```
+
+Sizes, value ranges, vocabularies and (unless listed) class names are
+learned from the data. See `docs/AGENT_PLAN.md` for what is implemented.
 
 ## Example
 

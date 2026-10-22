@@ -25,11 +25,15 @@ target_include_directories(dpan_memory PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
-find_package(ZLIB REQUIRED)
-
 target_link_libraries(dpan_memory PUBLIC
     dpan_core
     dpan_association
     dpan_similarity
-    ZLIB::ZLIB
 )
+
+# Archive-tier compression (optional; without it archive files are stored raw)
+if(DPAN_WITH_ZLIB)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(dpan_memory PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(dpan_memory PRIVATE DPAN_HAS_ZLIB=1)
+endif()

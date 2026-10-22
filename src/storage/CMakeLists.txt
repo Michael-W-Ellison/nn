@@ -1,14 +1,10 @@
 # File: src/storage/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 
-# Find SQLite3
-find_package(SQLite3 REQUIRED)
-
 # Storage library
 add_library(dpan_storage
     pattern_database.cpp
     memory_backend.cpp
-    persistent_backend.cpp
 )
 
 target_include_directories(dpan_storage PUBLIC
@@ -16,11 +12,15 @@ target_include_directories(dpan_storage PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/dpan>
 )
 
-# Link to core library and SQLite3
-target_link_libraries(dpan_storage PUBLIC
-    dpan_core
-    SQLite::SQLite3
-)
+target_link_libraries(dpan_storage PUBLIC dpan_core)
+
+# SQLite-backed PersistentBackend (optional)
+if(DPAN_WITH_SQLITE)
+    find_package(SQLite3 REQUIRED)
+    target_sources(dpan_storage PRIVATE persistent_backend.cpp)
+    target_link_libraries(dpan_storage PUBLIC SQLite::SQLite3)
+    target_compile_definitions(dpan_storage PUBLIC DPAN_HAS_SQLITE=1)
+endif()
 
 # C++17 required
 target_compile_features(dpan_storage PUBLIC cxx_std_17)

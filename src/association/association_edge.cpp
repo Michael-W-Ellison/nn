@@ -1,5 +1,6 @@
 // File: src/association/association_edge.cpp
 #include "association/association_edge.hpp"
+#include "core/binary_io.hpp"
 #include <cmath>
 #include <algorithm>
 #include <sstream>
@@ -196,23 +197,12 @@ void AssociationEdge::Serialize(std::ostream& out) const {
     source_.Serialize(out);
     target_.Serialize(out);
 
-    uint8_t type_val = static_cast<uint8_t>(type_);
-    out.write(reinterpret_cast<const char*>(&type_val), sizeof(type_val));
-
-    float strength = strength_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&strength), sizeof(strength));
-
-    uint32_t co_occ = co_occurrence_count_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&co_occ), sizeof(co_occ));
-
-    float temp_corr = temporal_correlation_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&temp_corr), sizeof(temp_corr));
-
-    float decay_rate = decay_rate_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&decay_rate), sizeof(decay_rate));
-
-    uint64_t last_reinf = last_reinforcement_.load(std::memory_order_relaxed);
-    out.write(reinterpret_cast<const char*>(&last_reinf), sizeof(last_reinf));
+    io::Write<uint8_t>(out, static_cast<uint8_t>(type_));
+    io::Write<float>(out, strength_.load(std::memory_order_relaxed));
+    io::Write<uint32_t>(out, co_occurrence_count_.load(std::memory_order_relaxed));
+    io::Write<float>(out, temporal_correlation_.load(std::memory_order_relaxed));
+    io::Write<float>(out, decay_rate_.load(std::memory_order_relaxed));
+    io::Write<uint64_t>(out, last_reinforcement_.load(std::memory_order_relaxed));
 
     creation_time_.Serialize(out);
 
@@ -227,29 +217,14 @@ std::unique_ptr<AssociationEdge> AssociationEdge::Deserialize(std::istream& in) 
     edge->source_ = PatternID::Deserialize(in);
     edge->target_ = PatternID::Deserialize(in);
 
-    uint8_t type_val;
-    in.read(reinterpret_cast<char*>(&type_val), sizeof(type_val));
-    edge->type_ = static_cast<AssociationType>(type_val);
-
-    float strength;
-    in.read(reinterpret_cast<char*>(&strength), sizeof(strength));
-    edge->strength_.store(strength, std::memory_order_relaxed);
-
-    uint32_t co_occ;
-    in.read(reinterpret_cast<char*>(&co_occ), sizeof(co_occ));
-    edge->co_occurrence_count_.store(co_occ, std::memory_order_relaxed);
-
-    float temp_corr;
-    in.read(reinterpret_cast<char*>(&temp_corr), sizeof(temp_corr));
-    edge->temporal_correlation_.store(temp_corr, std::memory_order_relaxed);
-
-    float decay_rate;
-    in.read(reinterpret_cast<char*>(&decay_rate), sizeof(decay_rate));
-    edge->decay_rate_.store(decay_rate, std::memory_order_relaxed);
-
-    uint64_t last_reinf;
-    in.read(reinterpret_cast<char*>(&last_reinf), sizeof(last_reinf));
-    edge->last_reinforcement_.store(last_reinf, std::memory_order_relaxed);
+    edge->type_ = static_cast<AssociationType>(io::Read<uint8_t>(in));
+    edge->strength_.store(io::Read<float>(in), std::memory_order_relaxed);
+    edge->co_occurrence_count_.store(io::Read<uint32_t>(in), std::memory_order_relaxed);
+    edge->temporal_correlation_.store(io::Read<float>(in), std::memory_order_relaxed);
+    edge->decay_rate_.store(io::Read<float>(in), std::memory_order_relaxed);
+    edge->last_reinforcement_.store(static_cast<uint64_t>(
+        Timestamp::FromPersistedMicros(static_cast<int64_t>(io::Read<uint64_t>(in))).ToMicros()),
+        std::memory_order_relaxed);
 
     edge->creation_time_ = Timestamp::Deserialize(in);
 

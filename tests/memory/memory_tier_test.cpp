@@ -961,6 +961,7 @@ TEST_F(ArchiveTierTest, IndexRebuiltOnReopen) {
     ExpectIndexRebuiltOnReopen(temp_dir_, &CreateArchiveTier);
 }
 
+#ifdef DPAN_HAS_ZLIB
 TEST_F(ArchiveTierTest, PatternFilesAreCompressed) {
     // Highly repetitive data compresses well
     FeatureVector fv(2000);
@@ -988,6 +989,21 @@ TEST_F(ArchiveTierTest, PatternFilesAreCompressed) {
     EXPECT_EQ(pattern.GetData().GetFeatures().Dimension(),
               loaded->GetData().GetFeatures().Dimension());
 }
+#else
+TEST_F(ArchiveTierTest, PatternFilesAreRawWithoutZlib) {
+    PatternNode pattern = CreateTestPattern();
+    ASSERT_TRUE(tier_->StorePattern(pattern));
+
+    fs::path file = temp_dir_ / "patterns" / (pattern.GetID().ToString() + ".arc");
+    std::ostringstream raw;
+    pattern.Serialize(raw);
+    EXPECT_EQ(raw.str().size(), fs::file_size(file));
+
+    auto loaded = tier_->LoadPattern(pattern.GetID());
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(pattern.GetID(), loaded->GetID());
+}
+#endif
 
 TEST_F(ArchiveTierTest, ReadsUncompressedLegacyFiles) {
     PatternNode pattern = CreateTestPattern();

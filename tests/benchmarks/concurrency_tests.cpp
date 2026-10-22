@@ -493,7 +493,7 @@ TEST(LearningSystemConcurrencyTest, ConcurrentPredictions) {
     }
 
     // Setup associations
-    auto& matrix = const_cast<AssociationMatrix&>(system.GetAssociationMatrix());
+    auto& matrix = system.GetAssociationMatrix();
     for (size_t i = 0; i < patterns.size(); ++i) {
         for (size_t j = 0; j < 5; ++j) {
             size_t tgt_idx = (i + j + 1) % patterns.size();

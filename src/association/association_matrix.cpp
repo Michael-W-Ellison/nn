@@ -1,5 +1,6 @@
 // File: src/association/association_matrix.cpp
 #include "association/association_matrix.hpp"
+#include "core/binary_io.hpp"
 #include <limits>
 #include <algorithm>
 #include <queue>
@@ -612,8 +613,7 @@ void AssociationMatrix::Serialize(std::ostream& out) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
 
     // Write count
-    size_t count = edge_lookup_.size();
-    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    io::WriteSize(out, edge_lookup_.size());
 
     // Write each edge
     for (const auto& [key, index] : edge_lookup_) {
@@ -624,8 +624,7 @@ void AssociationMatrix::Serialize(std::ostream& out) const {
 std::unique_ptr<AssociationMatrix> AssociationMatrix::Deserialize(std::istream& in) {
     auto matrix = std::make_unique<AssociationMatrix>();
 
-    size_t count;
-    in.read(reinterpret_cast<char*>(&count), sizeof(count));
+    size_t count = io::ReadSize(in);
 
     for (size_t i = 0; i < count; ++i) {
         auto edge = AssociationEdge::Deserialize(in);

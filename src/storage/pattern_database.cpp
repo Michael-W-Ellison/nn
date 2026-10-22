@@ -1,7 +1,9 @@
 // File: src/storage/pattern_database.cpp
 #include "storage/pattern_database.hpp"
 #include "storage/memory_backend.hpp"
+#ifdef DPAN_HAS_SQLITE
 #include "storage/persistent_backend.hpp"
+#endif
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -301,6 +303,10 @@ std::unique_ptr<PatternDatabase> CreatePatternDatabase(const std::string& config
     }
 
     if (backend == "persistent" || backend == "sqlite") {
+#ifndef DPAN_HAS_SQLITE
+        throw std::runtime_error("Pattern database config: backend '" + backend +
+                                 "' is unavailable (DPAN was built without SQLite)");
+#else
         PersistentBackend::Config db;
         db.db_path = GetString(config, {"persistent.db_path", "sqlite.db_path", "persistent.path",
                                         "sqlite.path", "db_path", "path"}, "");
@@ -326,6 +332,7 @@ std::unique_ptr<PatternDatabase> CreatePatternDatabase(const std::string& config
             throw std::runtime_error("Pattern database config: synchronous must be FULL, NORMAL or OFF");
         }
         return std::make_unique<PersistentBackend>(db);
+#endif
     }
 
     throw std::runtime_error("Pattern database config: unsupported backend '" + backend +

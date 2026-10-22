@@ -46,6 +46,9 @@ public:
         float min_categorical_similarity{0.7f};
         /// Whether to auto-recompute clusters when patterns are added
         bool auto_recompute{false};
+        /// Seed for k-means++ initialization (clustering is deterministic
+        /// for a given seed and set of patterns)
+        uint32_t seed{42};
     };
 
     // ========================================================================

@@ -38,6 +38,14 @@ Shape mismatches throw `std::invalid_argument`.
   use `Softmax::Compute(logits)` for probabilities
 - `SGD(learning_rate, momentum, weight_decay)`, `Adam(learning_rate, beta1, beta2, epsilon, weight_decay)`
 - Metrics: `Accuracy` (arg-max), `BinaryAccuracy` (threshold 0.5)
+- `optimizer.SaveState(out)` / `LoadState(in)` write and restore
+  hyperparameters, step count and per-parameter state, so training resumes
+  exactly where it stopped. `LoadState` throws on another optimizer type.
+- `ClipGradientNorm(model.Parameters(), max_norm)` scales all gradients so
+  their combined L2 norm is at most `max_norm`; `GradientNorm` reports it.
+- Learning-rate schedules: `StepDecay(step_size, gamma)`,
+  `ExponentialDecay(gamma)`, `CosineAnnealing(total_steps, min_rate)`,
+  `ReduceOnPlateau(factor, patience, min_rate, threshold)`.
 
 ### Model
 
@@ -55,6 +63,8 @@ options.epochs = 100;
 options.batch_size = 32;
 options.validation_split = 0.2f;          // last 20% of rows
 options.early_stopping_patience = 10;     // optional
+options.gradient_clip_norm = 5.0f;        // optional, 0 = off
+options.learning_rate_schedule = std::make_shared<ReduceOnPlateau>();  // optional
 auto history = model.Fit(x, one_hot_labels, SoftmaxCrossEntropy(), optimizer, options);
 
 Matrix logits = model.Predict(x_test);
@@ -64,8 +74,9 @@ model.Save("classifier.dpnn");
 Sequential restored = Sequential::Load("classifier.dpnn");
 ```
 
-- `Fit` shuffles each epoch (seeded), reports per-epoch losses in
-  `History`, and calls `FitOptions::on_epoch_end` (return `false` to stop).
+- `Fit` shuffles each epoch (seeded), reports per-epoch losses and learning
+  rates in `History`, applies the schedule after each epoch (monitoring the
+  validation loss when there is one), and calls `FitOptions::on_epoch_end` (return `false` to stop).
 - `TrainBatch` performs one optimization step for custom training loops;
   `Forward` / `Backward` / `ZeroGradients` / `Parameters` expose the steps.
 - `Slice(begin, end)` copies a range of layers (e.g. an encoder half).

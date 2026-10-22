@@ -31,18 +31,20 @@ target_link_libraries(memory_backend_test
 gtest_discover_tests(memory_backend_test)
 
 # PersistentBackend tests
-add_executable(persistent_backend_test
-    persistent_backend_test.cpp
-)
+if(DPAN_WITH_SQLITE)
+    add_executable(persistent_backend_test
+        persistent_backend_test.cpp
+    )
 
-target_link_libraries(persistent_backend_test
-    dpan_core
-    dpan_storage
-    gtest
-    gtest_main
-)
+    target_link_libraries(persistent_backend_test
+        dpan_core
+        dpan_storage
+        gtest
+        gtest_main
+    )
 
-gtest_discover_tests(persistent_backend_test)
+    gtest_discover_tests(persistent_backend_test)
+endif()
 
 # LRUCache tests
 add_executable(lru_cache_test

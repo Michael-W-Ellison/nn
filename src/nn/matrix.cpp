@@ -1,5 +1,6 @@
 // File: src/nn/matrix.cpp
 #include "nn/matrix.hpp"
+#include "core/binary_io.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -120,28 +121,19 @@ Matrix& Matrix::operator*=(float scalar) {
 }
 
 void Matrix::Serialize(std::ostream& out) const {
-    uint64_t rows = rows_;
-    uint64_t cols = cols_;
-    out.write(reinterpret_cast<const char*>(&rows), sizeof(rows));
-    out.write(reinterpret_cast<const char*>(&cols), sizeof(cols));
-    out.write(reinterpret_cast<const char*>(data_.data()),
-              static_cast<std::streamsize>(data_.size() * sizeof(float)));
+    io::Write<uint64_t>(out, rows_);
+    io::Write<uint64_t>(out, cols_);
+    io::WriteArray<float>(out, data_.data(), data_.size());
 }
 
 Matrix Matrix::Deserialize(std::istream& in) {
-    uint64_t rows = 0;
-    uint64_t cols = 0;
-    in.read(reinterpret_cast<char*>(&rows), sizeof(rows));
-    in.read(reinterpret_cast<char*>(&cols), sizeof(cols));
-    if (!in || (cols != 0 && rows > (uint64_t{1} << 40) / cols)) {
+    uint64_t rows = io::Read<uint64_t>(in);
+    uint64_t cols = io::Read<uint64_t>(in);
+    if (cols != 0 && rows > (uint64_t{1} << 32) / cols) {
         throw std::runtime_error("Matrix::Deserialize: invalid header");
     }
     std::vector<float> data(static_cast<size_t>(rows * cols));
-    in.read(reinterpret_cast<char*>(data.data()),
-            static_cast<std::streamsize>(data.size() * sizeof(float)));
-    if (!in) {
-        throw std::runtime_error("Matrix::Deserialize: truncated data");
-    }
+    io::ReadArray<float>(in, data.data(), data.size());
     return Matrix(static_cast<size_t>(rows), static_cast<size_t>(cols), std::move(data));
 }
 

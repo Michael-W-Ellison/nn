@@ -81,8 +81,10 @@ public:
     size_t ParameterCount() const;
 
     /// One optimization step on a batch; returns the batch loss
+    /// @param gradient_clip_norm Clip the combined gradient L2 norm to this
+    ///        value before the update (0 = no clipping)
     float TrainBatch(const Matrix& input, const Matrix& target, const Loss& loss,
-                     Optimizer& optimizer);
+                     Optimizer& optimizer, float gradient_clip_norm = 0.0f);
 
     struct FitOptions {
         size_t epochs{100};
@@ -98,6 +100,14 @@ public:
         size_t early_stopping_patience{0};
         float min_delta{0.0f};
 
+        /// Clip the combined gradient L2 norm per batch (0 = no clipping)
+        float gradient_clip_norm{0.0f};
+
+        /// Adjusts the optimizer's learning rate after each epoch, monitoring
+        /// validation loss when there is a validation split, else training
+        /// loss (nullptr = constant rate)
+        std::shared_ptr<LearningRateSchedule> learning_rate_schedule;
+
         /// Called after each epoch with (epoch, train_loss, validation_loss);
         /// return false to stop training. validation_loss is NaN without a
         /// validation split.
@@ -107,6 +117,7 @@ public:
     struct History {
         std::vector<float> train_loss;
         std::vector<float> validation_loss;
+        std::vector<float> learning_rate;  // Rate used during each epoch
         size_t epochs_run{0};
         bool stopped_early{false};
     };
