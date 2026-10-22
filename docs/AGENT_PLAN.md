@@ -113,7 +113,7 @@ prediction carries a confidence value.
 3. **Training cadence:** every 8 observations, one mini-batch of 64, half
    newest samples and half replay. Gradient clipping (norm 5), then Adam
    with a learning rate that drops when progress plateaus. When the
-   environment has ACTION outputs: every observation, learning rate 5e-4,
+   environment has ACTION outputs: every observation, learning rate 2e-4,
    trunk at least 64 wide; Q-value losses do not drive the plateau check.
 4. **Mixed channels:** losses from all heads with samples are summed, each
    divided by its running average so no head dominates.
@@ -320,7 +320,7 @@ still pass (A 98.7% / 97.5% / 98.0%, B 1.13×, C 0.11×, D 0.97).
   Phase 2 settings, E passed on 1 of 6 seeds and F did not learn: an
   episode of cart-pole gave the network about one update per 8 steps.
   When the spec has ACTION outputs: training every observation
-  (`action_train_every`), learning rate 5e-4 (`action_learning_rate`),
+  (`action_train_every`), learning rate 5e-4 (`action_learning_rate`; 2e-4 since Phase 6),
   trunk width at least 64 (`action_min_trunk_width`). Q-value losses are
   excluded from the plateau learning-rate check (their targets move by
   design; including them drove the rate to its minimum).
@@ -503,22 +503,54 @@ written and replaces an existing checkpoint only with a complete one
 | G: 32×32 grey images of four shapes (square, circle, triangle, plus; size 4–9 pixels, random position, Gaussian noise) and a day/night category (night images darker and noisier) → CLASS; 5,000 samples, accuracy on the last 1,000 | 0.969 at the test seed (71); 0.970, 0.966, 0.973 at seeds 72–74 |
 | Training step, 257 inputs → trunk 512, batch 64, median of 3 × 20 steps (`tests/agent/performance_test.cpp`) | 18.9 ms without BLAS on 1 thread, 8.92 ms without BLAS on 4 threads, 3.27 ms with OpenBLAS: 5.8× and 2.7× faster. The test requires ≥ 3× against 1 thread and is skipped without BLAS. |
 | Gradient checks (`tests/nn/convolution_test.cpp`) | `Conv2D` (padding 1 at stride 1 and 2), `MaxPool2D` (non-overlapping and overlapping) agree with central differences |
-| Default build (no BLAS) | All 1,930 tests pass. A–F give the same results as before Phase 6. |
+| Default build (no BLAS) | All 1,930 tests pass. Before the learning-rate change below, A–F gave the same results as before Phase 6. |
 | Build with `DPAN_WITH_SQLITE=OFF`, `DPAN_WITH_ZLIB=OFF` | All tests pass (long, reference, robustness and performance labels excluded) |
 | ThreadSanitizer | No reports in the compute, convolution and agent tests |
-| BLAS build | 1,929 of 1,930 pass. E fails at the test seed: shortest path in 93 of 100 greedy episodes (threshold 95). A–D, F, G and the robustness tests pass (B 1.128, C 0.112, D 0.965, F solved at episode 449, G 0.97). |
+| BLAS build | All 1,930 tests pass (with the learning-rate change below). |
 
-E is close to its threshold in both builds. Greedy episodes on the
-shortest path, out of 100, at seeds 51 (the test seed) and 1–7:
+**E stability and the action learning rate.** With
+`action_learning_rate` 5e-4 (the Phase 3 setting), the BLAS build failed E
+at the test seed (93 of 100). E was close to its threshold in both builds;
+greedy episodes on the shortest path, out of 100, at seeds 51 (the test
+seed) and 1–11:
 
-| Build | 51 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-|---|---|---|---|---|---|---|---|---|
-| No BLAS | 97 | 100 | 95 | 99 | 95 | 96 | 100 | 98 |
-| BLAS | 93 | 98 | 96 | 100 | 99 | 97 | 99 | 100 |
+| Build | 51 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| No BLAS | 97 | 100 | 95 | 99 | 95 | 96 | 100 | 98 | 99 | 93 | 97 | 92 |
+| BLAS | 93 | 98 | 96 | 100 | 99 | 97 | 99 | 100 | 94 | 90 | 94 | 89 |
 
-BLAS sums in a different order, so results differ in the last bits and
-training follows a different path. E's result in the BLAS build is not
-resolved in this phase.
+(BLAS sums in a different order, so results differ in the last bits and
+training follows a different path.) The missed episodes contain moves into
+a wall or away from the goal. Their Q-values are 0.05–0.1 below the best
+move's, and the network's errors at learning rate 5e-4 exceed that. Other
+settings, over the same 12 seeds and both builds (lowest / mean result):
+
+| Setting | No BLAS | BLAS |
+|---|---|---|
+| Phase 3 settings | 92 / 96.8 | 89 / 95.8 |
+| `target_sync` 250 / 1000 | 90 / 96.5, 84 / 93.3 | 82 / 96.4, 77 / 89.8 |
+| `exploration_steps` 5,000 / 20,000 | 71 / 91.5, 87 / 96.2 | 71 / 92.8, 90 / 96.9 |
+| `exploration_end` 0.02 / 0.1 | 68 / 93.8, 86 / 96.6 | 82 / 96.6, 92 / 96.8 |
+| `action_return_steps` 1 | 83 / 92.9 | 59 / 91.9 |
+| `action_learning_rate` 3e-4 | 93 / 97.7 | 95 / 98.1 |
+| `action_learning_rate` 2.5e-4 | 95 / 98.4 | 93 / 98.1 |
+| `action_learning_rate` 2e-4 | 95 / 98.3 | 97 / 99.0 |
+| `action_learning_rate` 1.5e-4 | 98 / 99.1 | 92 / 98.8 |
+
+The default `action_learning_rate` is now **2e-4**. At seeds 12–23 it gives
+lowest 98 / mean 99.5 (no BLAS) and 98 / 99.3 (BLAS); 5e-4 gave 86 / 97.6
+and 89 / 97.3. Test seeds after the change:
+
+| | No BLAS | BLAS |
+|---|---|---|
+| E (seed 51) | 100 of 100 (was 97) | 99 of 100 (was 93) |
+| F (seed 61) | solved at episode 811, best average 195.02 (was 574) | solved at episode 548, best average 195.7 (was 449) |
+
+F learns more slowly at 2e-4. At seeds 61–66 it reaches 195 within 1,000
+episodes at 5 of 6 seeds without BLAS and 4 of 6 with BLAS; at 5e-4 it was
+3 of 6 in each build. At the test seed without BLAS, F's best average
+(195.02) is just above the threshold. A–D and G do not use the action
+learning rate; their results are unchanged.
 
 ### Phase 6 implementation notes
 

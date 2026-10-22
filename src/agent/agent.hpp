@@ -68,7 +68,7 @@ struct AgentConfig {
     // learning_rate and min_trunk_width: learning from rewards needs more
     // updates per observation and a smaller, steadier step
     size_t action_train_every{1};
-    float action_learning_rate{5e-4f};
+    float action_learning_rate{2e-4f};
     size_t action_min_trunk_width{64};
     size_t action_return_steps{3};       ///< Rewards summed before bootstrapping (multi-step returns)
     float discount{0.99f};               ///< Weight of future rewards
