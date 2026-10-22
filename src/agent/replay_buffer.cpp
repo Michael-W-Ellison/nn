@@ -38,20 +38,50 @@ void Sample::FillNext(float* row, size_t size) const {
     }
 }
 
-ReplayBuffer::ReplayBuffer(size_t capacity, uint32_t seed) : capacity_(capacity), rng_(seed) {
+size_t Sample::MemoryBytes() const {
+    size_t bytes = sizeof(Sample) + 32;
+    bytes += (indices.capacity() + next_indices.capacity()) * sizeof(uint32_t);
+    bytes += (values.capacity() + next_values.capacity()) * sizeof(float);
+    bytes += targets.capacity() * sizeof(HeadTarget);
+    for (const auto& target : targets) bytes += target.values.capacity() * sizeof(float);
+    return bytes;
+}
+
+ReplayBuffer::ReplayBuffer(size_t capacity, uint32_t seed, size_t memory_budget_bytes)
+    : capacity_(capacity), budget_(memory_budget_bytes), rng_(seed) {
     if (capacity == 0) {
         throw std::invalid_argument("ReplayBuffer: capacity must be > 0");
     }
 }
 
 void ReplayBuffer::Add(const SamplePtr& sample) {
-    if (sample->in_replay) return;
+    size_t bytes = sample->MemoryBytes();
+    if (sample->in_replay) {
+        bytes_ = bytes_ - sample->stored_bytes + bytes;
+        sample->stored_bytes = bytes;
+        EnforceBudget(0);
+        return;
+    }
     if (samples_.size() >= capacity_) {
         Evict();
     }
+    EnforceBudget(bytes);
     sample->in_replay = true;
+    sample->stored_bytes = bytes;
+    bytes_ += bytes;
     samples_.push_back(sample);
     class_counts_[sample->balance_class]++;
+}
+
+void ReplayBuffer::SetMemoryBudget(size_t bytes) {
+    budget_ = bytes;
+    EnforceBudget(0);
+}
+
+void ReplayBuffer::EnforceBudget(size_t incoming) {
+    while (budget_ > 0 && !samples_.empty() && bytes_ + incoming > budget_) {
+        Evict();
+    }
 }
 
 void ReplayBuffer::Reclassify(const SamplePtr& sample, int old_class) {
@@ -74,8 +104,13 @@ void ReplayBuffer::Evict() {
             victim = candidate;
         }
     }
-    auto& removed = samples_[victim];
+    Erase(victim);
+}
+
+void ReplayBuffer::Erase(size_t index) {
+    auto& removed = samples_[index];
     removed->in_replay = false;
+    bytes_ -= removed->stored_bytes;
     class_counts_[removed->balance_class]--;
     removed = std::move(samples_.back());
     samples_.pop_back();

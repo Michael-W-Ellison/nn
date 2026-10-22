@@ -178,7 +178,8 @@ integration test with a fixed seed and a fake clock.
 | 1. Spec and encoders | Complete. `src/agent/environment.hpp` (spec, `Value`, validation), `src/agent/encoders.hpp` (encoders, `ObservationEncoder`). Notes below. |
 | 2. Agent: supervised and self-supervised | Complete. `src/agent/agent.hpp`. Reference environments A–D pass (results and notes below). |
 | 3. Reinforcement | Complete. `Agent::Act`, REWARD and OUTCOME feedback for ACTION outputs, episodes. Reference environments E–F pass (results and notes below). |
-| 4–8 | Not started |
+| 4. Robustness and self-tuning | Complete. Drift detection and recovery, trunk widening, rollback, memory budgets, metrics hook (results and notes below). |
+| 5–8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -343,3 +344,92 @@ still pass (A 98.7% / 97.5% / 98.0%, B 1.13×, C 0.11×, D 0.97).
   during Phase 3; it did not help F and stopped OUTCOME-only learning.
 - **Cost.** Action environments train once per observation: F's test runs
   about 65,000 steps in about a minute.
+
+### Phase 4 results
+
+`tests/agent/robustness_test.cpp` (default `AgentConfig` except where noted):
+
+| Criterion | Test | Result |
+|---|---|---|
+| Recovers from an abrupt drift within 1,000 samples | Environment A, labels rotate at sample 6,000 | 1 detection, none before the drift; the network's own accuracy 1,000 samples after: 98.4% (Phase 3: about 43% after 3,000); combined accuracy on samples 800–1,000 after: 99.5% |
+| Memory stays within budget over 1 million steps | Numeric and open-vocabulary inputs (a new category almost every step), CLASS, NEXT_OBSERVATION and ANOMALY outputs, 16 MiB budget | Peak estimate 14.9 MB of 16 MB (checked every 10,000 steps); resident memory of the test process 25.0 MB at step 200,000 and the same at step 1,000,000; about 3,000 patterns held, 932,866 pruned over the run. Runs in about 5.5 minutes (label `long`; `ctest -LE long` skips it). |
+| Injected NaN values are rolled back | A NaN written into a network weight, and into the anomaly autoencoder | Restored at the next training step (1 rollback each); predictions stay finite; at least 480 of the next 500 predictions correct |
+
+Also tested: a regression whose relation flips (network error 0.007 before,
+0.027 1,000 samples after, in squared standard deviations), trunk widening
+on a task where the network trails the nearest-pattern vote (32 → 108
+units, outputs unchanged by each widening), the metrics hook, and the
+Page-Hinkley detector alone (no alarm in 100,000 stationary losses with a
+30% error rate; at most 2 with rare 2% errors; an increase from 5% to 60%
+errors is found within 30 samples). Reference environments A–F still pass
+(A: 98.7% / 99.5% / 98.3%).
+
+### Phase 4 implementation notes
+
+- **Drift detection.** Page-Hinkley on each output's prequential network
+  loss (CLASS: error 0/1; VALUE, NEXT_OBSERVATION: squared standardized
+  error; ANOMALY: reconstruction error; not ACTION, whose loss changes by
+  design). Each loss is standardized with the mean and deviation since the
+  last detection (after 50 warm-up losses) and clipped to ±3, so rare
+  errors of an accurate model cannot trigger it; δ = 0.5, λ = 20 (λ = 10
+  gave a false alarm within 100,000 noisy losses).
+- **Recovery** lasts until the output's loss is back within 10% (+0.01) of
+  its level before the drift, or 3,000 samples: the learning rate is reset
+  to its base value (undoing plateau drops) and multiplied by 1.5, 90% of
+  each batch comes from the last 1,000 trainable samples, the pattern side
+  votes with its short-term memory only, and the blend's running estimates
+  start over. A factor of 3 was measured to be worse than 1 or 1.5 in A.
+  The plan's "lower the weight of nearest-pattern votes" is applied to the
+  long-term votes: the short-term pattern memory is the part that adapts
+  fastest.
+- **Pre-drift labels are dropped from replay** (beyond the plan) for the
+  drifted CLASS or VALUE output: targets of samples observed more than 50
+  steps before the detection. Without this, the network recovered during
+  the recovery period and then fell back (accuracy 56–75% with repeated
+  detections) once old labels returned with replay. After a drift that
+  only changes the input distribution, still-valid labels are lost too and
+  the network relearns them.
+- **Capacity.** When the learning rate would drop at a plateau, after
+  10,000 samples, while the network trails the pattern side by a clear
+  margin on some output (2 points of accuracy, or 10% more error) — the
+  test used for "loss still high", since the irreducible loss is unknown —
+  both trunk layers are widened by 1.5× (Net2WiderNet: new units copy
+  existing ones; copies share the outgoing weights in slightly unequal
+  shares summing to 1), only if the larger model still fits the memory
+  budget. Optimizer state of the network is reset. Widening stops for good
+  when the last one did not narrow the gap by at least 10%: in the
+  1-million-step test, without this rule the trunk grew to 512 units (7
+  widenings) while still trailing, steps became 6 times slower and the
+  replay buffer shrank to 11,000 samples to make room.
+- **Rollback.** A copy of the networks is kept when they are built and
+  every 1,000 observations while their weights are finite. A training step
+  that leaves a weight or loss non-finite, or a loss above 10⁶, restores
+  the copy (with the target network). A relative divergence test was not
+  used: a real drift raises the loss by orders of magnitude.
+- **Memory budget** (`memory_budget_bytes`, 256 MiB by default). Fixed
+  parts are reserved first: the networks (weights, gradients, two Adam
+  moments; live, snapshot and target copies) and the pending steps (with
+  an upper bound for each step's sample). The rest goes 80% to the replay
+  buffer and 20% to the pattern store, and is split again after a
+  widening. The replay buffer measures samples in bytes (again when they
+  change) and evicts as in Phase 2 until within its share. The pattern
+  store removes the 5% of patterns with the lowest utility from the memory
+  module's `UtilityCalculator` (accesses, recency in steps with a 10,000
+  step half-life, average association strength, label purity as
+  confidence), with their associations; `UtilityCalculator` gained a
+  `CalculateUtility` overload that takes these inputs directly. Updated
+  associations are retired, not freed, until the matrix is compacted; the
+  pattern store compacts it once retired edges outnumber live ones (or
+  exceed 10% of its budget). The replay buffer still does not use utility
+  scores; its eviction is class-balanced and random among old samples.
+- **Speed.** Nearest-pattern search computes both votes (short- and
+  long-term) in one scan, takes the anomaly distance from the placement
+  scan, and stops summing a distance once it exceeds the current k-th
+  best.
+- **Hooks.** `SetLogger` (warnings for drifts and rollbacks, information
+  for recoveries, widenings, learning-rate drops) and `SetMetricsHook`
+  (`Stats()` every N observations, called outside the agent's lock).
+  `Stats()` reports memory use against the budget, drift events, recovery,
+  rollbacks, widenings and pruned patterns.
+- **Testing.** `agent/agent_testing.hpp` (`AgentTestAccess::InjectNaN`)
+  writes a NaN into a weight, for tests of the rollback.

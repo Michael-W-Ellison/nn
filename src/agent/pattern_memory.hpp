@@ -21,6 +21,7 @@
 
 #include "association/association_learning_system.hpp"
 #include "core/types.hpp"
+#include "memory/utility_calculator.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -35,6 +36,9 @@ public:
     struct Config {
         size_t dimension{64};         ///< Random projection size
         size_t capacity{10000};       ///< Maximum number of patterns
+        size_t memory_budget_bytes{0};  ///< Bound on MemoryBytes() (0 = capacity only)
+        size_t recency_half_life{10000};  ///< Steps after which a pattern's recency score halves
+        float prune_fraction{0.05f};  ///< Share of patterns removed when the store is full
         float merge_ratio{0.5f};      ///< Join a pattern closer than merge_ratio x typical distance
         float label_rate{0.1f};       ///< Minimum update rate of class weights and target means
         float transition_rate{0.1f};  ///< Update rate of transition strengths
@@ -75,6 +79,16 @@ public:
     std::optional<std::vector<float>> ClassVote(const std::vector<float>& point, size_t class_output,
                                                 size_t class_count, size_t k, size_t horizon = 0) const;
 
+    /// Votes of the short-term (last `horizon` labels) and long-term (all
+    /// labelled patterns) memory, from one scan
+    struct Votes {
+        std::optional<std::vector<float>> short_term;
+        std::optional<std::vector<float>> long_term;
+    };
+    Votes ClassVotes(const std::vector<float>& point, size_t class_output, size_t class_count, size_t k,
+                     size_t horizon) const;
+    Votes ValueVotes(const std::vector<float>& point, size_t value_output, size_t k, size_t horizon) const;
+
     /// Target means voted by the k nearest patterns with targets (horizon
     /// as for ClassVote)
     std::optional<std::vector<float>> ValueVote(const std::vector<float>& point, size_t value_output,
@@ -96,7 +110,20 @@ public:
     /// Association strength from `state` to each action (0.5 if none)
     std::vector<float> ActionStrengths(PatternID state, const std::vector<PatternID>& actions) const;
 
-        bool Contains(PatternID id) const { return slots_.count(id) > 0; }
+        /// Utility of a stored pattern (memory manager score: accesses,
+    /// recency in steps, association strength, label purity)
+    float Utility(PatternID id, uint64_t step) const;
+
+    /// Estimated memory use: patterns, projection and associations
+    size_t MemoryBytes() const;
+
+    /// Change the byte budget (takes effect at the next insertion)
+    void SetMemoryBudget(size_t bytes) { config_.memory_budget_bytes = bytes; }
+
+    /// Patterns removed for capacity or budget so far
+    uint64_t Pruned() const { return pruned_; }
+
+    bool Contains(PatternID id) const { return slots_.count(id) > 0; }
     size_t Size() const { return slots_.size(); }
     float TypicalDistance() const { return typical_distance_; }
     const AssociationLearningSystem& Associations() const { return associations_; }
@@ -117,6 +144,21 @@ private:
     };
 
     static float Distance(const std::vector<float>& a, const std::vector<float>& b);
+    static float SquaredDistance(const float* a, const float* b, size_t n, float bound);
+    std::optional<std::vector<float>> ClassFromNeighbors(const std::vector<std::pair<size_t, float>>& neighbors,
+                                                         size_t class_output, size_t class_count) const;
+    std::optional<std::vector<float>> ValueFromNeighbors(const std::vector<std::pair<size_t, float>>& neighbors,
+                                                         size_t value_output) const;
+
+    /// The k nearest prototypes for two filters, from one scan
+    template <typename UsableA, typename UsableB>
+    std::pair<std::vector<std::pair<size_t, float>>, std::vector<std::pair<size_t, float>>>
+    NearestTwo(const std::vector<float>& point, size_t k, UsableA usable_a, UsableB usable_b) const;
+    float Utility(const Prototype& p, uint64_t step) const;
+    size_t PrototypeBytes(const Prototype& p) const;
+    bool OverBudget() const;
+    void Prune(uint64_t step);
+    void AfterAssociationWrites(size_t writes);
     Prototype* Find(PatternID id);
     void Remove(size_t slot);
 
@@ -138,6 +180,10 @@ private:
     float typical_distance_{0.0f};
     bool has_typical_distance_{false};
     AssociationLearningSystem associations_;
+    UtilityCalculator utility_;
+    size_t prototype_bytes_{0};          // running total of PrototypeBytes over stored patterns
+    size_t writes_since_compact_{0};     // association updates leave retired edges until Compact()
+    uint64_t pruned_{0};
 };
 
 }  // namespace agent

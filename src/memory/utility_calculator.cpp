@@ -66,16 +66,17 @@ float UtilityCalculator::CalculatePatternUtility(
     const AccessStats& stats,
     const std::vector<AssociationEdge>& associations) const {
 
-    float f_score = CalculateFrequencyScore(stats.access_count);
-    float r_score = CalculateRecencyScore(stats.TimeSinceLastAccess());
-    float a_score = CalculateAssociationScore(associations);
-    float c_score = CalculateConfidenceScore(pattern);
+    return CalculateUtility(stats.access_count, stats.TimeSinceLastAccess(),
+                            CalculateAssociationScore(associations),
+                            CalculateConfidenceScore(pattern));
+}
 
-    float utility = config_.frequency_weight * f_score +
-                   config_.recency_weight * r_score +
-                   config_.association_weight * a_score +
-                   config_.confidence_weight * c_score;
-
+float UtilityCalculator::CalculateUtility(uint64_t access_count, Timestamp::Duration time_since_access,
+                                          float association_strength, float confidence) const {
+    float utility = config_.frequency_weight * CalculateFrequencyScore(access_count) +
+                    config_.recency_weight * CalculateRecencyScore(time_since_access) +
+                    config_.association_weight * std::clamp(association_strength, 0.0f, 1.0f) +
+                    config_.confidence_weight * std::clamp(confidence, 0.0f, 1.0f);
     return std::clamp(utility, 0.0f, 1.0f);
 }
 

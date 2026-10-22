@@ -77,6 +77,16 @@ public:
         const std::vector<AssociationEdge>& associations
     ) const;
 
+    /// Utility from the score inputs directly, for callers that keep their
+    /// own records instead of PatternNode/AccessStats objects
+    /// @param access_count Number of accesses
+    /// @param time_since_access Time since the last access
+    /// @param association_strength Average strength of the pattern's associations (0 if none)
+    /// @param confidence Pattern confidence in [0, 1]
+    /// @return Utility score in [0,1]
+    float CalculateUtility(uint64_t access_count, Timestamp::Duration time_since_access,
+                           float association_strength, float confidence) const;
+
     /// Calculate utility score for an association
     ///
     /// @param edge Association edge to evaluate

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <stdexcept>
 
 namespace dpan {
@@ -150,6 +151,103 @@ void AgentNetwork::GrowClasses(size_t head, size_t class_count) {
     heads_[head] = std::move(grown);
     head_specs_[head].size = class_count;
     head_optimizers_[head].Reset();
+}
+
+size_t AgentNetwork::ParameterCount() const {
+    size_t count = 0;
+    for (const auto& embedding : embeddings_) {
+        if (embedding.dense) count += embedding.dense->Weights().Size() + embedding.dense->Bias().Size();
+    }
+    for (const auto& layer : trunk_) {
+        if (const auto* dense = dynamic_cast<const nn::Dense*>(layer.get())) {
+            count += dense->Weights().Size() + dense->Bias().Size();
+        }
+    }
+    for (const auto& head : heads_) {
+        if (head) count += head->Weights().Size() + head->Bias().Size();
+    }
+    return count;
+}
+
+std::vector<nn::Parameter> AgentNetwork::AllParameters() {
+    std::vector<nn::Parameter> parameters = BodyParameters();
+    for (auto& head : heads_) {
+        if (!head) continue;
+        auto p = head->Parameters();
+        parameters.insert(parameters.end(), p.begin(), p.end());
+    }
+    return parameters;
+}
+
+bool AgentNetwork::AllFinite() {
+    for (const auto& parameter : AllParameters()) {
+        const float* v = parameter.value->Data();
+        for (size_t i = 0; i < parameter.value->Size(); ++i) {
+            if (!std::isfinite(v[i])) return false;
+        }
+    }
+    return true;
+}
+
+void AgentNetwork::Widen(size_t width) {
+    const size_t old_width = trunk_width_;
+    if (width <= old_width) return;
+    std::mt19937 rng(++seed_);
+
+    // Unit u of the widened layer copies unit source[u] of the old one; the
+    // copies of a unit split its outgoing weights in shares summing to 1
+    // (slightly unequal, so the copies do not stay identical)
+    auto plan = [&](std::vector<size_t>& source, std::vector<float>& share) {
+        source.resize(width);
+        std::uniform_int_distribution<size_t> pick(0, old_width - 1);
+        for (size_t u = 0; u < width; ++u) source[u] = u < old_width ? u : pick(rng);
+        std::vector<std::vector<size_t>> copies(old_width);
+        for (size_t u = 0; u < width; ++u) copies[source[u]].push_back(u);
+        std::uniform_real_distribution<float> jitter(0.9f, 1.1f);
+        share.assign(width, 1.0f);
+        for (const auto& group : copies) {
+            if (group.size() < 2) continue;
+            float total = 0.0f;
+            for (size_t u : group) total += (share[u] = jitter(rng));
+            for (size_t u : group) share[u] /= total;
+        }
+    };
+    std::vector<size_t> source1, source2;
+    std::vector<float> share1, share2;
+    plan(source1, share1);
+    plan(source2, share2);
+
+    auto* first = static_cast<nn::Dense*>(trunk_[0].get());
+    auto* second = static_cast<nn::Dense*>(trunk_[2].get());
+    auto wide_first = std::make_unique<nn::Dense>(embedded_size_, width, nn::Initialization::ZEROS);
+    auto wide_second = std::make_unique<nn::Dense>(width, width, nn::Initialization::ZEROS);
+    for (size_t u = 0; u < width; ++u) {
+        for (size_t i = 0; i < embedded_size_; ++i) wide_first->Weights()(i, u) = first->Weights()(i, source1[u]);
+        wide_first->Bias()(0, u) = first->Bias()(0, source1[u]);
+    }
+    for (size_t v = 0; v < width; ++v) {
+        for (size_t u = 0; u < width; ++u) {
+            wide_second->Weights()(u, v) = second->Weights()(source1[u], source2[v]) * share1[u];
+        }
+        wide_second->Bias()(0, v) = second->Bias()(0, source2[v]);
+    }
+    trunk_[0] = std::move(wide_first);
+    trunk_[2] = std::move(wide_second);
+
+    for (auto& head : heads_) {
+        if (!head) continue;
+        auto wide_head = std::make_unique<nn::Dense>(width, head->OutputSize(), nn::Initialization::ZEROS);
+        for (size_t u = 0; u < width; ++u) {
+            for (size_t c = 0; c < head->OutputSize(); ++c) {
+                wide_head->Weights()(u, c) = head->Weights()(source2[u], c) * share2[u];
+            }
+        }
+        wide_head->Bias() = head->Bias();
+        head = std::move(wide_head);
+    }
+    trunk_width_ = width;
+    body_optimizer_.Reset();
+    for (auto& optimizer : head_optimizers_) optimizer.Reset();
 }
 
 std::vector<nn::Parameter> AgentNetwork::BodyParameters() {
@@ -330,6 +428,7 @@ AnomalyAutoencoder::AnomalyAutoencoder(size_t input_size, float learning_rate, u
     model_.Emplace<nn::Dense>(input_size, bottleneck, nn::Initialization::HE, seed)
         .Emplace<nn::ReLU>()
         .Emplace<nn::Dense>(bottleneck, input_size, nn::Initialization::XAVIER, seed + 1);
+    parameter_count_ = (input_size + 1) * bottleneck + (bottleneck + 1) * input_size;
 }
 
 std::vector<float> AnomalyAutoencoder::Errors(const Matrix& inputs) const {
@@ -344,6 +443,16 @@ std::vector<float> AnomalyAutoencoder::Errors(const Matrix& inputs) const {
         errors[r] = static_cast<float>(sum / static_cast<double>(inputs.Cols()));
     }
     return errors;
+}
+
+bool AnomalyAutoencoder::AllFinite() {
+    for (const auto& parameter : model_.Parameters()) {
+        const float* v = parameter.value->Data();
+        for (size_t i = 0; i < parameter.value->Size(); ++i) {
+            if (!std::isfinite(v[i])) return false;
+        }
+    }
+    return true;
 }
 
 float AnomalyAutoencoder::TrainBatch(const Matrix& inputs, float clip_norm) {

@@ -20,6 +20,7 @@ target_include_directories(dpan_agent PUBLIC
 target_link_libraries(dpan_agent PUBLIC
     dpan_core
     dpan_association
+    dpan_memory
     dpan_nn
 )
 

@@ -74,6 +74,20 @@ public:
     size_t EmbeddedSize() const { return embedded_size_; }
     size_t TrunkWidth() const { return trunk_width_; }
     size_t HeadCount() const { return heads_.size(); }
+
+    /// Number of trainable values (weights and biases)
+    size_t ParameterCount() const;
+
+    /// All trainable parameters (embeddings, trunk, heads)
+    std::vector<nn::Parameter> AllParameters();
+
+    /// False if any weight or bias is NaN or infinite
+    bool AllFinite();
+
+    /// Widen both trunk layers to `width` units without changing any output
+    /// (Net2WiderNet: new units copy existing ones and the copies share
+    /// their outgoing weights). Optimizer state is reset.
+    void Widen(size_t width);
     const HeadSpec& Head(size_t index) const { return head_specs_.at(index); }
 
     /// Outputs of one head for a batch (logits for classifiers); a
@@ -134,9 +148,17 @@ public:
 
     void SetLearningRate(float learning_rate) { optimizer_.SetLearningRate(learning_rate); }
 
+    size_t ParameterCount() const { return parameter_count_; }
+
+    /// False if any weight or bias is NaN or infinite
+    bool AllFinite();
+
+    std::vector<nn::Parameter> Parameters() { return model_.Parameters(); }
+
 private:
     nn::Sequential model_;
     nn::Adam optimizer_;
+    size_t parameter_count_{0};
 };
 
 }  // namespace agent

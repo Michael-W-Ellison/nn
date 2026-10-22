@@ -1,6 +1,7 @@
 // File: tests/agent/components_test.cpp
 //
 // Agent internals: network, pattern memory, replay buffer
+#include "agent/drift_detector.hpp"
 #include "agent/network.hpp"
 #include "agent/pattern_memory.hpp"
 #include "agent/replay_buffer.hpp"
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
 
 namespace dpan {
@@ -123,19 +125,49 @@ TEST(PatternMemoryTest, MergesCloseStatesAndCreatesDistantOnes) {
     EXPECT_EQ(2u, memory.Size());
 }
 
-TEST(PatternMemoryTest, EvictsLeastRecentlyUsed) {
-    PatternMemory memory(1, 0, {}, 0, MemoryConfig(2));
-    auto p1 = memory.Insert(memory.Project({0}), 1, {});
-    auto p2 = memory.Insert(memory.Project({100}), 2, {});
-    memory.Insert(memory.Project({0}), 3, {});  // touches p1
+TEST(PatternMemoryTest, PrunesLowestUtilityPatterns) {
+    PatternMemory memory(1, 1, {}, 0, MemoryConfig(3));
+    // p2 (older) and p3 (newer): used once, one transition each
+    auto p2 = memory.Insert(memory.Project({100}), 1, {});
+    auto p3 = memory.Insert(memory.Project({-100}), 2, {});
+    // p1: used often and labelled consistently
+    auto p1 = memory.Insert(memory.Project({0}), 3, {});
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_FALSE(memory.Insert(memory.Project({0}), 4 + i, {}).created);
+        memory.AddLabel(p1.id, 0, 0);
+    }
     memory.RecordTransition(p2.id, p1.id);
-    EXPECT_EQ(1u, memory.Associations().GetAssociationCount());
-    auto p3 = memory.Insert(memory.Project({-100}), 4, {});
-    EXPECT_TRUE(p3.created);
-    EXPECT_EQ(2u, memory.Size());
+    memory.RecordTransition(p3.id, p1.id);
+    EXPECT_GT(memory.Utility(p1.id, 62), memory.Utility(p3.id, 62));
+    EXPECT_GT(memory.Utility(p3.id, 62), memory.Utility(p2.id, 62));
+
+    auto p4 = memory.Insert(memory.Project({300}), 5000, {});
+    EXPECT_TRUE(p4.created);
+    EXPECT_EQ(3u, memory.Size());
+    EXPECT_EQ(1u, memory.Pruned());
     EXPECT_TRUE(memory.Contains(p1.id));
+    EXPECT_TRUE(memory.Contains(p3.id));
     EXPECT_FALSE(memory.Contains(p2.id));
-    EXPECT_EQ(0u, memory.Associations().GetAssociationCount());  // edges of p2 removed
+    EXPECT_EQ(1u, memory.Associations().GetAssociationCount());  // p2's edge removed
+}
+
+TEST(PatternMemoryTest, StaysWithinByteBudget) {
+    PatternMemory::Config config = MemoryConfig(100000);
+    config.memory_budget_bytes = 64 * 1024;
+    PatternMemory memory(4, 1, {}, 4, config);
+    std::mt19937 rng(9);
+    std::normal_distribution<float> normal(0.0f, 10.0f);
+    PatternID previous;
+    for (uint64_t step = 1; step <= 5000; ++step) {
+        auto placed = memory.Insert(memory.Project({normal(rng), normal(rng), normal(rng), normal(rng)}), step,
+                                    {1, 2, 3, 4});
+        memory.AddLabel(placed.id, 0, step % 3);
+        if (step > 1) memory.RecordTransition(previous, placed.id);
+        previous = placed.id;
+        ASSERT_LE(memory.MemoryBytes(), config.memory_budget_bytes) << step;
+    }
+    EXPECT_GT(memory.Pruned(), 0u);
+    EXPECT_GT(memory.Size(), 20u);
 }
 
 TEST(PatternMemoryTest, VotesWithShortAndLongMemory) {
@@ -224,6 +256,85 @@ TEST(ReplayBufferTest, EvictionKeepsClassesBalanced) {
     uint64_t oldest = 2000;
     for (const auto& s : buffer.Draw(100)) oldest = std::min(oldest, s->step);
     EXPECT_LT(oldest, 1500u);
+}
+
+TEST(PageHinkleyTest, QuietOnStationaryNoisyLosses) {
+    std::mt19937 rng(10);
+    std::bernoulli_distribution error(0.3);
+    std::normal_distribution<double> squared(1.0, 0.5);
+    PageHinkley rate, regression;
+    for (int i = 0; i < 100000; ++i) {
+        ASSERT_FALSE(rate.Add(error(rng) ? 1.0 : 0.0)) << i;
+        ASSERT_FALSE(regression.Add(std::fabs(squared(rng)))) << i;
+    }
+}
+
+TEST(PageHinkleyTest, QuietOnRareErrorsOfAnAccurateModel) {
+    std::mt19937 rng(11);
+    std::bernoulli_distribution error(0.02);
+    PageHinkley test;
+    int alarms = 0;
+    for (int i = 0; i < 100000; ++i) alarms += test.Add(error(rng) ? 1.0 : 0.0);
+    EXPECT_LE(alarms, 2);
+}
+
+TEST(PageHinkleyTest, DetectsAnIncreaseQuickly) {
+    std::mt19937 rng(12);
+    std::bernoulli_distribution before(0.05), after(0.6);
+    PageHinkley test;
+    for (int i = 0; i < 2000; ++i) ASSERT_FALSE(test.Add(before(rng) ? 1.0 : 0.0));
+    int delay = 0;
+    while (!test.Add(after(rng) ? 1.0 : 0.0)) ++delay;
+    EXPECT_LT(delay, 30);
+    EXPECT_NEAR(0.05, test.MeanBeforeDrift(), 0.03);
+    EXPECT_EQ(0u, test.Count());  // restarted
+}
+
+TEST(AgentNetworkTest, WideningKeepsOutputsAndStillTrains) {
+    AgentNetwork network(Layout(), {{"c", HeadKind::CLASSIFIER, 3}, {"v", HeadKind::REGRESSOR, 2}}, 1e-2f, 6);
+    std::mt19937 rng(13);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    Matrix x(16, 12);
+    for (size_t i = 0; i < x.Size(); ++i) x.Data()[i] = normal(rng);
+    HeadTarget value;
+    value.values = {1.0f, -1.0f};
+    std::vector<const HeadTarget*> none(16, nullptr), values(16, &value);
+    for (int i = 0; i < 20; ++i) network.TrainBatch(x, {none, values}, {1.0f, 1.0f}, 5.0f);
+
+    Matrix before0 = network.Infer(x, 0), before1 = network.Infer(x, 1);
+    size_t parameters = network.ParameterCount();
+    network.Widen(48);
+    EXPECT_EQ(48u, network.TrunkWidth());
+    EXPECT_GT(network.ParameterCount(), parameters);
+    Matrix after0 = network.Infer(x, 0), after1 = network.Infer(x, 1);
+    for (size_t i = 0; i < before0.Size(); ++i) EXPECT_NEAR(before0.Data()[i], after0.Data()[i], 1e-4f);
+    for (size_t i = 0; i < before1.Size(); ++i) EXPECT_NEAR(before1.Data()[i], after1.Data()[i], 1e-4f);
+
+    float first = 0.0f, last = 0.0f;
+    for (int i = 0; i < 200; ++i) {
+        float loss = network.TrainBatch(x, {none, values}, {1.0f, 1.0f}, 5.0f)[1];
+        if (i == 0) first = loss;
+        last = loss;
+    }
+    EXPECT_LT(last, first);
+    EXPECT_TRUE(network.AllFinite());
+    network.AllParameters().front().value->Data()[0] = std::nanf("");
+    EXPECT_FALSE(network.AllFinite());
+}
+
+TEST(ReplayBufferTest, StaysWithinByteBudget) {
+    ReplayBuffer buffer(100000, 3, 20000);
+    for (uint64_t i = 1; i <= 1000; ++i) {
+        buffer.Add(MakeSample(i, 0));
+        ASSERT_LE(buffer.MemoryBytes(), 20000u);
+    }
+    EXPECT_GT(buffer.Size(), 10u);
+    EXPECT_LT(buffer.Size(), 1000u);
+    // Growing a stored sample is measured when it is added again
+    auto samples = buffer.Draw(1);
+    samples[0]->targets.resize(50);
+    buffer.Add(samples[0]);
+    EXPECT_LE(buffer.MemoryBytes(), 20000u);
 }
 
 }  // namespace

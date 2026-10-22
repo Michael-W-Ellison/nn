@@ -77,6 +77,43 @@ struct AgentConfig {
     float exploration_end{0.05f};        ///< ...falling linearly to this
     size_t exploration_steps{10000};     ///< ...over this many exploring Act calls per output
 
+    // Concept drift (section 4, rule 5): a Page-Hinkley test on each
+    // output's prequential network loss (ANOMALY: reconstruction error;
+    // not ACTION). On a detection, until the loss is back near its earlier
+    // level or drift_recovery_max_samples have passed: the learning rate is
+    // multiplied by drift_learning_rate_factor, drift_new_sample_share of
+    // each batch comes from the last drift_recent_window samples, and the
+    // pattern side votes with its short-term memory only.
+    bool detect_drift{true};
+    double drift_delta{0.5};          ///< Tolerated increase, in standard deviations of the loss
+    double drift_threshold{20.0};     ///< Accumulated increase that signals a drift
+    size_t drift_warmup{50};          ///< Losses observed before testing (after each detection)
+    float drift_learning_rate_factor{1.5f};
+    float drift_new_sample_share{0.9f};
+    size_t drift_recent_window{1000};
+    size_t drift_recovery_max_samples{3000};
+
+    // Safety (rule 7): a copy of the networks is kept every
+    // snapshot_interval observations while training is healthy; a training
+    // step that leaves a weight or loss NaN or infinite, or a loss above
+    // divergence_loss, restores it
+    size_t snapshot_interval{1000};
+    float divergence_loss{1e6f};
+
+    // Capacity (rule 6): when the learning rate would drop at a plateau,
+    // after capacity_min_samples samples, while the network does worse than
+    // the nearest-pattern vote on some output, the trunk is widened by
+    // capacity_growth (up to max_trunk_width) without changing its outputs
+    bool grow_capacity{true};
+    size_t capacity_min_samples{10000};
+    float capacity_growth{1.5f};
+
+    /// Bound on the agent's memory (replay buffer, pattern store, pending
+    /// steps, networks). After the fixed parts, 80% goes to the replay
+    /// buffer and 20% to the pattern store; each removes its least useful
+    /// entries to stay within its share.
+    size_t memory_budget_bytes{256u << 20};
+
     // Pattern memory
     size_t pattern_capacity{10000};
     size_t pattern_dimension{64};
@@ -143,6 +180,8 @@ struct OutputStats {
     float pattern_quality{0.0f};
     float neural_weight{0.0f};  ///< Current blend weight of the neural side
     float exploration{0.0f};    ///< ACTION: current probability of a random action
+    uint32_t drift_events{0};
+    bool recovering{false};     ///< Recovering from a detected drift
 };
 
 struct AgentStats {
@@ -154,7 +193,14 @@ struct AgentStats {
     size_t pending_steps{0};
     size_t replay_size{0};
     size_t patterns{0};
+    uint64_t patterns_pruned{0};
+    uint64_t drift_events{0};
+    bool recovering{false};
+    uint64_t rollbacks{0};          ///< Weights restored from a snapshot
+    uint64_t widenings{0};          ///< Trunk widenings
     size_t associations{0};
+    size_t memory_bytes{0};         ///< Estimated memory in use
+    size_t memory_budget_bytes{0};
     bool network_ready{false};
     size_t fused_size{0};
     size_t trunk_width{0};
@@ -230,9 +276,15 @@ public:
     /// restores the system clock
     void SetClock(std::shared_ptr<const Clock> clock);
 
+    /// Called with the agent's state when it logs; must not call the agent
     void SetLogger(Logger logger);
 
+    /// Called with Stats() every `every_steps` observations (outside the
+    /// agent's lock, so it may call the agent); nullptr removes it
+    void SetMetricsHook(std::function<void(const AgentStats&)> hook, size_t every_steps = 1000);
+
 private:
+    friend struct AgentTestAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

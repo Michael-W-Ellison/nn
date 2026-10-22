@@ -267,6 +267,23 @@ TEST(AgentTest, StatsDescribeTheAgent) {
     EXPECT_GT(stats.outputs[0].pattern_quality, 0.9f);
 }
 
+TEST(AgentTest, MetricsHookReceivesStatsAndMayCallTheAgent) {
+    Agent agent(ClassSpec());
+    std::vector<uint64_t> seen;
+    agent.SetMetricsHook([&](const AgentStats& stats) {
+        seen.push_back(stats.steps);
+        EXPECT_EQ(stats.steps, agent.Stats().steps);  // no deadlock: called outside the lock
+        EXPECT_GT(stats.memory_bytes, 0u);
+        EXPECT_LE(stats.memory_bytes, stats.memory_budget_bytes);
+    }, 100);
+    std::mt19937 rng(9);
+    for (int i = 0; i < 350; ++i) agent.Observe({{"x", Point(rng, i % 2)}});
+    EXPECT_EQ((std::vector<uint64_t>{100, 200, 300}), seen);
+    agent.SetMetricsHook(nullptr);
+    for (int i = 0; i < 100; ++i) agent.Observe({{"x", Point(rng, i % 2)}});
+    EXPECT_EQ(3u, seen.size());
+}
+
 TEST(AgentTest, SameSeedSameResults) {
     auto run = [] {
         Agent agent(ClassSpec());

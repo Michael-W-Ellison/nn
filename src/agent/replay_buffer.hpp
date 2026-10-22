@@ -47,35 +47,64 @@ struct Sample {
     int balance_class{-1};
 
     bool in_replay{false};
+    size_t stored_bytes{0};  // MemoryBytes() when the buffer last measured it
 
     void SetFused(const std::vector<float>& fused);
     void Fill(float* row, size_t size) const;
     void SetNext(const Sample& next);
     void FillNext(float* row, size_t size) const;
+
+    /// Estimated memory use, including the shared_ptr control block
+    size_t MemoryBytes() const;
 };
 
 using SamplePtr = std::shared_ptr<Sample>;
 
 class ReplayBuffer {
 public:
-    ReplayBuffer(size_t capacity, uint32_t seed);
+    /// @param memory_budget_bytes Bound on MemoryBytes() (0 = capacity only)
+    ReplayBuffer(size_t capacity, uint32_t seed, size_t memory_budget_bytes = 0);
 
-    /// Add a sample (no-op if it is already in the buffer)
+    /// Add a sample. If it is already in the buffer, its size is measured
+    /// again (call this after changing a stored sample).
     void Add(const SamplePtr& sample);
 
     /// Up to `count` distinct random samples
     std::vector<SamplePtr> Draw(size_t count);
+
+    /// Apply `change` to every stored sample, then remove those for which
+    /// `remove` returns true
+    template <typename Change, typename Remove>
+    void Update(Change change, Remove remove) {
+        for (size_t i = 0; i < samples_.size();) {
+            change(*samples_[i]);
+            if (remove(*samples_[i])) {
+                Erase(i);
+            } else {
+                size_t bytes = samples_[i]->MemoryBytes();
+                bytes_ = bytes_ - samples_[i]->stored_bytes + bytes;
+                samples_[i]->stored_bytes = bytes;
+                ++i;
+            }
+        }
+    }
 
     /// Call after changing a stored sample's balance_class
     void Reclassify(const SamplePtr& sample, int old_class);
 
     size_t Size() const { return samples_.size(); }
     size_t Capacity() const { return capacity_; }
+    size_t MemoryBytes() const { return bytes_; }
+    void SetMemoryBudget(size_t bytes);
 
 private:
     void Evict();
+    void Erase(size_t index);
+    void EnforceBudget(size_t incoming);
 
     size_t capacity_;
+    size_t budget_;
+    size_t bytes_{0};
     std::mt19937 rng_;
     std::vector<SamplePtr> samples_;
     std::unordered_map<int, size_t> class_counts_;
