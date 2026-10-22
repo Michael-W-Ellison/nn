@@ -245,5 +245,15 @@ float ReduceOnPlateau::NextRate(size_t, float, float current_rate, float loss) {
     return current_rate;
 }
 
+void ReduceOnPlateau::SaveState(std::ostream& out) const {
+    io::Write<float>(out, best_loss_);
+    io::WriteSize(out, steps_without_improvement_);
+}
+
+void ReduceOnPlateau::LoadState(std::istream& in) {
+    best_loss_ = io::Read<float>(in);
+    steps_without_improvement_ = io::ReadSize(in);
+}
+
 }  // namespace nn
 }  // namespace dpan

@@ -24,7 +24,7 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
-| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. Saving is not implemented yet. |
+| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. `Save`/`Load` write one checkpoint from which an agent continues exactly. |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
@@ -118,6 +118,14 @@ StepId step = agent.Observe({{"position", std::vector<float>{x, y}}});
 std::string move = agent.Act(step, "move");          // explores; Act(step, "move", false) is greedy
 agent.Feedback(step, "reward", -0.04);
 agent.EndEpisode(true);                              // when the episode ends (true = terminal)
+```
+
+Save and restore everything learned (a loaded agent continues exactly as
+the saved one would):
+
+```cpp
+agent.Save("agent.dpag");                       // false if the file cannot be written
+Agent restored = Agent::Load("agent.dpag");     // throws std::runtime_error if malformed
 ```
 
 Sizes, value ranges, vocabularies and (unless listed) class names are

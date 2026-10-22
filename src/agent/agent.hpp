@@ -23,7 +23,7 @@
 // reinforced by reward sign break ties and choose actions during the cold
 // start.
 //
-// Not implemented yet: Save/Load (Phase 5).
+// Save/Load write and read one versioned checkpoint of everything learned.
 //
 // All public methods are thread-safe (one internal mutex).
 #pragma once
@@ -266,6 +266,22 @@ public:
     void EndEpisode(bool terminal = true);
 
     AgentStats Stats() const;
+
+    /// Save everything the agent has learned and its pending steps to one
+    /// versioned checkpoint: spec, config, encoder statistics and
+    /// vocabularies, networks with optimizer state, replay buffer, patterns,
+    /// associations, counters and random state. A loaded agent continues
+    /// exactly as the saved one would have. The logger and metrics hook are
+    /// not saved.
+    /// @return false if the file cannot be written (an existing file is
+    ///         only replaced by a complete checkpoint)
+    bool Save(const std::string& path) const;
+    /// @throws std::runtime_error if writing fails
+    void Save(std::ostream& out) const;
+
+    /// @throws std::runtime_error for a missing, malformed or unsupported checkpoint
+    static Agent Load(const std::string& path);
+    static Agent Load(std::istream& in);
 
     const EnvironmentSpec& Spec() const;
     /// Settings in effect (with the action_* settings applied when the

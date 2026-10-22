@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <optional>
@@ -89,6 +90,12 @@ public:
     /// Clear per-episode state (TIME_SERIES windows); learned statistics stay
     virtual void ResetEpisode() {}
 
+    /// Write / restore everything learned (statistics, sizes, vocabularies,
+    /// windows). LoadState expects an encoder built from the same spec.
+    /// @throws std::runtime_error on malformed data
+    virtual void SaveState(std::ostream& out) const = 0;
+    virtual void LoadState(std::istream& in) = 0;
+
 protected:
     explicit Encoder(InputSpec spec) : spec_(std::move(spec)) {}
 
@@ -113,6 +120,9 @@ struct RunningStats {
 
     /// (x - mean) / stddev clipped to ±clip; 0 when the deviation is 0
     float Standardize(double x, float clip) const;
+
+    void Save(std::ostream& out) const;
+    void Load(std::istream& in);
 };
 
 /// NUMERIC: standardized with running mean and variance, clipped to ±5σ.
@@ -124,6 +134,8 @@ public:
     size_t OutputSize() const override { return size_ == 0 ? 0 : size_ + 1; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     size_t Size() const { return size_; }
     const std::vector<RunningStats>& Statistics() const { return stats_; }
@@ -150,6 +162,8 @@ public:
     size_t OutputSize() const override { return spec_.categories.size() + 2; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Times each category was seen; the last entry counts unknown categories
     const std::vector<uint64_t>& Counts() const { return counts_; }
@@ -173,6 +187,8 @@ public:
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Categories seen so far with their counts (up to max_tracked_categories)
     const std::map<std::string, uint64_t>& ObservedCategories() const { return observed_; }
@@ -201,6 +217,8 @@ public:
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Lowercased words: runs of ASCII letters and digits, or of non-ASCII
     /// bytes (kept whole, so UTF-8 words are not split)
@@ -230,6 +248,8 @@ public:
     size_t OutputSize() const override;
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
     void ResetEpisode() override;
 
     size_t SeriesCount() const { return series_; }
@@ -274,6 +294,8 @@ public:
     size_t OutputSize() const override { return side_ * side_ * spec_.image_channels + 1; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Image size declared in the spec or inferred from the first image
     size_t Width() const { return width_; }
@@ -332,6 +354,11 @@ public:
 
     /// Clear per-episode state of all channels
     void ResetEpisode();
+
+    /// Write / restore the learned state of every channel (the inputs and
+    /// config come from the constructor)
+    void SaveState(std::ostream& out) const;
+    void LoadState(std::istream& in);
 
     size_t ChannelCount() const { return encoders_.size(); }
     const Encoder& Channel(size_t index) const { return *encoders_.at(index); }

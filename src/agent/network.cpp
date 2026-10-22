@@ -1,6 +1,7 @@
 // File: src/agent/network.cpp
 #include "agent/network.hpp"
 
+#include "core/binary_io.hpp"
 #include "nn/loss.hpp"
 
 #include <algorithm>
@@ -83,6 +84,79 @@ AgentNetwork::AgentNetwork(const AgentNetwork& other)
     for (const auto& head : other.heads_) {
         heads_.push_back(head ? CloneDense(*head) : nullptr);
     }
+}
+
+namespace {
+
+std::unique_ptr<nn::Dense> ReadDense(std::istream& in) {
+    auto layer = nn::Layer::Deserialize(in);
+    if (layer->Type() != "Dense") throw std::runtime_error("AgentNetwork: expected a Dense layer");
+    return std::unique_ptr<nn::Dense>(static_cast<nn::Dense*>(layer.release()));
+}
+
+}  // namespace
+
+void AgentNetwork::Serialize(std::ostream& out) const {
+    io::WriteSize(out, input_size_);
+    io::WriteSize(out, embedded_size_);
+    io::WriteSize(out, trunk_width_);
+    io::Write<float>(out, learning_rate_);
+    io::Write<uint32_t>(out, seed_);
+    io::WriteSize(out, embeddings_.size());
+    for (const auto& embedding : embeddings_) {
+        io::WriteSize(out, embedding.offset);
+        io::WriteSize(out, embedding.size);
+        io::WriteSize(out, embedding.output_offset);
+        io::Write<uint8_t>(out, embedding.dense ? 1 : 0);
+        if (embedding.dense) embedding.dense->Serialize(out);
+    }
+    io::WriteSize(out, trunk_.size());
+    for (const auto& layer : trunk_) layer->Serialize(out);
+    io::WriteSize(out, heads_.size());
+    for (size_t h = 0; h < heads_.size(); ++h) {
+        io::WriteString(out, head_specs_[h].name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(head_specs_[h].kind));
+        io::WriteSize(out, head_specs_[h].size);
+        io::Write<uint8_t>(out, heads_[h] ? 1 : 0);
+        if (heads_[h]) heads_[h]->Serialize(out);
+        head_optimizers_[h].SaveState(out);
+    }
+    body_optimizer_.SaveState(out);
+}
+
+std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
+    std::unique_ptr<AgentNetwork> network(new AgentNetwork());
+    network->input_size_ = io::ReadSize(in, 1u << 30);
+    network->embedded_size_ = io::ReadSize(in, 1u << 30);
+    network->trunk_width_ = io::ReadSize(in, 1u << 20);
+    network->learning_rate_ = io::Read<float>(in);
+    network->seed_ = io::Read<uint32_t>(in);
+    size_t embeddings = io::ReadSize(in, 1u << 20);
+    for (size_t i = 0; i < embeddings; ++i) {
+        Embedding embedding{};
+        embedding.offset = io::ReadSize(in, 1u << 30);
+        embedding.size = io::ReadSize(in, 1u << 30);
+        embedding.output_offset = io::ReadSize(in, 1u << 30);
+        if (io::Read<uint8_t>(in)) embedding.dense = ReadDense(in);
+        network->embeddings_.push_back(std::move(embedding));
+    }
+    size_t layers = io::ReadSize(in, 64);
+    for (size_t i = 0; i < layers; ++i) network->trunk_.push_back(nn::Layer::Deserialize(in));
+    size_t heads = io::ReadSize(in, 1u << 16);
+    for (size_t h = 0; h < heads; ++h) {
+        HeadSpec spec;
+        spec.name = io::ReadString(in, 1u << 16);
+        auto kind = io::Read<uint8_t>(in);
+        if (kind > static_cast<uint8_t>(HeadKind::Q_VALUES)) throw std::runtime_error("AgentNetwork: bad head kind");
+        spec.kind = static_cast<HeadKind>(kind);
+        spec.size = io::ReadSize(in, 1u << 24);
+        network->head_specs_.push_back(spec);
+        network->heads_.push_back(io::Read<uint8_t>(in) ? ReadDense(in) : nullptr);
+        network->head_optimizers_.emplace_back();
+        network->head_optimizers_.back().LoadState(in);
+    }
+    network->body_optimizer_.LoadState(in);
+    return network;
 }
 
 Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
@@ -443,6 +517,20 @@ std::vector<float> AnomalyAutoencoder::Errors(const Matrix& inputs) const {
         errors[r] = static_cast<float>(sum / static_cast<double>(inputs.Cols()));
     }
     return errors;
+}
+
+void AnomalyAutoencoder::Serialize(std::ostream& out) const {
+    model_.Serialize(out);
+    optimizer_.SaveState(out);
+    io::WriteSize(out, parameter_count_);
+}
+
+std::unique_ptr<AnomalyAutoencoder> AnomalyAutoencoder::Deserialize(std::istream& in) {
+    std::unique_ptr<AnomalyAutoencoder> autoencoder(new AnomalyAutoencoder());
+    autoencoder->model_ = nn::Sequential::Deserialize(in);
+    autoencoder->optimizer_.LoadState(in);
+    autoencoder->parameter_count_ = io::ReadSize(in);
+    return autoencoder;
 }
 
 bool AnomalyAutoencoder::AllFinite() {

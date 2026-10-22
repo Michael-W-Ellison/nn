@@ -1,6 +1,8 @@
 // File: src/agent/encoders.cpp
 #include "agent/encoders.hpp"
 
+#include "core/binary_io.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <locale>
@@ -120,6 +122,33 @@ float RunningStats::Standardize(double x, float clip) const {
     return Clip(deviation / sd, clip);
 }
 
+void RunningStats::Save(std::ostream& out) const {
+    io::Write<uint64_t>(out, count);
+    io::Write<double>(out, mean);
+    io::Write<double>(out, m2);
+}
+
+void RunningStats::Load(std::istream& in) {
+    count = io::Read<uint64_t>(in);
+    mean = io::Read<double>(in);
+    m2 = io::Read<double>(in);
+}
+
+namespace {
+
+void SaveStats(std::ostream& out, const std::vector<RunningStats>& stats) {
+    io::WriteSize(out, stats.size());
+    for (const auto& s : stats) s.Save(out);
+}
+
+std::vector<RunningStats> LoadStats(std::istream& in) {
+    std::vector<RunningStats> stats(io::ReadSize(in, 1u << 24));
+    for (auto& s : stats) s.Load(in);
+    return stats;
+}
+
+}  // namespace
+
 // ============================================================================
 // NumericEncoder
 // ============================================================================
@@ -186,6 +215,16 @@ void NumericEncoder::Update(const Value* value) {
     }
 }
 
+void NumericEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, size_);
+    SaveStats(out, stats_);
+}
+
+void NumericEncoder::LoadState(std::istream& in) {
+    size_ = io::ReadSize(in, 1u << 24);
+    stats_ = LoadStats(in);
+}
+
 // ============================================================================
 // OneHotEncoder
 // ============================================================================
@@ -237,6 +276,17 @@ void OneHotEncoder::Update(const Value* value) {
     if (auto index = Index(*value)) {
         ++counts_[*index];
     }
+}
+
+void OneHotEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, counts_.size());
+    for (uint64_t c : counts_) io::Write<uint64_t>(out, c);
+}
+
+void OneHotEncoder::LoadState(std::istream& in) {
+    size_t n = io::ReadSize(in, 1u << 24);
+    if (n != counts_.size()) throw std::runtime_error(Describe() + ": saved state has another category count");
+    for (auto& c : counts_) c = io::Read<uint64_t>(in);
 }
 
 // ============================================================================
@@ -297,6 +347,23 @@ void HashedCategoryEncoder::Update(const Value* value) {
         } else if (observed_.size() < max_tracked_) {
             observed_.emplace(*category, 1);
         }
+    }
+}
+
+void HashedCategoryEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, observed_.size());
+    for (const auto& [category, count] : observed_) {
+        io::WriteString(out, category);
+        io::Write<uint64_t>(out, count);
+    }
+}
+
+void HashedCategoryEncoder::LoadState(std::istream& in) {
+    observed_.clear();
+    size_t n = io::ReadSize(in, 1u << 30);
+    for (size_t i = 0; i < n; ++i) {
+        std::string category = io::ReadString(in);
+        observed_[category] = io::Read<uint64_t>(in);
     }
 }
 
@@ -372,6 +439,10 @@ void TextEncoder::Update(const Value* value) {
     }
     ++texts_seen_;
 }
+
+void TextEncoder::SaveState(std::ostream& out) const { io::Write<uint64_t>(out, texts_seen_); }
+
+void TextEncoder::LoadState(std::istream& in) { texts_seen_ = io::Read<uint64_t>(in); }
 
 // ============================================================================
 // TimeSeriesEncoder
@@ -507,6 +578,26 @@ void TimeSeriesEncoder::ResetEpisode() {
     }
 }
 
+void TimeSeriesEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, series_);
+    io::WriteSize(out, state_.size());
+    for (const auto& current : state_) {
+        current.stats.Save(out);
+        io::WriteSize(out, current.values.size());
+        for (double v : current.values) io::Write<double>(out, v);
+    }
+}
+
+void TimeSeriesEncoder::LoadState(std::istream& in) {
+    series_ = io::ReadSize(in, 1u << 24);
+    state_.assign(io::ReadSize(in, 1u << 24), Series());
+    for (auto& current : state_) {
+        current.stats.Load(in);
+        size_t n = io::ReadSize(in, 1u << 24);
+        for (size_t i = 0; i < n; ++i) current.values.push_back(io::Read<double>(in));
+    }
+}
+
 // ============================================================================
 // ImageEncoder
 // ============================================================================
@@ -624,6 +715,18 @@ void ImageEncoder::Update(const Value* value) {
             max_pixel_ = std::max(max_pixel_, p);
         }
     }
+}
+
+void ImageEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, width_);
+    io::WriteSize(out, height_);
+    io::Write<float>(out, max_pixel_);
+}
+
+void ImageEncoder::LoadState(std::istream& in) {
+    width_ = io::ReadSize(in, 1u << 24);
+    height_ = io::ReadSize(in, 1u << 24);
+    max_pixel_ = io::Read<float>(in);
 }
 
 // ============================================================================
@@ -752,6 +855,18 @@ std::optional<std::vector<float>> ObservationEncoder::Encode(const Observation& 
         encoders_[i]->Update(values[i]);
     }
     return fused;
+}
+
+void ObservationEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, encoders_.size());
+    for (const auto& encoder : encoders_) encoder->SaveState(out);
+}
+
+void ObservationEncoder::LoadState(std::istream& in) {
+    if (io::ReadSize(in, 1u << 20) != encoders_.size()) {
+        throw std::runtime_error("ObservationEncoder::LoadState: saved state has another channel count");
+    }
+    for (auto& encoder : encoders_) encoder->LoadState(in);
 }
 
 void ObservationEncoder::ResetEpisode() {

@@ -36,3 +36,7 @@ else()
         TEST_SUFFIX ".long"
         PROPERTIES LABELS long TIMEOUT 1800)
 endif()
+
+add_executable(agent_persistence_test persistence_test.cpp)
+target_link_libraries(agent_persistence_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_persistence_test PROPERTIES TIMEOUT 600)

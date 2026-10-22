@@ -179,7 +179,8 @@ integration test with a fixed seed and a fake clock.
 | 2. Agent: supervised and self-supervised | Complete. `src/agent/agent.hpp`. Reference environments A–D pass (results and notes below). |
 | 3. Reinforcement | Complete. `Agent::Act`, REWARD and OUTCOME feedback for ACTION outputs, episodes. Reference environments E–F pass (results and notes below). |
 | 4. Robustness and self-tuning | Complete. Drift detection and recovery, trunk widening, rollback, memory budgets, metrics hook (results and notes below). |
-| 5–8 | Not started |
+| 5. Full persistence | Complete. `Agent::Save` / `Agent::Load`: one versioned checkpoint; a loaded agent continues exactly as the saved one (results and notes below). |
+| 6–8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -433,3 +434,63 @@ errors is found within 30 samples). Reference environments A–F still pass
   rollbacks, widenings and pruned patterns.
 - **Testing.** `agent/agent_testing.hpp` (`AgentTestAccess::InjectNaN`)
   writes a NaN into a weight, for tests of the rollback.
+
+### Phase 5 results
+
+`tests/agent/persistence_test.cpp`: an agent runs part of a stream, is
+saved and loaded, and both continue on the same data; every prediction,
+action, probability, value, score and statistic is compared bit for bit.
+
+| Scenario | Result |
+|---|---|
+| All input types (numeric with inferred size, known and open categories, text, time series, image), CLASS with learned classes, VALUE, NEXT_OBSERVATION, ANOMALY; labels and targets 7 steps late (pending steps cross the save); OUTCOME feedback; saved after a learning-rate drop | Identical over 1,500 further steps |
+| Saved before the input sizes are known | Identical over 600 steps |
+| Saved while recovering from a drift | Identical until step 4,500 (about 2,000 further steps) |
+| Reinforcement learning (gridworld), saved in the middle of an episode, with exploration | Identical over 3,000 steps |
+
+The tests detect missing state: with the agent's random state, the replay
+buffer's random state, the associations or the numeric input statistics
+left out of loading, at least one scenario fails. The learning-rate
+schedule's state round-trips exactly in a unit test; in these streams a
+fresh schedule happens to reach the same state at the next check. Load also
+rejects a wrong file type, an unsupported version and truncated files
+(`std::runtime_error`); `Save` returns false when the file cannot be
+written and replaces an existing checkpoint only with a complete one
+(written to a temporary file, then renamed).
+
+### Phase 5 implementation notes
+
+- **Format.** `DPAG`, version 1 (little-endian, `core/binary_io.hpp`),
+  then the spec, the configuration in effect (all fields), and the state:
+  encoder statistics, windows and vocabularies; per output the learned
+  classes, action pattern IDs, target statistics, running quality
+  estimates, drift detector and recovery state; the network, target
+  network and snapshot (weights, head layout, Adam state of every
+  optimizer), the autoencoder and its snapshot; the pattern store
+  (projection, patterns in store order, label serials, counters, every
+  association with its type and strength); every sample once, with the
+  replay buffer, newest queue, recent window, pending steps and next-step
+  links referring to it by number, so shared samples stay shared; the
+  learning-rate schedule, counters, anomaly baselines, and the full state
+  of both random-number generators. The logger and metrics hook are not
+  saved. The plan's "co-occurrence data" is the association store: the
+  agent does not use the co-occurrence tracker (Phase 2 notes).
+- **Exactness.** Three changes made behaviour depend only on saved state:
+  ties between transition strengths are broken by pattern position, not
+  by the association store's internal order (which depends on pattern ID
+  values; IDs come from a process-wide counter and differ between a run
+  and a copy loaded in the same process); a pattern's average association
+  strength is summed in sorted order; memory estimates count element
+  sizes, not vector capacities (which differ after loading). Results of
+  A–F and the Phase 4 tests are unchanged, except the million-step test:
+  peak estimate still 14.9 MB of 16 MB; resident memory 26.3 MB at step
+  200,000 and at step 1,000,000 (the replay buffer now holds about 31,000
+  samples instead of 29,000). Loading reserves pattern IDs up
+  to the largest one restored, so new patterns cannot reuse them in
+  another process.
+- **Supporting changes.** `LearningRateSchedule` gained `SaveState` /
+  `LoadState` (state of `ReduceOnPlateau`); encoders, `AgentNetwork`,
+  `AnomalyAutoencoder`, `PatternMemory`, `Sample` and `ReplayBuffer` gained
+  serialization.
+- **Size.** A checkpoint holds the replay buffer, so it is roughly the
+  memory the agent uses (bounded by `memory_budget_bytes`).

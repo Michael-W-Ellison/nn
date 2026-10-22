@@ -9,6 +9,8 @@
 // and reports a drift when m - M > threshold, then starts over.
 #pragma once
 
+#include "core/binary_io.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -62,6 +64,16 @@ public:
     double MeanBeforeDrift() const { return last_mean_; }
 
     uint64_t Count() const { return count_; }
+
+    void Save(std::ostream& out) const {
+        io::Write<uint64_t>(out, count_);
+        for (double v : {mean_, m2_, sum_, minimum_, last_mean_}) io::Write<double>(out, v);
+    }
+
+    void Load(std::istream& in) {
+        count_ = io::Read<uint64_t>(in);
+        for (double* v : {&mean_, &m2_, &sum_, &minimum_, &last_mean_}) *v = io::Read<double>(in);
+    }
 
 private:
     Config config_;

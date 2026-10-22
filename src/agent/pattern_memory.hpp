@@ -117,6 +117,15 @@ public:
     /// Estimated memory use: patterns, projection and associations
     size_t MemoryBytes() const;
 
+    /// Write / restore all patterns, associations and counters. LoadState
+    /// expects a memory constructed with the same sizes and config.
+    /// @throws std::runtime_error on malformed data
+    void SaveState(std::ostream& out) const;
+    void LoadState(std::istream& in);
+
+    /// Largest pattern ID in use (0 if none)
+    PatternID::ValueType MaxPatternId() const;
+
     /// Change the byte budget (takes effect at the next insertion)
     void SetMemoryBudget(size_t bytes) { config_.memory_budget_bytes = bytes; }
 

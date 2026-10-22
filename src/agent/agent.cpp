@@ -2,6 +2,7 @@
 #include "agent/agent.hpp"
 
 #include "agent/agent_testing.hpp"
+#include "core/binary_io.hpp"
 #include "agent/drift_detector.hpp"
 #include "agent/network.hpp"
 #include "agent/pattern_memory.hpp"
@@ -12,6 +13,8 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <cstdio>
+#include <fstream>
 #include <limits>
 #include <locale>
 #include <map>
@@ -116,6 +119,269 @@ float Percentile(const std::deque<float>& baseline, float x) {
         else if (b == x) below += 0.5;
     }
     return static_cast<float>(below / static_cast<double>(baseline.size()));
+}
+
+// ============================================================================
+// Checkpoint format helpers
+// ============================================================================
+
+constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
+constexpr uint32_t kCheckpointVersion = 1;
+
+template <typename T>
+void WriteVector(std::ostream& out, const std::vector<T>& values) {
+    io::WriteSize(out, values.size());
+    for (const T& v : values) io::Write<T>(out, v);
+}
+
+template <typename T>
+std::vector<T> ReadVector(std::istream& in) {
+    std::vector<T> values(io::ReadSize(in, 1u << 30));
+    for (T& v : values) v = io::Read<T>(in);
+    return values;
+}
+
+void WriteStrings(std::ostream& out, const std::vector<std::string>& values) {
+    io::WriteSize(out, values.size());
+    for (const auto& v : values) io::WriteString(out, v);
+}
+
+std::vector<std::string> ReadStrings(std::istream& in) {
+    std::vector<std::string> values(io::ReadSize(in, 1u << 24));
+    for (auto& v : values) v = io::ReadString(in, 1u << 20);
+    return values;
+}
+
+template <typename Enum>
+Enum ReadEnum(std::istream& in, Enum last) {
+    auto value = io::Read<uint8_t>(in);
+    if (value > static_cast<uint8_t>(last)) throw std::runtime_error("Agent checkpoint: bad enum value");
+    return static_cast<Enum>(value);
+}
+
+void SaveSpec(std::ostream& out, const EnvironmentSpec& spec) {
+    io::WriteSize(out, spec.inputs.size());
+    for (const auto& i : spec.inputs) {
+        io::WriteString(out, i.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(i.type));
+        io::WriteSize(out, i.size);
+        WriteStrings(out, i.categories);
+        io::WriteSize(out, i.width);
+        io::WriteSize(out, i.height);
+        io::WriteSize(out, i.image_channels);
+    }
+    io::WriteSize(out, spec.feedback.size());
+    for (const auto& f : spec.feedback) {
+        io::WriteString(out, f.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(f.type));
+        io::WriteString(out, f.output);
+    }
+    io::WriteSize(out, spec.outputs.size());
+    for (const auto& o : spec.outputs) {
+        io::WriteString(out, o.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(o.type));
+        WriteStrings(out, o.classes_or_actions);
+        io::WriteSize(out, o.size);
+    }
+}
+
+EnvironmentSpec LoadSpec(std::istream& in) {
+    EnvironmentSpec spec;
+    spec.inputs.resize(io::ReadSize(in, 1u << 16));
+    for (auto& i : spec.inputs) {
+        i.name = io::ReadString(in, 1u << 16);
+        i.type = ReadEnum(in, InputType::TIME_SERIES);
+        i.size = io::ReadSize(in);
+        i.categories = ReadStrings(in);
+        i.width = io::ReadSize(in);
+        i.height = io::ReadSize(in);
+        i.image_channels = io::ReadSize(in);
+    }
+    spec.feedback.resize(io::ReadSize(in, 1u << 16));
+    for (auto& f : spec.feedback) {
+        f.name = io::ReadString(in, 1u << 16);
+        f.type = ReadEnum(in, FeedbackType::OUTCOME);
+        f.output = io::ReadString(in, 1u << 16);
+    }
+    spec.outputs.resize(io::ReadSize(in, 1u << 16));
+    for (auto& o : spec.outputs) {
+        o.name = io::ReadString(in, 1u << 16);
+        o.type = ReadEnum(in, OutputType::ANOMALY);
+        o.classes_or_actions = ReadStrings(in);
+        o.size = io::ReadSize(in);
+    }
+    return spec;
+}
+
+void SaveConfig(std::ostream& out, const AgentConfig& c) {
+    io::Write<uint32_t>(out, c.seed);
+    io::Write<float>(out, c.learning_rate);
+    io::Write<float>(out, c.min_learning_rate);
+    io::WriteSize(out, c.min_trunk_width);
+    io::WriteSize(out, c.max_trunk_width);
+    io::Write<float>(out, c.gradient_clip_norm);
+    io::WriteSize(out, c.train_every);
+    io::WriteSize(out, c.batch_size);
+    io::Write<float>(out, c.new_sample_share);
+    io::WriteSize(out, c.replay_capacity);
+    io::WriteSize(out, c.cold_start_samples);
+    io::WriteSize(out, c.feedback_timeout);
+    io::WriteSize(out, c.plateau_interval);
+    io::WriteSize(out, c.plateau_patience);
+    io::Write<float>(out, c.plateau_factor);
+    io::WriteSize(out, c.action_train_every);
+    io::Write<float>(out, c.action_learning_rate);
+    io::WriteSize(out, c.action_min_trunk_width);
+    io::WriteSize(out, c.action_return_steps);
+    io::Write<float>(out, c.discount);
+    io::WriteSize(out, c.target_sync);
+    io::Write<float>(out, c.exploration_start);
+    io::Write<float>(out, c.exploration_end);
+    io::WriteSize(out, c.exploration_steps);
+    io::Write<uint8_t>(out, c.detect_drift ? 1 : 0);
+    io::Write<double>(out, c.drift_delta);
+    io::Write<double>(out, c.drift_threshold);
+    io::WriteSize(out, c.drift_warmup);
+    io::Write<float>(out, c.drift_learning_rate_factor);
+    io::Write<float>(out, c.drift_new_sample_share);
+    io::WriteSize(out, c.drift_recent_window);
+    io::WriteSize(out, c.drift_recovery_max_samples);
+    io::WriteSize(out, c.snapshot_interval);
+    io::Write<float>(out, c.divergence_loss);
+    io::Write<uint8_t>(out, c.grow_capacity ? 1 : 0);
+    io::WriteSize(out, c.capacity_min_samples);
+    io::Write<float>(out, c.capacity_growth);
+    io::WriteSize(out, c.memory_budget_bytes);
+    io::WriteSize(out, c.pattern_capacity);
+    io::WriteSize(out, c.pattern_dimension);
+    io::WriteSize(out, c.neighbors);
+    io::Write<float>(out, c.merge_ratio);
+    io::WriteSize(out, c.pattern_label_horizon);
+    io::Write<float>(out, c.quality_rate);
+    io::WriteSize(out, c.anomaly_baseline);
+    io::WriteSize(out, c.max_classes);
+    io::Write<float>(out, c.encoder.clip_sigma);
+    io::Write<uint64_t>(out, c.encoder.statistics_limit);
+    io::WriteSize(out, c.encoder.category_buckets);
+    io::WriteSize(out, c.encoder.category_embedding_size);
+    io::WriteSize(out, c.encoder.text_buckets);
+    io::WriteSize(out, c.encoder.text_embedding_size);
+    io::WriteSize(out, c.encoder.time_series_window);
+    io::WriteSize(out, c.encoder.image_size);
+    io::WriteSize(out, c.encoder.max_tracked_categories);
+}
+
+AgentConfig LoadConfig(std::istream& in) {
+    AgentConfig c;
+    c.seed = io::Read<uint32_t>(in);
+    c.learning_rate = io::Read<float>(in);
+    c.min_learning_rate = io::Read<float>(in);
+    c.min_trunk_width = io::ReadSize(in);
+    c.max_trunk_width = io::ReadSize(in);
+    c.gradient_clip_norm = io::Read<float>(in);
+    c.train_every = io::ReadSize(in);
+    c.batch_size = io::ReadSize(in);
+    c.new_sample_share = io::Read<float>(in);
+    c.replay_capacity = io::ReadSize(in);
+    c.cold_start_samples = io::ReadSize(in);
+    c.feedback_timeout = io::ReadSize(in);
+    c.plateau_interval = io::ReadSize(in);
+    c.plateau_patience = io::ReadSize(in);
+    c.plateau_factor = io::Read<float>(in);
+    c.action_train_every = io::ReadSize(in);
+    c.action_learning_rate = io::Read<float>(in);
+    c.action_min_trunk_width = io::ReadSize(in);
+    c.action_return_steps = io::ReadSize(in);
+    c.discount = io::Read<float>(in);
+    c.target_sync = io::ReadSize(in);
+    c.exploration_start = io::Read<float>(in);
+    c.exploration_end = io::Read<float>(in);
+    c.exploration_steps = io::ReadSize(in);
+    c.detect_drift = io::Read<uint8_t>(in) != 0;
+    c.drift_delta = io::Read<double>(in);
+    c.drift_threshold = io::Read<double>(in);
+    c.drift_warmup = io::ReadSize(in);
+    c.drift_learning_rate_factor = io::Read<float>(in);
+    c.drift_new_sample_share = io::Read<float>(in);
+    c.drift_recent_window = io::ReadSize(in);
+    c.drift_recovery_max_samples = io::ReadSize(in);
+    c.snapshot_interval = io::ReadSize(in);
+    c.divergence_loss = io::Read<float>(in);
+    c.grow_capacity = io::Read<uint8_t>(in) != 0;
+    c.capacity_min_samples = io::ReadSize(in);
+    c.capacity_growth = io::Read<float>(in);
+    c.memory_budget_bytes = io::ReadSize(in);
+    c.pattern_capacity = io::ReadSize(in);
+    c.pattern_dimension = io::ReadSize(in);
+    c.neighbors = io::ReadSize(in);
+    c.merge_ratio = io::Read<float>(in);
+    c.pattern_label_horizon = io::ReadSize(in);
+    c.quality_rate = io::Read<float>(in);
+    c.anomaly_baseline = io::ReadSize(in);
+    c.max_classes = io::ReadSize(in);
+    c.encoder.clip_sigma = io::Read<float>(in);
+    c.encoder.statistics_limit = io::Read<uint64_t>(in);
+    c.encoder.category_buckets = io::ReadSize(in);
+    c.encoder.category_embedding_size = io::ReadSize(in);
+    c.encoder.text_buckets = io::ReadSize(in);
+    c.encoder.text_embedding_size = io::ReadSize(in);
+    c.encoder.time_series_window = io::ReadSize(in);
+    c.encoder.image_size = io::ReadSize(in);
+    c.encoder.max_tracked_categories = io::ReadSize(in);
+    return c;
+}
+
+void SaveQuality(std::ostream& out, const Quality& q) {
+    io::Write<float>(out, q.value);
+    io::Write<uint64_t>(out, q.count);
+}
+
+Quality LoadQuality(std::istream& in) {
+    Quality q;
+    q.value = io::Read<float>(in);
+    q.count = io::Read<uint64_t>(in);
+    return q;
+}
+
+void SaveOptional(std::ostream& out, const std::optional<StepId>& value) {
+    io::Write<uint8_t>(out, value ? 1 : 0);
+    io::Write<uint64_t>(out, value.value_or(0));
+}
+
+std::optional<StepId> LoadOptional(std::istream& in) {
+    bool has = io::Read<uint8_t>(in) != 0;
+    uint64_t value = io::Read<uint64_t>(in);
+    return has ? std::optional<StepId>(value) : std::nullopt;
+}
+
+void SaveIndexMap(std::ostream& out, const std::map<size_t, size_t>& values) {
+    io::WriteSize(out, values.size());
+    for (const auto& [key, value] : values) {
+        io::WriteSize(out, key);
+        io::WriteSize(out, value);
+    }
+}
+
+std::map<size_t, size_t> LoadIndexMap(std::istream& in) {
+    std::map<size_t, size_t> values;
+    size_t n = io::ReadSize(in, 1u << 20);
+    for (size_t i = 0; i < n; ++i) {
+        size_t key = io::ReadSize(in);
+        values[key] = io::ReadSize(in);
+    }
+    return values;
+}
+
+void SaveRandom(std::ostream& out, const std::mt19937& rng) {
+    std::ostringstream text;
+    text << rng;
+    io::WriteString(out, text.str());
+}
+
+void LoadRandom(std::istream& in, std::mt19937& rng) {
+    std::istringstream text(io::ReadString(in, 1u << 20));
+    text >> rng;
+    if (!text) throw std::runtime_error("Agent checkpoint: bad random state");
 }
 
 }  // namespace
@@ -239,8 +505,12 @@ struct Agent::Impl {
         if (logger) logger(level, message);
     }
 
-    void BuildModels() {
-        auto layout = encoder.Layout();
+    /// Positions of NUMERIC/TIME_SERIES values and one head per output
+    /// (needs the input sizes); used when building and when loading
+    std::vector<HeadSpec> PrepareLayout() {
+        observed_channels.clear();
+        observed_offsets.clear();
+        observed_size = 0;
         for (size_t i = 0; i < spec.inputs.size(); ++i) {
             const auto& input = spec.inputs[i];
             if (input.type == InputType::NUMERIC || input.type == InputType::TIME_SERIES) {
@@ -275,6 +545,23 @@ struct Agent::Impl {
                     break;
             }
         }
+        return heads;
+    }
+
+    std::unique_ptr<PatternMemory> MakePatternMemory() const {
+        PatternMemory::Config memory;
+        memory.dimension = config.pattern_dimension;
+        memory.memory_budget_bytes = 1;  // set by AllocateMemory()
+        memory.capacity = config.pattern_capacity;
+        memory.merge_ratio = config.merge_ratio;
+        memory.seed = config.seed + 5;
+        return std::make_unique<PatternMemory>(encoder.OutputSize(), class_outputs, value_sizes, observed_size,
+                                               memory);
+    }
+
+    void BuildModels() {
+        auto layout = encoder.Layout();
+        auto heads = PrepareLayout();
         if (!heads.empty()) {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
                                                      config.min_trunk_width, config.max_trunk_width);
@@ -285,14 +572,7 @@ struct Agent::Impl {
             autoencoder = std::make_unique<AnomalyAutoencoder>(encoder.OutputSize(), config.learning_rate,
                                                                config.seed + 3);
         }
-        PatternMemory::Config memory;
-        memory.dimension = config.pattern_dimension;
-        memory.memory_budget_bytes = 1;  // set by AllocateMemory()
-        memory.capacity = config.pattern_capacity;
-        memory.merge_ratio = config.merge_ratio;
-        memory.seed = config.seed + 5;
-        patterns = std::make_unique<PatternMemory>(encoder.OutputSize(), class_outputs, value_sizes,
-                                                   observed_size, memory);
+        patterns = MakePatternMemory();
         AllocateMemory();
         TakeSnapshot();
         Log(LogLevel::INFO, "Inputs ready: fused size " + std::to_string(encoder.OutputSize()) +
@@ -349,7 +629,7 @@ struct Agent::Impl {
             if (sample && !sample->in_replay && counted.insert(sample.get()).second) bytes += sample->MemoryBytes();
         };
         for (const auto& entry : pending) {
-            bytes += sizeof(Pending) + 256 + (entry.fused.capacity() + entry.point.capacity() + entry.observed.capacity()) * sizeof(float);
+            bytes += sizeof(Pending) + 256 + (entry.fused.size() + entry.point.size() + entry.observed.size()) * sizeof(float);
             add_sample(entry.sample);
         }
         for (const auto& sample : newest) add_sample(sample);
@@ -1324,6 +1604,219 @@ struct Agent::Impl {
         }
     }
 
+    // ---------------------------------------------------------- checkpoint
+
+    void SaveState(std::ostream& out) const {
+        encoder.SaveState(out);
+
+        // Outputs
+        for (const auto& out_state : outputs) {
+            WriteStrings(out, out_state.classes);
+            io::WriteSize(out, out_state.action_ids.size());
+            for (PatternID id : out_state.action_ids) io::Write<uint64_t>(out, id.value());
+            io::Write<uint64_t>(out, out_state.acts);
+            io::WriteSize(out, out_state.target_stats.size());
+            for (const auto& stats : out_state.target_stats) stats.Save(out);
+            io::Write<uint64_t>(out, out_state.samples);
+            SaveQuality(out, out_state.neural);
+            SaveQuality(out, out_state.pattern_short);
+            SaveQuality(out, out_state.pattern_long);
+            out_state.drift.Save(out);
+            io::Write<uint8_t>(out, out_state.recovering ? 1 : 0);
+            io::Write<uint64_t>(out, out_state.recovery_samples);
+            io::Write<double>(out, out_state.drift_baseline);
+            SaveQuality(out, out_state.recovery_loss);
+            io::Write<uint32_t>(out, out_state.drift_events);
+        }
+
+        // Models
+        io::Write<uint8_t>(out, patterns ? 1 : 0);
+        if (patterns) {
+            for (const AgentNetwork* n : {network.get(), target_network.get(), snapshot_network.get()}) {
+                io::Write<uint8_t>(out, n ? 1 : 0);
+                if (n) n->Serialize(out);
+            }
+            for (const AnomalyAutoencoder* a : {autoencoder.get(), snapshot_autoencoder.get()}) {
+                io::Write<uint8_t>(out, a ? 1 : 0);
+                if (a) a->Serialize(out);
+            }
+            patterns->SaveState(out);
+        }
+
+        // Samples, each once; everything else refers to them by number
+        std::map<const Sample*, uint64_t> ids;
+        std::vector<const Sample*> ordered;
+        auto add = [&](const Sample* sample) {
+            if (sample && ids.emplace(sample, ordered.size() + 1).second) ordered.push_back(sample);
+        };
+        replay.ForEach([&](const SamplePtr& sample) { add(sample.get()); });
+        for (const auto& entry : pending) add(entry.sample.get());
+        for (const auto& sample : newest) add(sample.get());
+        auto id_of = [&](const Sample* sample) -> uint64_t {
+            auto it = ids.find(sample);
+            return it == ids.end() ? 0 : it->second;
+        };
+        io::WriteSize(out, ordered.size());
+        for (const Sample* sample : ordered) sample->Save(out);
+        for (const Sample* sample : ordered) io::Write<uint64_t>(out, id_of(sample->next_sample.lock().get()));
+        replay.SaveState(out, id_of);
+        io::WriteSize(out, newest.size());
+        for (const auto& sample : newest) io::Write<uint64_t>(out, id_of(sample.get()));
+        io::WriteSize(out, recent.size());
+        for (const auto& sample : recent) io::Write<uint64_t>(out, id_of(sample.lock().get()));
+
+        // Pending steps
+        io::WriteSize(out, pending.size());
+        for (const auto& entry : pending) {
+            io::Write<uint64_t>(out, entry.step);
+            io::Write<uint8_t>(out, entry.encoded ? 1 : 0);
+            WriteVector(out, entry.fused);
+            WriteVector(out, entry.point);
+            WriteVector(out, entry.observed);
+            io::Write<uint64_t>(out, entry.pattern.value());
+            io::Write<uint64_t>(out, id_of(entry.sample.get()));
+            SaveIndexMap(out, entry.predicted);
+            SaveIndexMap(out, entry.actions);
+            io::Write<uint8_t>(out, entry.transition_complete ? 1 : 0);
+            io::Write<float>(out, entry.anomaly);
+            io::Write<float>(out, entry.anomaly_neural_weight);
+        }
+
+        // Counters, schedules, random state
+        WriteVector(out, head_loss);
+        schedule.SaveState(out);
+        io::Write<float>(out, learning_rate);
+        io::Write<double>(out, plateau_sum);
+        io::WriteSize(out, plateau_count);
+        io::WriteSize(out, plateau_checks);
+        SaveOptional(out, previous_step);
+        SaveOptional(out, last_acted_step);
+        WriteVector(out, std::vector<float>(pattern_baseline.begin(), pattern_baseline.end()));
+        WriteVector(out, std::vector<float>(neural_baseline.begin(), neural_baseline.end()));
+        for (uint64_t v : {anomaly_samples, steps, feedback_count, ignored_feedback, training_steps, episodes,
+                           drift_events, last_snapshot, rollbacks, widenings}) {
+            io::Write<uint64_t>(out, v);
+        }
+        io::WriteSize(out, since_training);
+        io::WriteSize(out, recovering_outputs);
+        io::Write<uint8_t>(out, growth_blocked ? 1 : 0);
+        io::Write<float>(out, gap_at_widening);
+        io::WriteSize(out, metrics_every);
+        SaveRandom(out, rng);
+    }
+
+    void LoadState(std::istream& in) {
+        encoder.LoadState(in);
+
+        for (auto& out_state : outputs) {
+            out_state.classes = ReadStrings(in);
+            out_state.class_index.clear();
+            for (size_t c = 0; c < out_state.classes.size(); ++c) out_state.class_index[out_state.classes[c]] = c;
+            out_state.action_ids.resize(io::ReadSize(in, 1u << 20));
+            for (auto& id : out_state.action_ids) id = PatternID(io::Read<uint64_t>(in));
+            out_state.acts = io::Read<uint64_t>(in);
+            out_state.target_stats.resize(io::ReadSize(in, 1u << 20));
+            for (auto& stats : out_state.target_stats) stats.Load(in);
+            out_state.samples = io::Read<uint64_t>(in);
+            out_state.neural = LoadQuality(in);
+            out_state.pattern_short = LoadQuality(in);
+            out_state.pattern_long = LoadQuality(in);
+            out_state.drift.Load(in);
+            out_state.recovering = io::Read<uint8_t>(in) != 0;
+            out_state.recovery_samples = io::Read<uint64_t>(in);
+            out_state.drift_baseline = io::Read<double>(in);
+            out_state.recovery_loss = LoadQuality(in);
+            out_state.drift_events = io::Read<uint32_t>(in);
+        }
+
+        PatternID::ValueType max_id = 0;
+        for (const auto& out_state : outputs) {
+            for (PatternID id : out_state.action_ids) max_id = std::max(max_id, id.value());
+        }
+        if (io::Read<uint8_t>(in)) {
+            if (!encoder.Ready()) throw std::runtime_error("Agent checkpoint: models without known input sizes");
+            auto heads = PrepareLayout();
+            for (auto* n : {&network, &target_network, &snapshot_network}) {
+                *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
+            }
+            for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
+                *a = io::Read<uint8_t>(in) ? AnomalyAutoencoder::Deserialize(in) : nullptr;
+            }
+            if (network && network->HeadCount() != heads.size()) {
+                throw std::runtime_error("Agent checkpoint: network heads do not match the spec");
+            }
+            patterns = MakePatternMemory();
+            patterns->LoadState(in);
+            max_id = std::max(max_id, patterns->MaxPatternId());
+        }
+        // New pattern IDs must not collide with restored ones
+        PatternID::ReserveThrough(max_id);
+
+        std::vector<SamplePtr> samples(io::ReadSize(in, 1u << 30));
+        for (auto& sample : samples) sample = Sample::Load(in);
+        auto lookup = [&](uint64_t id) -> SamplePtr {
+            if (id == 0) return nullptr;
+            if (id > samples.size()) throw std::runtime_error("Agent checkpoint: bad sample reference");
+            return samples[id - 1];
+        };
+        for (auto& sample : samples) {
+            if (auto next = lookup(io::Read<uint64_t>(in))) sample->next_sample = next;
+        }
+        replay.LoadState(in, [&](uint64_t id) {
+            auto sample = lookup(id);
+            if (!sample) throw std::runtime_error("Agent checkpoint: bad replay entry");
+            return sample;
+        });
+        newest.clear();
+        size_t count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) newest.push_back(lookup(io::Read<uint64_t>(in)));
+        recent.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) recent.push_back(lookup(io::Read<uint64_t>(in)));
+
+        pending.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            Pending entry;
+            entry.step = io::Read<uint64_t>(in);
+            entry.encoded = io::Read<uint8_t>(in) != 0;
+            entry.fused = ReadVector<float>(in);
+            entry.point = ReadVector<float>(in);
+            entry.observed = ReadVector<float>(in);
+            entry.pattern = PatternID(io::Read<uint64_t>(in));
+            entry.sample = lookup(io::Read<uint64_t>(in));
+            entry.predicted = LoadIndexMap(in);
+            entry.actions = LoadIndexMap(in);
+            entry.transition_complete = io::Read<uint8_t>(in) != 0;
+            entry.anomaly = io::Read<float>(in);
+            entry.anomaly_neural_weight = io::Read<float>(in);
+            pending.push_back(std::move(entry));
+        }
+
+        head_loss = ReadVector<float>(in);
+        schedule.LoadState(in);
+        learning_rate = io::Read<float>(in);
+        plateau_sum = io::Read<double>(in);
+        plateau_count = io::ReadSize(in);
+        plateau_checks = io::ReadSize(in);
+        previous_step = LoadOptional(in);
+        last_acted_step = LoadOptional(in);
+        auto baseline = ReadVector<float>(in);
+        pattern_baseline.assign(baseline.begin(), baseline.end());
+        baseline = ReadVector<float>(in);
+        neural_baseline.assign(baseline.begin(), baseline.end());
+        for (uint64_t* v : {&anomaly_samples, &steps, &feedback_count, &ignored_feedback, &training_steps, &episodes,
+                            &drift_events, &last_snapshot, &rollbacks, &widenings}) {
+            *v = io::Read<uint64_t>(in);
+        }
+        since_training = io::ReadSize(in);
+        recovering_outputs = io::ReadSize(in);
+        growth_blocked = io::Read<uint8_t>(in) != 0;
+        gap_at_widening = io::Read<float>(in);
+        metrics_every = io::ReadSize(in);
+        LoadRandom(in, rng);
+    }
+
     AgentStats StatsLocked() const {
         const Impl& m = *this;
         AgentStats stats;
@@ -1556,6 +2049,66 @@ void Agent::EndEpisode(bool terminal) {
 AgentStats Agent::Stats() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->StatsLocked();
+}
+
+// ============================================================================
+// Checkpoints
+// ============================================================================
+
+void Agent::Save(std::ostream& out) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    out.write(kCheckpointMagic, sizeof(kCheckpointMagic));
+    io::Write<uint32_t>(out, kCheckpointVersion);
+    SaveSpec(out, impl_->spec);
+    SaveConfig(out, impl_->config);
+    impl_->SaveState(out);
+    if (!out) throw std::runtime_error("Agent::Save: write failed");
+}
+
+bool Agent::Save(const std::string& path) const {
+    // Write to a temporary file, then replace: a failed save leaves any
+    // earlier checkpoint intact
+    std::string temporary = path + ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        try {
+            Save(file);
+        } catch (const std::exception&) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+        file.flush();
+        if (!file) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+    }
+    return std::rename(temporary.c_str(), path.c_str()) == 0;
+}
+
+Agent Agent::Load(std::istream& in) {
+    char magic[sizeof(kCheckpointMagic)];
+    in.read(magic, sizeof(magic));
+    if (!in || !std::equal(magic, magic + sizeof(magic), kCheckpointMagic)) {
+        throw std::runtime_error("Agent::Load: not an agent checkpoint");
+    }
+    uint32_t version = io::Read<uint32_t>(in);
+    if (version != kCheckpointVersion) {
+        throw std::runtime_error("Agent::Load: checkpoint version " + std::to_string(version) +
+                                 " is not supported (expected " + std::to_string(kCheckpointVersion) + ")");
+    }
+    EnvironmentSpec spec = LoadSpec(in);
+    AgentConfig config = LoadConfig(in);
+    Agent agent(std::move(spec), config);
+    agent.impl_->LoadState(in);
+    return agent;
+}
+
+Agent Agent::Load(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Agent::Load: cannot open " + path);
+    return Load(file);
 }
 
 const EnvironmentSpec& Agent::Spec() const { return impl_->spec; }

@@ -1,6 +1,8 @@
 // File: src/agent/pattern_memory.cpp
 #include "agent/pattern_memory.hpp"
 
+#include "core/binary_io.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -371,18 +373,21 @@ void PatternMemory::RecordTransition(PatternID from, PatternID to) {
 }
 
 std::optional<std::vector<float>> PatternMemory::PredictNextObserved(PatternID current) const {
-    // The 3 strongest transitions to stored patterns
-    std::vector<std::pair<PatternID, float>> ranked;
+    // The 3 strongest transitions to stored patterns; ties by position in
+    // the store, so the result does not depend on the order or the values
+    // of pattern IDs (which differ between a run and its restored copy)
+    std::vector<std::pair<size_t, float>> ranked;  // slot, strength
     for (const auto* edge : associations_.GetAssociations(current, true)) {
-        if (Contains(edge->GetTarget())) ranked.emplace_back(edge->GetTarget(), edge->GetStrength());
+        auto it = slots_.find(edge->GetTarget());
+        if (it != slots_.end()) ranked.emplace_back(it->second, edge->GetStrength());
     }
-    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
     if (ranked.size() > 3) ranked.resize(3);
     std::vector<double> sum(observed_size_, 0.0), weight(observed_size_, 0.0);
-    for (const auto& [id, strength] : ranked) {
-        auto it = slots_.find(id);
-        if (it == slots_.end()) continue;
-        const auto& observed = prototypes_[it->second].observed;
+    for (const auto& [slot, strength] : ranked) {
+        const auto& observed = prototypes_[slot].observed;
         for (size_t i = 0; i < observed_size_; ++i) {
             if (std::isnan(observed[i])) continue;
             sum[i] += strength * observed[i];
@@ -423,6 +428,123 @@ std::vector<float> PatternMemory::ActionStrengths(PatternID state, const std::ve
         }
     }
     return strengths;
+}
+
+namespace {
+
+template <typename T>
+void WriteVector(std::ostream& out, const std::vector<T>& values) {
+    io::WriteSize(out, values.size());
+    for (const T& v : values) io::Write<T>(out, v);
+}
+
+template <typename T>
+std::vector<T> ReadVector(std::istream& in) {
+    std::vector<T> values(io::ReadSize(in, 1u << 30));
+    for (T& v : values) v = io::Read<T>(in);
+    return values;
+}
+
+}  // namespace
+
+void PatternMemory::SaveState(std::ostream& out) const {
+    io::WriteSize(out, input_size_);
+    io::WriteSize(out, config_.dimension);
+    io::WriteSize(out, config_.memory_budget_bytes);
+    WriteVector(out, projection_);
+    WriteVector(out, class_serial_);
+    WriteVector(out, value_serial_);
+    io::Write<float>(out, typical_distance_);
+    io::Write<uint8_t>(out, has_typical_distance_ ? 1 : 0);
+    io::WriteSize(out, prototype_bytes_);
+    io::WriteSize(out, writes_since_compact_);
+    io::Write<uint64_t>(out, pruned_);
+
+    io::WriteSize(out, prototypes_.size());
+    for (const auto& p : prototypes_) {
+        io::Write<uint64_t>(out, p.id.value());
+        WriteVector(out, p.center);
+        io::Write<uint32_t>(out, p.count);
+        io::Write<uint64_t>(out, p.last_used);
+        io::WriteSize(out, p.class_weights.size());
+        for (const auto& w : p.class_weights) WriteVector(out, w);
+        WriteVector(out, p.class_counts);
+        WriteVector(out, p.class_serials);
+        io::WriteSize(out, p.value_means.size());
+        for (const auto& m : p.value_means) WriteVector(out, m);
+        WriteVector(out, p.value_counts);
+        WriteVector(out, p.value_serials);
+        WriteVector(out, p.observed);
+    }
+    // Associations, per source pattern in the store's order
+    for (const auto& p : prototypes_) {
+        auto edges = associations_.GetAssociations(p.id, true);
+        io::WriteSize(out, edges.size());
+        for (const auto* edge : edges) {
+            io::Write<uint64_t>(out, edge->GetTarget().value());
+            io::Write<uint8_t>(out, static_cast<uint8_t>(edge->GetType()));
+            io::Write<float>(out, edge->GetStrength());
+        }
+    }
+}
+
+void PatternMemory::LoadState(std::istream& in) {
+    if (io::ReadSize(in, 1u << 30) != input_size_ || io::ReadSize(in, 1u << 20) != config_.dimension) {
+        throw std::runtime_error("PatternMemory::LoadState: saved state has other sizes");
+    }
+    config_.memory_budget_bytes = io::ReadSize(in);
+    projection_ = ReadVector<float>(in);
+    class_serial_ = ReadVector<uint64_t>(in);
+    value_serial_ = ReadVector<uint64_t>(in);
+    typical_distance_ = io::Read<float>(in);
+    has_typical_distance_ = io::Read<uint8_t>(in) != 0;
+    prototype_bytes_ = io::ReadSize(in);
+    writes_since_compact_ = io::ReadSize(in);
+    pruned_ = io::Read<uint64_t>(in);
+    if (projection_.size() != input_size_ * config_.dimension) {
+        throw std::runtime_error("PatternMemory::LoadState: bad projection size");
+    }
+
+    prototypes_.clear();
+    slots_.clear();
+    prototypes_.resize(io::ReadSize(in, 1u << 30));
+    for (size_t slot = 0; slot < prototypes_.size(); ++slot) {
+        Prototype& p = prototypes_[slot];
+        p.id = PatternID(io::Read<uint64_t>(in));
+        p.center = ReadVector<float>(in);
+        p.count = io::Read<uint32_t>(in);
+        p.last_used = io::Read<uint64_t>(in);
+        p.class_weights.resize(io::ReadSize(in, 1u << 20));
+        for (auto& w : p.class_weights) w = ReadVector<float>(in);
+        p.class_counts = ReadVector<uint32_t>(in);
+        p.class_serials = ReadVector<uint64_t>(in);
+        p.value_means.resize(io::ReadSize(in, 1u << 20));
+        for (auto& m : p.value_means) m = ReadVector<float>(in);
+        p.value_counts = ReadVector<uint32_t>(in);
+        p.value_serials = ReadVector<uint64_t>(in);
+        p.observed = ReadVector<float>(in);
+        if (p.center.size() != config_.dimension) throw std::runtime_error("PatternMemory::LoadState: bad pattern");
+        slots_.emplace(p.id, slot);
+    }
+    associations_.GetAssociationMatrix().Clear();
+    for (const auto& p : prototypes_) {
+        size_t edges = io::ReadSize(in, 1u << 30);
+        for (size_t e = 0; e < edges; ++e) {
+            PatternID target(io::Read<uint64_t>(in));
+            auto type = io::Read<uint8_t>(in);
+            float strength = io::Read<float>(in);
+            if (type > static_cast<uint8_t>(AssociationType::COMPOSITIONAL)) {
+                throw std::runtime_error("PatternMemory::LoadState: bad association type");
+            }
+            associations_.AddAssociation(p.id, target, static_cast<AssociationType>(type), strength);
+        }
+    }
+}
+
+PatternID::ValueType PatternMemory::MaxPatternId() const {
+    PatternID::ValueType max = 0;
+    for (const auto& p : prototypes_) max = std::max(max, p.id.value());
+    return max;
 }
 
 size_t PatternMemory::PrototypeBytes(const Prototype& p) const {
@@ -466,10 +588,13 @@ float PatternMemory::Utility(const Prototype& p, uint64_t step) const {
     for (uint32_t n : p.class_counts) accesses += n;
     for (uint32_t n : p.value_counts) accesses += n;
 
+    // Summed in sorted order: independent of the association store's order
+    std::vector<float> strengths;
+    for (const auto* edge : associations_.GetAssociations(p.id, true)) strengths.push_back(edge->GetStrength());
+    std::sort(strengths.begin(), strengths.end());
     float strength = 0.0f;
-    auto edges = associations_.GetAssociations(p.id, true);
-    for (const auto* edge : edges) strength += edge->GetStrength();
-    if (!edges.empty()) strength /= static_cast<float>(edges.size());
+    for (float s : strengths) strength += s;
+    if (!strengths.empty()) strength /= static_cast<float>(strengths.size());
 
     // Confidence: how consistently the pattern's labels agree (0.5 unlabelled)
     float confidence = 0.5f;

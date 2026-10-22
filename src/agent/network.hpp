@@ -68,6 +68,11 @@ public:
 
     /// Deep copy (weights and optimizer state), e.g. for a target network
     AgentNetwork(const AgentNetwork& other);
+
+    /// Write / read everything: layout, weights, heads, optimizer state
+    /// @throws std::runtime_error on malformed data (Deserialize)
+    void Serialize(std::ostream& out) const;
+    static std::unique_ptr<AgentNetwork> Deserialize(std::istream& in);
     AgentNetwork& operator=(const AgentNetwork&) = delete;
 
     size_t InputSize() const { return input_size_; }
@@ -117,6 +122,7 @@ private:
         std::unique_ptr<nn::Dense> dense;  // nullptr = pass through
     };
 
+    AgentNetwork() = default;
     nn::Matrix Embed(const nn::Matrix& inputs, bool training) const;
     nn::Matrix TrunkInfer(const nn::Matrix& embedded) const;
     std::vector<nn::Parameter> BodyParameters();
@@ -124,8 +130,8 @@ private:
     size_t input_size_{0};
     size_t embedded_size_{0};
     size_t trunk_width_{0};
-    float learning_rate_;
-    uint32_t seed_;
+    float learning_rate_{0.0f};
+    uint32_t seed_{0};
     std::vector<Embedding> embeddings_;
     std::vector<std::unique_ptr<nn::Layer>> trunk_;
     std::vector<HeadSpec> head_specs_;
@@ -146,6 +152,9 @@ public:
     /// One optimization step; returns the batch loss
     float TrainBatch(const nn::Matrix& inputs, float clip_norm);
 
+    void Serialize(std::ostream& out) const;
+    static std::unique_ptr<AnomalyAutoencoder> Deserialize(std::istream& in);
+
     void SetLearningRate(float learning_rate) { optimizer_.SetLearningRate(learning_rate); }
 
     size_t ParameterCount() const { return parameter_count_; }
@@ -156,6 +165,8 @@ public:
     std::vector<nn::Parameter> Parameters() { return model_.Parameters(); }
 
 private:
+    AnomalyAutoencoder() = default;
+
     nn::Sequential model_;
     nn::Adam optimizer_;
     size_t parameter_count_{0};
