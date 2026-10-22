@@ -1,6 +1,11 @@
 // File: src/nn/matrix.cpp
 #include "nn/matrix.hpp"
 #include "core/binary_io.hpp"
+#include "nn/compute.hpp"
+
+#ifdef DPAN_HAS_BLAS
+#include <cblas.h>
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -178,20 +183,32 @@ Matrix MatMul(const Matrix& a, const Matrix& b) {
     }
     Matrix out(a.Rows(), b.Cols());
     const size_t n = a.Rows(), k = a.Cols(), m = b.Cols();
-    // i-k-j loop order keeps the inner loop contiguous in b and out
-    for (size_t i = 0; i < n; ++i) {
-        float* out_row = out.Data() + i * m;
-        for (size_t p = 0; p < k; ++p) {
-            float av = a(i, p);
-            if (av == 0.0f) {
-                continue;
-            }
-            const float* b_row = b.Data() + p * m;
-            for (size_t j = 0; j < m; ++j) {
-                out_row[j] += av * b_row[j];
+    if (out.Empty() || k == 0) return out;
+#ifdef DPAN_HAS_BLAS
+    if (UsingBlas()) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, static_cast<int>(n), static_cast<int>(m),
+                    static_cast<int>(k), 1.0f, a.Data(), static_cast<int>(k), b.Data(), static_cast<int>(m), 0.0f,
+                    out.Data(), static_cast<int>(m));
+        return out;
+    }
+#endif
+    // i-k-j loop order keeps the inner loop contiguous in b and out; rows of
+    // the output are independent, so they may be split across threads
+    ParallelFor(n, n * k * m, [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            float* out_row = out.Data() + i * m;
+            for (size_t p = 0; p < k; ++p) {
+                float av = a(i, p);
+                if (av == 0.0f) {
+                    continue;
+                }
+                const float* b_row = b.Data() + p * m;
+                for (size_t j = 0; j < m; ++j) {
+                    out_row[j] += av * b_row[j];
+                }
             }
         }
-    }
+    });
     return out;
 }
 
@@ -202,20 +219,32 @@ Matrix MatMulTransposeA(const Matrix& a, const Matrix& b) {
     }
     Matrix out(a.Cols(), b.Cols());
     const size_t k = a.Rows(), n = a.Cols(), m = b.Cols();
-    for (size_t p = 0; p < k; ++p) {
-        const float* a_row = a.Data() + p * n;
-        const float* b_row = b.Data() + p * m;
-        for (size_t i = 0; i < n; ++i) {
-            float av = a_row[i];
-            if (av == 0.0f) {
-                continue;
-            }
-            float* out_row = out.Data() + i * m;
-            for (size_t j = 0; j < m; ++j) {
-                out_row[j] += av * b_row[j];
+    if (out.Empty() || k == 0) return out;
+#ifdef DPAN_HAS_BLAS
+    if (UsingBlas()) {
+        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, static_cast<int>(n), static_cast<int>(m),
+                    static_cast<int>(k), 1.0f, a.Data(), static_cast<int>(n), b.Data(), static_cast<int>(m), 0.0f,
+                    out.Data(), static_cast<int>(m));
+        return out;
+    }
+#endif
+    // Each output row i sums over p in ascending order, whichever thread runs it
+    ParallelFor(n, n * k * m, [&](size_t begin, size_t end) {
+        for (size_t p = 0; p < k; ++p) {
+            const float* a_row = a.Data() + p * n;
+            const float* b_row = b.Data() + p * m;
+            for (size_t i = begin; i < end; ++i) {
+                float av = a_row[i];
+                if (av == 0.0f) {
+                    continue;
+                }
+                float* out_row = out.Data() + i * m;
+                for (size_t j = 0; j < m; ++j) {
+                    out_row[j] += av * b_row[j];
+                }
             }
         }
-    }
+    });
     return out;
 }
 
@@ -226,17 +255,28 @@ Matrix MatMulTransposeB(const Matrix& a, const Matrix& b) {
     }
     Matrix out(a.Rows(), b.Rows());
     const size_t n = a.Rows(), k = a.Cols(), m = b.Rows();
-    for (size_t i = 0; i < n; ++i) {
-        const float* a_row = a.Data() + i * k;
-        for (size_t j = 0; j < m; ++j) {
-            const float* b_row = b.Data() + j * k;
-            float sum = 0.0f;
-            for (size_t p = 0; p < k; ++p) {
-                sum += a_row[p] * b_row[p];
-            }
-            out(i, j) = sum;
-        }
+    if (out.Empty() || k == 0) return out;
+#ifdef DPAN_HAS_BLAS
+    if (UsingBlas()) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, static_cast<int>(n), static_cast<int>(m),
+                    static_cast<int>(k), 1.0f, a.Data(), static_cast<int>(k), b.Data(), static_cast<int>(k), 0.0f,
+                    out.Data(), static_cast<int>(m));
+        return out;
     }
+#endif
+    ParallelFor(n, n * k * m, [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            const float* a_row = a.Data() + i * k;
+            for (size_t j = 0; j < m; ++j) {
+                const float* b_row = b.Data() + j * k;
+                float sum = 0.0f;
+                for (size_t p = 0; p < k; ++p) {
+                    sum += a_row[p] * b_row[p];
+                }
+                out(i, j) = sum;
+            }
+        }
+    });
     return out;
 }
 

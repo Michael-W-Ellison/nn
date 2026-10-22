@@ -126,7 +126,8 @@ float Percentile(const std::deque<float>& baseline, float x) {
 // ============================================================================
 
 constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
-constexpr uint32_t kCheckpointVersion = 1;
+// 2: image settings in the config; embeddings stored as layer sequences
+constexpr uint32_t kCheckpointVersion = 2;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -268,6 +269,8 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.encoder.text_embedding_size);
     io::WriteSize(out, c.encoder.time_series_window);
     io::WriteSize(out, c.encoder.image_size);
+    io::WriteSize(out, c.encoder.max_image_size);
+    io::WriteSize(out, c.encoder.image_embedding_size);
     io::WriteSize(out, c.encoder.max_tracked_categories);
 }
 
@@ -327,6 +330,8 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.text_embedding_size = io::ReadSize(in);
     c.encoder.time_series_window = io::ReadSize(in);
     c.encoder.image_size = io::ReadSize(in);
+    c.encoder.max_image_size = io::ReadSize(in);
+    c.encoder.image_embedding_size = io::ReadSize(in);
     c.encoder.max_tracked_categories = io::ReadSize(in);
     return c;
 }

@@ -2,6 +2,7 @@
 #include "agent/network.hpp"
 
 #include "core/binary_io.hpp"
+#include "nn/convolution.hpp"
 #include "nn/loss.hpp"
 
 #include <algorithm>
@@ -26,11 +27,17 @@ AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector
         if (channel.size == 0) {
             throw std::invalid_argument("AgentNetwork: channel '" + channel.name + "' has no size");
         }
-        Embedding embedding{channel.offset, channel.size, embedded_size_, nullptr};
+        Embedding embedding{channel.offset, channel.size, embedded_size_, 0, nullptr};
         if (channel.embedding_size > 0 && channel.size > 1) {
-            // Project the features; the missing indicator passes through
-            embedding.dense = std::make_unique<nn::Dense>(channel.size - 1, channel.embedding_size,
-                                                          nn::Initialization::XAVIER, ++layer_seed);
+            // Map the features; the missing indicator passes through
+            if (channel.image_height > 0) {
+                embedding.model = ImageModel(channel, layer_seed);
+            } else {
+                embedding.model = std::make_unique<nn::Sequential>();
+                embedding.model->Emplace<nn::Dense>(channel.size - 1, channel.embedding_size,
+                                                    nn::Initialization::XAVIER, ++layer_seed);
+            }
+            embedding.width = channel.embedding_size;
             embedded_size_ += channel.embedding_size + 1;
         } else {
             embedded_size_ += channel.size;
@@ -75,8 +82,8 @@ AgentNetwork::AgentNetwork(const AgentNetwork& other)
       body_optimizer_(other.body_optimizer_),
       head_optimizers_(other.head_optimizers_) {
     for (const auto& embedding : other.embeddings_) {
-        embeddings_.push_back({embedding.offset, embedding.size, embedding.output_offset,
-                               embedding.dense ? CloneDense(*embedding.dense) : nullptr});
+        embeddings_.push_back({embedding.offset, embedding.size, embedding.output_offset, embedding.width,
+                               embedding.model ? std::make_unique<nn::Sequential>(*embedding.model) : nullptr});
     }
     for (const auto& layer : other.trunk_) {
         trunk_.push_back(layer->Clone());
@@ -107,8 +114,9 @@ void AgentNetwork::Serialize(std::ostream& out) const {
         io::WriteSize(out, embedding.offset);
         io::WriteSize(out, embedding.size);
         io::WriteSize(out, embedding.output_offset);
-        io::Write<uint8_t>(out, embedding.dense ? 1 : 0);
-        if (embedding.dense) embedding.dense->Serialize(out);
+        io::WriteSize(out, embedding.width);
+        io::Write<uint8_t>(out, embedding.model ? 1 : 0);
+        if (embedding.model) embedding.model->Serialize(out);
     }
     io::WriteSize(out, trunk_.size());
     for (const auto& layer : trunk_) layer->Serialize(out);
@@ -137,7 +145,8 @@ std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
         embedding.offset = io::ReadSize(in, 1u << 30);
         embedding.size = io::ReadSize(in, 1u << 30);
         embedding.output_offset = io::ReadSize(in, 1u << 30);
-        if (io::Read<uint8_t>(in)) embedding.dense = ReadDense(in);
+        embedding.width = io::ReadSize(in, 1u << 20);
+        if (io::Read<uint8_t>(in)) embedding.model = std::make_unique<nn::Sequential>(nn::Sequential::Deserialize(in));
         network->embeddings_.push_back(std::move(embedding));
     }
     size_t layers = io::ReadSize(in, 64);
@@ -159,6 +168,24 @@ std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
     return network;
 }
 
+std::unique_ptr<nn::Sequential> AgentNetwork::ImageModel(const ChannelLayout& channel, uint32_t& seed) {
+    // Up to three blocks of 3x3 convolution, ReLU and 2x2 max-pooling while
+    // the image is at least 8 pixels on each side, then a projection
+    constexpr size_t kFilters[] = {8, 16, 32};
+    auto model = std::make_unique<nn::Sequential>();
+    nn::ImageShape shape{channel.image_height, channel.image_width, channel.image_channels};
+    for (size_t block = 0; block < 3 && std::min(shape.height, shape.width) >= 8; ++block) {
+        model->Emplace<nn::Conv2D>(shape, kFilters[block], 3, 1, 1, nn::Initialization::HE, ++seed);
+        shape.channels = kFilters[block];
+        model->Emplace<nn::ReLU>();
+        model->Emplace<nn::MaxPool2D>(shape, 2);
+        shape = {shape.height / 2, shape.width / 2, shape.channels};
+    }
+    model->Emplace<nn::Flatten>(shape);
+    model->Emplace<nn::Dense>(shape.Size(), channel.embedding_size, nn::Initialization::XAVIER, ++seed);
+    return model;
+}
+
 Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
     if (inputs.Cols() != input_size_) {
         throw std::invalid_argument("AgentNetwork: expected " + std::to_string(input_size_) +
@@ -166,7 +193,7 @@ Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
     }
     Matrix embedded(inputs.Rows(), embedded_size_);
     for (const auto& embedding : embeddings_) {
-        if (!embedding.dense) {
+        if (!embedding.model) {
             for (size_t r = 0; r < inputs.Rows(); ++r) {
                 std::copy(inputs.Data() + r * input_size_ + embedding.offset,
                           inputs.Data() + r * input_size_ + embedding.offset + embedding.size,
@@ -175,7 +202,7 @@ Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
             continue;
         }
         Matrix slice = inputs.SliceCols(embedding.offset, embedding.offset + embedding.size - 1);
-        Matrix projected = training ? embedding.dense->Forward(slice, true) : embedding.dense->Infer(slice);
+        Matrix projected = training ? embedding.model->Forward(slice, true) : embedding.model->Predict(slice);
         size_t width = projected.Cols();
         for (size_t r = 0; r < inputs.Rows(); ++r) {
             std::copy(projected.Data() + r * width, projected.Data() + (r + 1) * width,
@@ -230,7 +257,8 @@ void AgentNetwork::GrowClasses(size_t head, size_t class_count) {
 size_t AgentNetwork::ParameterCount() const {
     size_t count = 0;
     for (const auto& embedding : embeddings_) {
-        if (embedding.dense) count += embedding.dense->Weights().Size() + embedding.dense->Bias().Size();
+        if (!embedding.model) continue;
+        for (const auto& p : const_cast<nn::Sequential&>(*embedding.model).Parameters()) count += p.value->Size();
     }
     for (const auto& layer : trunk_) {
         if (const auto* dense = dynamic_cast<const nn::Dense*>(layer.get())) {
@@ -327,8 +355,8 @@ void AgentNetwork::Widen(size_t width) {
 std::vector<nn::Parameter> AgentNetwork::BodyParameters() {
     std::vector<nn::Parameter> parameters;
     for (auto& embedding : embeddings_) {
-        if (embedding.dense) {
-            auto p = embedding.dense->Parameters();
+        if (embedding.model) {
+            auto p = embedding.model->Parameters();
             parameters.insert(parameters.end(), p.begin(), p.end());
         }
     }
@@ -358,7 +386,7 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
 
     // Forward through embeddings and trunk, caching for Backward()
     for (auto& embedding : embeddings_) {
-        if (embedding.dense) embedding.dense->ZeroGradients();
+        if (embedding.model) embedding.model->ZeroGradients();
     }
     for (auto& layer : trunk_) {
         layer->ZeroGradients();
@@ -459,15 +487,15 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
         grad = (*it)->Backward(grad);
     }
     for (auto& embedding : embeddings_) {
-        if (!embedding.dense) continue;
-        size_t width = embedding.dense->OutputSize();
+        if (!embedding.model) continue;
+        size_t width = embedding.width;
         Matrix slice(rows, width);
         for (size_t r = 0; r < rows; ++r) {
             std::copy(grad.Data() + r * embedded_size_ + embedding.output_offset,
                       grad.Data() + r * embedded_size_ + embedding.output_offset + width,
                       slice.Data() + r * width);
         }
-        embedding.dense->Backward(slice);
+        embedding.model->Backward(slice);
     }
 
     // Clip all gradients together, then update

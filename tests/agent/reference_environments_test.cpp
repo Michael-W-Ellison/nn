@@ -443,6 +443,76 @@ TEST_F(ReferenceTest, F_CartPole) {
     EXPECT_GT(solved_at, 0);
 }
 
+// ============================================================================
+// G: small images
+// ============================================================================
+//
+// 32x32 grayscale images (values 0-255) with one filled shape: square,
+// circle, triangle or plus sign, of random size (half-width 4-9 pixels),
+// position and brightness, with pixel noise. A categorical input gives the
+// lighting ("day" or "night"; night images are darker and noisier) and says
+// nothing about the shape. Labels arrive right after each prediction.
+// Pass: accuracy >= 95% on samples 4000-5000.
+
+Image DrawShape(int shape, bool night, std::mt19937& rng) {
+    const int side = 32;
+    std::uniform_int_distribution<int> size(4, 9);
+    int r = size(rng);
+    std::uniform_int_distribution<int> center(r + 1, side - r - 2);
+    int cx = center(rng), cy = center(rng);
+    std::uniform_real_distribution<float> brightness(night ? 90.0f : 160.0f, night ? 140.0f : 255.0f);
+    std::normal_distribution<float> noise(0.0f, night ? 30.0f : 15.0f);
+    float level = brightness(rng);
+    Image image{side, side, 1, std::vector<float>(side * side)};
+    for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+            int dx = x - cx, dy = y - cy;
+            bool inside = false;
+            switch (shape) {
+                case 0: inside = std::abs(dx) <= r && std::abs(dy) <= r; break;                     // square
+                case 1: inside = dx * dx + dy * dy <= r * r; break;                                 // circle
+                case 2: inside = dy >= -r && dy <= r && std::abs(dx) * 2 <= (dy + r); break;        // triangle
+                default: inside = (std::abs(dx) <= r && std::abs(dy) <= r / 3) ||
+                                  (std::abs(dy) <= r && std::abs(dx) <= r / 3); break;              // plus sign
+            }
+            float value = (inside ? level : 20.0f) + noise(rng);
+            image.pixels[y * side + x] = std::min(255.0f, std::max(0.0f, value));
+        }
+    }
+    return image;
+}
+
+TEST_F(ReferenceTest, G_SmallImages) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"camera", InputType::IMAGE, 0, {}, 32, 32, 1},
+                   {"lighting", InputType::CATEGORICAL, 0, {"day", "night"}}};
+    spec.outputs = {{"shape", OutputType::CLASS, {"square", "circle", "triangle", "plus"}}};
+    spec.feedback = {{"label", FeedbackType::LABEL, "shape"}};
+    Agent agent(spec);
+
+    std::mt19937 rng(71);
+    std::uniform_int_distribution<int> pick_shape(0, 3);
+    std::bernoulli_distribution night(0.4);
+    const int total = 5000, measured_from = 4000;
+    int correct = 0;
+    for (int i = 0; i < total; ++i) {
+        int shape = pick_shape(rng);
+        bool dark = night(rng);
+        StepId step = agent.Observe({{"camera", DrawShape(shape, dark, rng)},
+                                     {"lighting", std::string(dark ? "night" : "day")}});
+        Prediction p = agent.Predict(step, "shape");
+        if (i >= measured_from) correct += p.available && p.label == spec.outputs[0].classes_or_actions[shape];
+        agent.Feedback(step, "label", static_cast<double>(shape));
+        Tick();
+    }
+    double accuracy = static_cast<double>(correct) / (total - measured_from);
+    AgentStats stats = agent.Stats();
+    std::cout << "G: accuracy " << accuracy << " on samples " << measured_from << "-" << total << " (network weight "
+              << stats.outputs[0].neural_weight << ", network accuracy " << stats.outputs[0].neural_quality
+              << ", patterns " << stats.outputs[0].pattern_quality << ")\n";
+    EXPECT_GE(accuracy, 0.95);
+}
+
 }  // namespace
 }  // namespace agent
 }  // namespace dpan

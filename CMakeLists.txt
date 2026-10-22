@@ -14,6 +14,12 @@ option(DPAN_BUILD_CLI "Build the dpan_cli interactive tool (requires libyaml)" $
 option(DPAN_INSTALL "Generate install rules and the DPAN CMake package" ON)
 option(DPAN_WITH_SQLITE "Build the SQLite-backed PersistentBackend (requires SQLite3)" ON)
 option(DPAN_WITH_ZLIB "Compress archive-tier files with zlib (requires ZLIB)" ON)
+option(DPAN_WITH_BLAS "Use BLAS (cblas, e.g. OpenBLAS) for matrix products in the nn module" OFF)
+
+# BLAS vendor: OpenBLAS unless the user chose one (FindBLAS BLA_VENDOR)
+if(DPAN_WITH_BLAS AND NOT DEFINED BLA_VENDOR)
+    set(BLA_VENDOR OpenBLAS)
+endif()
 
 if(DPAN_BUILD_CLI AND NOT DPAN_WITH_SQLITE)
     message(STATUS "DPAN_WITH_SQLITE is OFF: dpan_cli and its tests are not built")

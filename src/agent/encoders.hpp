@@ -52,8 +52,13 @@ struct EncoderConfig {
     /// TIME_SERIES: number of most recent values kept per series
     size_t time_series_window{16};
 
-    /// IMAGE: images are resampled to image_size x image_size and flattened
-    size_t image_size{16};
+    /// IMAGE: 0 = keep each image's size, scaled down if its longer side
+    /// exceeds max_image_size; > 0 = resample to image_size x image_size.
+    /// The agent's network reads images with convolution and pooling layers
+    /// and projects them to image_embedding_size values.
+    size_t image_size{0};
+    size_t max_image_size{64};
+    size_t image_embedding_size{64};
 
     /// Open-vocabulary categories recorded for inspection (hashing itself
     /// has no limit)
@@ -285,13 +290,21 @@ private:
 
 /// IMAGE: pixel values scaled to [0, 1] (the range, [0, 1] or [0, 255] or
 /// wider, is inferred from the largest pixel seen), converted to the spec's
-/// channel count and resampled to image_size x image_size by area
-/// averaging. Output: image_size² x channels values, missing indicator.
+/// channel count and kept at their size (longer side at most
+/// max_image_size) or resampled to image_size x image_size, by area
+/// averaging. Output: height x width x channels values (row-major,
+/// interleaved channels), missing indicator. The size is unknown until the
+/// first image if the spec does not declare it.
 class ImageEncoder : public Encoder {
 public:
     ImageEncoder(InputSpec spec, const EncoderConfig& config);
 
-    size_t OutputSize() const override { return side_ * side_ * spec_.image_channels + 1; }
+    size_t OutputSize() const override;
+    size_t EmbeddingSize() const override { return embedding_size_; }
+
+    /// Size of the encoded image (0 while unknown)
+    size_t EncodedHeight() const { return width_ == 0 && fixed_side_ == 0 ? 0 : EncodedDims(width_, height_).first; }
+    size_t EncodedWidth() const { return width_ == 0 && fixed_side_ == 0 ? 0 : EncodedDims(width_, height_).second; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
     void SaveState(std::ostream& out) const override;
@@ -308,7 +321,12 @@ private:
     const Image& Check(const Value& value) const;
     static float ScaleFor(float max_pixel);
 
-    size_t side_;
+    /// (height, width) of the encoding of a width x height image
+    std::pair<size_t, size_t> EncodedDims(size_t width, size_t height) const;
+
+    size_t fixed_side_;
+    size_t max_side_;
+    size_t embedding_size_;
     size_t width_;
     size_t height_;
     float max_pixel_{0.0f};
@@ -325,6 +343,10 @@ struct ChannelLayout {
     size_t offset;
     size_t size;
     size_t embedding_size;
+    /// IMAGE channels: shape of the encoded image (0 for other types)
+    size_t image_height{0};
+    size_t image_width{0};
+    size_t image_channels{0};
 };
 
 /// Encodes whole observations into one fused vector (channels in spec order)

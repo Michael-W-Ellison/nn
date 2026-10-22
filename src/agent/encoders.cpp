@@ -84,8 +84,8 @@ void ValidateEncoderConfig(const EncoderConfig& config) {
     if (config.time_series_window == 0) {
         throw std::invalid_argument("EncoderConfig: time_series_window must be > 0");
     }
-    if (config.image_size == 0) {
-        throw std::invalid_argument("EncoderConfig: image_size must be > 0");
+    if (config.max_image_size == 0) {
+        throw std::invalid_argument("EncoderConfig: max_image_size must be > 0");
     }
 }
 
@@ -603,7 +603,27 @@ void TimeSeriesEncoder::LoadState(std::istream& in) {
 // ============================================================================
 
 ImageEncoder::ImageEncoder(InputSpec spec, const EncoderConfig& config)
-    : Encoder(std::move(spec)), side_(config.image_size), width_(spec_.width), height_(spec_.height) {}
+    : Encoder(std::move(spec)),
+      fixed_side_(config.image_size),
+      max_side_(config.max_image_size),
+      embedding_size_(config.image_embedding_size),
+      width_(spec_.width),
+      height_(spec_.height) {}
+
+std::pair<size_t, size_t> ImageEncoder::EncodedDims(size_t width, size_t height) const {
+    if (fixed_side_ > 0) return {fixed_side_, fixed_side_};
+    size_t longer = std::max(width, height);
+    if (longer <= max_side_) return {height, width};
+    double scale = static_cast<double>(max_side_) / static_cast<double>(longer);
+    return {std::max<size_t>(1, static_cast<size_t>(std::lround(height * scale))),
+            std::max<size_t>(1, static_cast<size_t>(std::lround(width * scale)))};
+}
+
+size_t ImageEncoder::OutputSize() const {
+    if (width_ == 0 && fixed_side_ == 0) return 0;  // size known with the first image
+    auto [h, w] = EncodedDims(width_, height_);
+    return h * w * spec_.image_channels + 1;
+}
 
 float ImageEncoder::ScaleFor(float max_pixel) {
     if (max_pixel <= 1.0f) return 1.0f;
@@ -636,12 +656,14 @@ const Image& ImageEncoder::Check(const Value& value) const {
 
 std::vector<float> ImageEncoder::Encode(const Value* value) const {
     const size_t channels = spec_.image_channels;
-    std::vector<float> out(OutputSize(), 0.0f);
     if (value == nullptr) {
-        out.back() = 1.0f;
+        std::vector<float> out(OutputSize(), 0.0f);
+        if (!out.empty()) out.back() = 1.0f;
         return out;
     }
     const Image& image = Check(*value);
+    const auto [out_h, out_w] = EncodedDims(image.width, image.height);
+    std::vector<float> out(out_h * out_w * channels + 1, 0.0f);
 
     float max_pixel = max_pixel_;
     for (float p : image.pixels) {
@@ -677,24 +699,29 @@ std::vector<float> ImageEncoder::Encode(const Value* value) const {
         }
     }
 
+    if (out_h == h && out_w == w) {
+        std::copy(converted.begin(), converted.end(), out.begin());
+        return out;
+    }
+
     // Resample: columns first, then rows
-    auto x_weights = AreaWeights(w, side_);
-    auto y_weights = AreaWeights(h, side_);
-    std::vector<float> columns(h * side_ * channels, 0.0f);
+    auto x_weights = AreaWeights(w, out_w);
+    auto y_weights = AreaWeights(h, out_h);
+    std::vector<float> columns(h * out_w * channels, 0.0f);
     for (size_t y = 0; y < h; ++y) {
-        for (size_t x = 0; x < side_; ++x) {
+        for (size_t x = 0; x < out_w; ++x) {
             for (const auto& [source_x, weight] : x_weights[x]) {
                 for (size_t k = 0; k < channels; ++k) {
-                    columns[(y * side_ + x) * channels + k] +=
+                    columns[(y * out_w + x) * channels + k] +=
                         weight * converted[(y * w + source_x) * channels + k];
                 }
             }
         }
     }
-    for (size_t y = 0; y < side_; ++y) {
+    for (size_t y = 0; y < out_h; ++y) {
         for (const auto& [source_y, weight] : y_weights[y]) {
-            for (size_t i = 0; i < side_ * channels; ++i) {
-                out[y * side_ * channels + i] += weight * columns[source_y * side_ * channels + i];
+            for (size_t i = 0; i < out_w * channels; ++i) {
+                out[y * out_w * channels + i] += weight * columns[source_y * out_w * channels + i];
             }
         }
     }
@@ -805,8 +832,13 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
     size_t offset = 0;
     for (const auto& encoder : encoders_) {
         size_t size = encoder->OutputSize();
-        layout.push_back({encoder->Spec().name, encoder->Spec().type, offset, size,
-                          encoder->EmbeddingSize()});
+        ChannelLayout channel{encoder->Spec().name, encoder->Spec().type, offset, size, encoder->EmbeddingSize()};
+        if (const auto* image = dynamic_cast<const ImageEncoder*>(encoder.get())) {
+            channel.image_height = image->EncodedHeight();
+            channel.image_width = image->EncodedWidth();
+            channel.image_channels = image->Spec().image_channels;
+        }
+        layout.push_back(channel);
         offset += size;
     }
     return layout;

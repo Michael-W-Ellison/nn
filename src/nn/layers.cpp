@@ -1,5 +1,7 @@
 // File: src/nn/layers.cpp
 #include "nn/layers.hpp"
+
+#include "nn/convolution.hpp"
 #include "core/binary_io.hpp"
 
 #include <algorithm>
@@ -77,6 +79,15 @@ std::unique_ptr<Layer> Layer::Deserialize(std::istream& in) {
     }
     if (type == "Dropout") {
         return std::make_unique<Dropout>(ReadFloat(in));
+    }
+    if (type == "Conv2D") {
+        return Conv2D::DeserializeParameters(in);
+    }
+    if (type == "MaxPool2D") {
+        return MaxPool2D::DeserializeParameters(in);
+    }
+    if (type == "Flatten") {
+        return Flatten::DeserializeParameters(in);
     }
     throw std::runtime_error("Layer::Deserialize: unknown layer type '" + type + "'");
 }

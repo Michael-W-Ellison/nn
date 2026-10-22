@@ -70,7 +70,7 @@ one fused vector that feeds a shared network trunk.
 | CATEGORICAL, open vocabulary | Feature hashing into 64 buckets (configurable), followed by a learned embedding layer |
 | TEXT | Lowercase. Word and character tri-gram features hashed into 1,024 buckets, normalized, then a learned embedding layer. |
 | TIME_SERIES | A window of the last 16 values per series, plus their differences and summary statistics |
-| IMAGE (up to 64×64) | Scale to [0,1], then convolution and pooling layers (Phase 6). Until then: downsample to 16×16 and flatten. |
+| IMAGE (up to 64×64) | Scale to [0,1] at native size (longer side above `max_image_size`, default 64, is area-resampled down), then convolution and pooling layers to an embedding of `image_embedding_size` (default 64). |
 
 - **Trunk size:** 2 Dense+ReLU layers whose width is twice the fused size,
   kept between 32 and 512.
@@ -180,7 +180,8 @@ integration test with a fixed seed and a fake clock.
 | 3. Reinforcement | Complete. `Agent::Act`, REWARD and OUTCOME feedback for ACTION outputs, episodes. Reference environments E–F pass (results and notes below). |
 | 4. Robustness and self-tuning | Complete. Drift detection and recovery, trunk widening, rollback, memory budgets, metrics hook (results and notes below). |
 | 5. Full persistence | Complete. `Agent::Save` / `Agent::Load`: one versioned checkpoint; a loaded agent continues exactly as the saved one (results and notes below). |
-| 6–8 | Not started |
+| 6. Images and speed | Complete. `Conv2D`, `MaxPool2D`, `Flatten` (`src/nn/convolution.hpp`), optional BLAS and multithreaded matrix products (`src/nn/compute.hpp`), convolutional image embeddings in the agent. Reference environment G passes (results and notes below). |
+| 7–8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -494,3 +495,59 @@ written and replaces an existing checkpoint only with a complete one
   serialization.
 - **Size.** A checkpoint holds the replay buffer, so it is roughly the
   memory the agent uses (bounded by `memory_budget_bytes`).
+
+### Phase 6 results
+
+| Check | Result |
+|---|---|
+| G: 32×32 grey images of four shapes (square, circle, triangle, plus; size 4–9 pixels, random position, Gaussian noise) and a day/night category (night images darker and noisier) → CLASS; 5,000 samples, accuracy on the last 1,000 | 0.969 at the test seed (71); 0.970, 0.966, 0.973 at seeds 72–74 |
+| Training step, 257 inputs → trunk 512, batch 64, median of 3 × 20 steps (`tests/agent/performance_test.cpp`) | 18.9 ms without BLAS on 1 thread, 8.92 ms without BLAS on 4 threads, 3.27 ms with OpenBLAS: 5.8× and 2.7× faster. The test requires ≥ 3× against 1 thread and is skipped without BLAS. |
+| Gradient checks (`tests/nn/convolution_test.cpp`) | `Conv2D` (padding 1 at stride 1 and 2), `MaxPool2D` (non-overlapping and overlapping) agree with central differences |
+| Default build (no BLAS) | All 1,930 tests pass. A–F give the same results as before Phase 6. |
+| Build with `DPAN_WITH_SQLITE=OFF`, `DPAN_WITH_ZLIB=OFF` | All tests pass (long, reference, robustness and performance labels excluded) |
+| ThreadSanitizer | No reports in the compute, convolution and agent tests |
+| BLAS build | 1,929 of 1,930 pass. E fails at the test seed: shortest path in 93 of 100 greedy episodes (threshold 95). A–D, F, G and the robustness tests pass (B 1.128, C 0.112, D 0.965, F solved at episode 449, G 0.97). |
+
+E is close to its threshold in both builds. Greedy episodes on the
+shortest path, out of 100, at seeds 51 (the test seed) and 1–7:
+
+| Build | 51 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| No BLAS | 97 | 100 | 95 | 99 | 95 | 96 | 100 | 98 |
+| BLAS | 93 | 98 | 96 | 100 | 99 | 97 | 99 | 100 |
+
+BLAS sums in a different order, so results differ in the last bits and
+training follows a different path. E's result in the BLAS build is not
+resolved in this phase.
+
+### Phase 6 implementation notes
+
+- **Layers.** Images are rows in height × width × channels order (the
+  layout of `ImageEncoder`). `Conv2D(shape, filters, kernel, stride,
+  padding)` uses im2col: the patches of the batch form one matrix, so the
+  forward pass, the weight gradient and the input gradient are one matrix
+  product each. `MaxPool2D(shape, pool, stride)` records the winning input
+  of each output for the backward pass. `Flatten` is an identity that checks
+  the row length. All three serialize through `Sequential` and `Layer::Deserialize`.
+- **Agent.** Images are no longer resampled to 16×16 by default:
+  `EncoderConfig::image_size` 0 keeps the native size, and images whose
+  longer side exceeds `max_image_size` (64) are area-resampled to fit;
+  `image_size` > 0 resamples to a square as before. Each image channel has
+  an embedding branch: up to three blocks of 3×3 convolution (8, 16, 32
+  filters) + ReLU + 2×2 max pooling, while the smaller side is at least 8,
+  then a dense layer to `image_embedding_size` (64). Text and categorical
+  embeddings are unchanged (one dense layer, same initial weights).
+- **BLAS.** `cmake -DDPAN_WITH_BLAS=ON` (default OFF) links BLAS through
+  CMake's `FindBLAS` (vendor OpenBLAS unless `BLA_VENDOR` is set) and needs
+  `cblas.h` (for example the `libopenblas-dev` package). `MatMul`,
+  `MatMulTransposeA` and `MatMulTransposeB` then call `cblas_sgemm`.
+  `nn::BlasAvailable()` reports whether it was built in; `nn::SetUseBlas`
+  switches it off and on at run time.
+- **Threads.** Without BLAS, the three products split output rows across
+  threads when a product has at least 2²⁰ multiply-adds. Each output element
+  is summed in the same order as on one thread, so results do not depend on
+  the thread count. `nn::SetThreadCount` / `nn::ThreadCount` (default: the
+  hardware thread count, at most 8).
+- **Checkpoint.** Version 2: the configuration holds `max_image_size` and
+  `image_embedding_size`, and embeddings are stored as layer sequences.
+  Version 1 checkpoints are rejected.

@@ -4,8 +4,9 @@
 //
 //   fused vector -> channel embeddings -> trunk (2 x Dense+ReLU) -> one head per output
 //
-// Channels with an embedding size (hashed categories, text) are projected by
-// their own learned Dense layer; other channels pass through. Each head is a
+// Channels with an embedding size are mapped by their own learned layers:
+// hashed categories and text by a Dense projection, images by convolution
+// and pooling layers and a projection; other channels pass through. Each head is a
 // Dense layer on the trunk output: classifiers produce logits (softmax
 // cross-entropy), regressors produce values (squared error). A head is
 // trained only on the samples that have a target for it.
@@ -115,12 +116,19 @@ public:
     void SetLearningRate(float learning_rate);
 
 private:
+    /// A channel's part of the network input: passed through, or its
+    /// features (without the missing indicator) mapped by `model` to
+    /// `width` values (a Dense projection, or convolution, pooling and a
+    /// projection for images); the missing indicator follows
     struct Embedding {
         size_t offset;
         size_t size;       // channel size including the missing indicator
         size_t output_offset;
-        std::unique_ptr<nn::Dense> dense;  // nullptr = pass through
+        size_t width{0};
+        std::unique_ptr<nn::Sequential> model;  // nullptr = pass through
     };
+
+    static std::unique_ptr<nn::Sequential> ImageModel(const ChannelLayout& channel, uint32_t& seed);
 
     AgentNetwork() = default;
     nn::Matrix Embed(const nn::Matrix& inputs, bool training) const;

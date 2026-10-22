@@ -384,6 +384,13 @@ TEST(TimeSeriesEncoderTest, RejectsWrongSeriesCount) {
 // ImageEncoder
 // ============================================================================
 
+/// Phase 1 behaviour: every image resampled to 16 x 16
+EncoderConfig Resample16() {
+    EncoderConfig config;
+    config.image_size = 16;
+    return config;
+}
+
 Image Gray(size_t w, size_t h, std::function<float(size_t, size_t)> f) {
     Image image{w, h, 1, std::vector<float>(w * h)};
     for (size_t y = 0; y < h; ++y)
@@ -392,7 +399,7 @@ Image Gray(size_t w, size_t h, std::function<float(size_t, size_t)> f) {
 }
 
 TEST(ImageEncoderTest, DownsamplesByAreaAveraging) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     EXPECT_EQ(16u * 16u + 1, encoder.OutputSize());
     Value checker = Gray(32, 32, [](size_t x, size_t y) { return float((x + y) % 2); });
     auto e = encoder.Encode(&checker);
@@ -401,7 +408,7 @@ TEST(ImageEncoderTest, DownsamplesByAreaAveraging) {
 }
 
 TEST(ImageEncoderTest, UpsamplesSmallImages) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     Value small = Gray(4, 4, [](size_t x, size_t y) { return (y * 4 + x) / 15.0f; });
     auto e = encoder.Encode(&small);
     for (size_t y = 0; y < 16; ++y)
@@ -410,7 +417,7 @@ TEST(ImageEncoderTest, UpsamplesSmallImages) {
 }
 
 TEST(ImageEncoderTest, PreservesMeanForUnevenSizes) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     std::mt19937 rng(3);
     std::uniform_real_distribution<float> u(0, 1);
     Value image = Gray(20, 12, [&](size_t, size_t) { return u(rng); });
@@ -422,7 +429,7 @@ TEST(ImageEncoderTest, PreservesMeanForUnevenSizes) {
 }
 
 TEST(ImageEncoderTest, InfersPixelRange) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     EXPECT_FLOAT_EQ(1.0f, encoder.PixelScale());
     Value bytes = Gray(16, 16, [](size_t x, size_t) { return x < 8 ? 0.0f : 255.0f; });
     auto e = encoder.Encode(&bytes);
@@ -438,12 +445,12 @@ TEST(ImageEncoderTest, InfersPixelRange) {
 
 TEST(ImageEncoderTest, ConvertsChannels) {
     InputSpec gray_spec{"cam", InputType::IMAGE};
-    ImageEncoder gray(gray_spec, {});
+    ImageEncoder gray(gray_spec, Resample16());
     Value rgb = Image{1, 1, 3, {0.3f, 0.6f, 0.9f}};
     EXPECT_NEAR(0.6f, gray.Encode(&rgb)[0], 1e-6f);
 
     InputSpec rgb_spec{"cam", InputType::IMAGE, 0, {}, 0, 0, 3};
-    ImageEncoder color(rgb_spec, {});
+    ImageEncoder color(rgb_spec, Resample16());
     EXPECT_EQ(16u * 16u * 3 + 1, color.OutputSize());
     Value single = Image{1, 1, 1, {0.4f}};
     auto e = color.Encode(&single);
@@ -452,10 +459,31 @@ TEST(ImageEncoderTest, ConvertsChannels) {
     EXPECT_FLOAT_EQ(0.4f, e[2]);
 
     InputSpec rgba_spec{"cam", InputType::IMAGE, 0, {}, 0, 0, 4};
-    ImageEncoder alpha(rgba_spec, {});
+    ImageEncoder alpha(rgba_spec, Resample16());
     auto ea = alpha.Encode(&rgb);
     EXPECT_FLOAT_EQ(0.9f, ea[2]);
     EXPECT_FLOAT_EQ(1.0f, ea[3]);  // opaque
+}
+
+TEST(ImageEncoderTest, KeepsSizeUpToTheLimitByDefault) {
+    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    EXPECT_EQ(0u, encoder.OutputSize());  // unknown until the first image
+    EXPECT_TRUE(encoder.Encode(nullptr).empty());
+    EXPECT_EQ(64u, encoder.EmbeddingSize());
+    Value small = Gray(20, 12, [](size_t x, size_t y) { return float(x + y) / 30.0f; });
+    auto e = encoder.Encode(&small);
+    ASSERT_EQ(20u * 12u + 1, e.size());
+    EXPECT_FLOAT_EQ(float(3 + 2) / 30.0f, e[2 * 20 + 3]);  // pixel (3, 2) unchanged
+    encoder.Update(&small);
+    EXPECT_EQ(12u, encoder.EncodedHeight());
+    EXPECT_EQ(20u, encoder.EncodedWidth());
+
+    ImageEncoder large({"cam", InputType::IMAGE, 0, {}, 128, 96}, {});
+    EXPECT_EQ(48u, large.EncodedHeight());  // longer side scaled to 64
+    EXPECT_EQ(64u, large.EncodedWidth());
+    EXPECT_EQ(48u * 64u + 1, large.OutputSize());
+    Value big = Gray(128, 96, [](size_t, size_t) { return 0.5f; });
+    EXPECT_NEAR(0.5f, large.Encode(&big)[100], 1e-6f);
 }
 
 TEST(ImageEncoderTest, ChecksSizes) {
@@ -594,8 +622,14 @@ TEST(ObservationEncoderTest, AllInputTypesTogether) {
     };
     auto fused = encoder.Encode(observation);
     ASSERT_TRUE(fused.has_value());
-    size_t expected = 2 + 4 + 65 + 1025 + (2 * (2 * 16 + 3) + 2) + (16 * 16 * 3 + 1);
+    size_t expected = 2 + 4 + 65 + 1025 + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
     EXPECT_EQ(expected, fused->size());
+    auto layout = encoder.Layout();
+    EXPECT_EQ(2u, layout.back().image_height);
+    EXPECT_EQ(2u, layout.back().image_width);
+    EXPECT_EQ(3u, layout.back().image_channels);
+    EXPECT_EQ(64u, layout.back().embedding_size);
+    EXPECT_EQ(0u, layout.front().image_height);
     for (float x : *fused) EXPECT_TRUE(std::isfinite(x));
 }
 

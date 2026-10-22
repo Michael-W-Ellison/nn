@@ -23,7 +23,7 @@ scorer.
 | `dpan::association` | Co-occurrence tracking, association formation, reinforcement, competition, normalization, prediction, activation propagation |
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
-| `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
+| `dpan::nn` | Neural networks: dense layers, 2-D convolution, max pooling, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
 | `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Detects concept drift and recovers, widens its network when it lacks capacity, rolls back on NaN or diverging training, and stays within a memory budget. `Save`/`Load` write one checkpoint from which an agent continues exactly. |
 | `dpan::dpan` | All of the above |
 
@@ -32,6 +32,7 @@ scorer.
 - CMake ≥ 3.20 and a C++17 compiler (GCC or Clang)
 - SQLite3 and zlib development packages (optional, see `DPAN_WITH_SQLITE`
   and `DPAN_WITH_ZLIB`)
+- A BLAS library with `cblas.h` (optional, see `DPAN_WITH_BLAS`)
 - libyaml (only for the `dpan_cli` tool)
 - Network access on first configure when building tests (GoogleTest is fetched)
 
@@ -55,6 +56,7 @@ added with `add_subdirectory`):
 | `DPAN_INSTALL` | Install rules and the `DPAN` CMake package (default ON) |
 | `DPAN_WITH_SQLITE` | Build the SQLite `PersistentBackend` (default ON). When OFF, the `persistent`/`sqlite` database types throw, and `dpan_cli` is not built. |
 | `DPAN_WITH_ZLIB` | Compress archive-tier files (default ON). When OFF, archive files are written uncompressed and compressed files written by a zlib build cannot be read. |
+| `DPAN_WITH_BLAS` | Use BLAS (`cblas_sgemm`, OpenBLAS by default; set `BLA_VENDOR` for another) for matrix products (default OFF). Needs `cblas.h`, for example from `libopenblas-dev`. Without it, large products are split across threads (`nn::SetThreadCount`). |
 
 ### Time
 

@@ -40,3 +40,8 @@ endif()
 add_executable(agent_persistence_test persistence_test.cpp)
 target_link_libraries(agent_persistence_test dpan_agent GTest::gtest_main)
 gtest_discover_tests(agent_persistence_test PROPERTIES TIMEOUT 600)
+
+# Timing: run alone (RUN_SERIAL); skipped in builds without BLAS
+add_executable(agent_performance_test performance_test.cpp)
+target_link_libraries(agent_performance_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_performance_test PROPERTIES LABELS performance RUN_SERIAL TRUE)
