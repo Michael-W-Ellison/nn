@@ -88,7 +88,7 @@ loss.
 |---|---|---|---|
 | LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent accuracy |
 | TARGET → VALUE | Regression head, MSE loss | Average of the k nearest patterns' targets | Same weighting, by recent error |
-| REWARD → ACTION | Double DQN: Q-value head, target network synced every 500 steps, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties |
+| REWARD → ACTION | Double DQN: Q-value head (Huber loss), target network synced every 500 training steps, 3-step returns cut at exploratory actions, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties and choose during the cold start |
 | OUTCOME (correct/incorrect) | A correct outcome counts as the label for the earlier prediction; an incorrect one is a negative example for the predicted class | `Reinforce(correct)` on associations; the neural prediction scorer is trained on outcomes | As above |
 | No feedback → NEXT_OBSERVATION | Head predicting the next fused state, MSE loss | Association sequence prediction | Neural head, with an association fallback |
 | No feedback → ANOMALY | Autoencoder reconstruction error | Distance to the nearest stored pattern | Score converted to a percentile against a running baseline |
@@ -112,7 +112,9 @@ prediction carries a confidence value.
    recent samples alongside a random sample of older ones.
 3. **Training cadence:** every 8 observations, one mini-batch of 64, half
    newest samples and half replay. Gradient clipping (norm 5), then Adam
-   with a learning rate that drops when progress plateaus.
+   with a learning rate that drops when progress plateaus. When the
+   environment has ACTION outputs: every observation, learning rate 5e-4,
+   trunk at least 64 wide; Q-value losses do not drive the plateau check.
 4. **Mixed channels:** losses from all heads with samples are summed, each
    divided by its running average so no head dominates.
 5. **Concept drift:** a Page-Hinkley test on each head's loss. On
@@ -175,7 +177,8 @@ integration test with a fixed seed and a fake clock.
 | 0. Groundwork | Complete. Clock (`core/clock.hpp`), little-endian serialization (`core/binary_io.hpp`) with byte-level fixtures, optimizer `SaveState`/`LoadState`, `ClipGradientNorm`, learning-rate schedules, `AssociationLearningSystem::AddAssociation`/`SetAssociationStrength`/`RemoveAssociation`, CMake options `DPAN_WITH_SQLITE` and `DPAN_WITH_ZLIB`. |
 | 1. Spec and encoders | Complete. `src/agent/environment.hpp` (spec, `Value`, validation), `src/agent/encoders.hpp` (encoders, `ObservationEncoder`). Notes below. |
 | 2. Agent: supervised and self-supervised | Complete. `src/agent/agent.hpp`. Reference environments A–D pass (results and notes below). |
-| 3–8 | Not started |
+| 3. Reinforcement | Complete. `Agent::Act`, REWARD and OUTCOME feedback for ACTION outputs, episodes. Reference environments E–F pass (results and notes below). |
+| 4–8 | Not started |
 
 ### Phase 1 implementation notes
 
@@ -280,6 +283,63 @@ default `AgentConfig`, fixed seeds, `ManualClock`):
   sample replaces one of 8 random candidates: the one from the most
   frequent class, oldest first. Utility scores from the memory manager are
   not used yet (Phase 4).
-- **Not in Phase 2:** ACTION outputs and REWARD feedback (rejected at
-  construction; Phase 3), `Save`/`Load` (Phase 5). `SetClock` sets the
+- **Not in Phase 2:** ACTION outputs and REWARD feedback (Phase 3, below),
+  `Save`/`Load` (Phase 5). `SetClock` sets the
   process-wide clock.
+
+### Phase 3 results
+
+Reference environments E and F (`tests/agent/reference_environments_test.cpp`,
+default `AgentConfig`). Because reinforcement learning results vary with
+the random seed, both were also run with other seeds (outside the test
+suite):
+
+| | Criterion | Test seed | Other seeds |
+|---|---|---|---|
+| E | Shortest path in ≥ 95 of 100 greedy episodes after 500 training episodes | 97 | 100, 95, 99, 95, 96 (5 of 5 pass) |
+| F | 100-episode average reward ≥ 195 within 1,000 episodes | episode 574 | episode 412; best averages 193.3 and 189.4 (1 of 3 pass) |
+
+F's criterion is measured on the training episodes themselves, so 5% of
+its actions are random. A–D were run again with the Phase 3 changes and
+still pass (A 98.7% / 97.5% / 98.0%, B 1.13×, C 0.11×, D 0.97).
+
+### Phase 3 implementation notes
+
+- **API.** `Act(step, output, explore = true)` chooses an action (the same
+  one again for the same step). `Feedback` with REWARD adds to that step's
+  reward; OUTCOME on an ACTION output is a reward of +1 or −1. The next
+  observed step of an episode is the next state; `EndEpisode(true)` marks
+  the last action terminal, `EndEpisode(false)` (a cut-off episode)
+  discards it unless its next state was observed. `Predict` on an ACTION
+  output gives the greedy action, the action probabilities under the
+  current exploration rate, and the Q-values.
+- **Settings for action environments (decided with the user).** With the
+  Phase 2 settings, E passed on 1 of 6 seeds and F did not learn: an
+  episode of cart-pole gave the network about one update per 8 steps.
+  When the spec has ACTION outputs: training every observation
+  (`action_train_every`), learning rate 5e-4 (`action_learning_rate`),
+  trunk width at least 64 (`action_min_trunk_width`). Q-value losses are
+  excluded from the plateau learning-rate check (their targets move by
+  design; including them drove the rate to its minimum).
+- **Fixed input statistics (all environments).** NUMERIC and TIME_SERIES
+  statistics stop changing after 5,000 values per element
+  (`EncoderConfig::statistics_limit`). Statistics that kept moving changed
+  the encoding of states already in the replay buffer; with raw inputs in a
+  test, cart-pole learned much better (best average 182 vs 40).
+- **Multi-step returns (decided with the user, beyond the plan).** Plain
+  Double DQN solved F in about half the runs. Targets now sum up to 3
+  discounted rewards before bootstrapping (`action_return_steps`), stopping
+  at a terminal step and before an exploratory action (Watkins's Q(λ)
+  cut), so they estimate the greedy policy. Without the cut, F passed on 4
+  of 4 seeds but E on 4 of 6. Samples link to the next step's sample with
+  a weak reference, so late rewards are included and streams without
+  episodes do not keep old samples alive.
+- **Pattern side.** Each action has a PatternID; associations from state
+  patterns to actions start at 0.5 and move toward 1 or 0 with the sign of
+  each reward (rate 0.1). They break exact ties between Q-values and choose
+  the greedy action before the Q head has 200 transitions.
+- **Loss scaling.** Dividing each head's loss by its running average (rule
+  4) is kept as in Phase 2. Normalizing the factors to average 1 was tried
+  during Phase 3; it did not help F and stopped OUTCOME-only learning.
+- **Cost.** Action environments train once per observation: F's test runs
+  about 65,000 steps in about a minute.

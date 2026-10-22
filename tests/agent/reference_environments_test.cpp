@@ -302,6 +302,147 @@ TEST_F(ReferenceTest, D_AnomalyDetection) {
     EXPECT_GE(auc, 0.9);
 }
 
+
+// ============================================================================
+// E: 5x5 gridworld
+// ============================================================================
+//
+// Goal at (4, 4); each episode starts in a random other cell. Actions up,
+// down, left, right (moving into the border leaves the position unchanged).
+// Reward -0.04 per step, +1 on reaching the goal (terminal). Episodes are cut
+// off after 50 steps. Input: the position (x, y). 500 training episodes with
+// exploration, then 100 episodes choosing greedy actions. Pass: >= 95% of
+// those take a shortest path.
+
+TEST_F(ReferenceTest, E_Gridworld) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"position", InputType::NUMERIC, 2}};
+    spec.outputs = {{"move", OutputType::ACTION, {"up", "down", "left", "right"}}};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "move"}};
+    Agent agent(spec);
+
+    std::mt19937 rng(51);
+    std::uniform_int_distribution<int> cell(0, 4);
+    auto run_episode = [&](bool explore) {
+        int x, y;
+        do {
+            x = cell(rng);
+            y = cell(rng);
+        } while (x == 4 && y == 4);
+        const int shortest = (4 - x) + (4 - y);
+        for (int t = 0; t < 50; ++t) {
+            StepId step = agent.Observe({{"position", std::vector<float>{float(x), float(y)}}});
+            std::string move = agent.Act(step, "move", explore);
+            if (move == "up") y = std::min(4, y + 1);
+            else if (move == "down") y = std::max(0, y - 1);
+            else if (move == "left") x = std::max(0, x - 1);
+            else x = std::min(4, x + 1);
+            bool goal = x == 4 && y == 4;
+            agent.Feedback(step, "reward", goal ? 1.0 : -0.04);
+            Tick();
+            if (goal) {
+                agent.EndEpisode(true);
+                return t + 1 == shortest;
+            }
+        }
+        agent.EndEpisode(false);
+        return false;
+    };
+
+    for (int episode = 0; episode < 500; ++episode) run_episode(true);
+    int optimal = 0;
+    for (int episode = 0; episode < 100; ++episode) optimal += run_episode(false);
+    AgentStats stats = agent.Stats();
+    std::cout << "E: shortest path in " << optimal << " of 100 greedy episodes (after 500 training "
+              << "episodes, " << stats.steps << " steps, exploration " << stats.outputs[0].exploration << ")\n";
+    EXPECT_GE(optimal, 95);
+}
+
+// ============================================================================
+// F: cart-pole
+// ============================================================================
+//
+// The classic cart-pole system (Barto, Sutton & Anderson 1983) with the
+// constants of the common CartPole-v0 setup: gravity 9.8, cart mass 1.0,
+// pole mass 0.1, half pole length 0.5, force 10, Euler steps of 0.02 s.
+// Episodes fail when the pole leaves +-12 degrees or the cart leaves +-2.4,
+// and are cut off after 200 steps; the start state is uniform in
+// +-0.05. Reward +1 per step. Input: (x, x', theta, theta'). Pass: the
+// average reward of 100 consecutive (exploring) episodes reaches 195 within
+// 1000 episodes.
+
+class CartPole {
+public:
+    explicit CartPole(uint32_t seed) : rng_(seed) {}
+
+    std::vector<float> Reset() {
+        std::uniform_real_distribution<float> u(-0.05f, 0.05f);
+        state_ = {u(rng_), u(rng_), u(rng_), u(rng_)};
+        return state_;
+    }
+
+    /// Applies the action; returns true if the episode failed
+    bool Step(bool push_right) {
+        const double gravity = 9.8, cart_mass = 1.0, pole_mass = 0.1, half_length = 0.5;
+        const double total_mass = cart_mass + pole_mass, pole_moment = pole_mass * half_length;
+        const double force = push_right ? 10.0 : -10.0, tau = 0.02;
+        double x = state_[0], x_dot = state_[1], theta = state_[2], theta_dot = state_[3];
+        double cos_t = std::cos(theta), sin_t = std::sin(theta);
+        double temp = (force + pole_moment * theta_dot * theta_dot * sin_t) / total_mass;
+        double theta_acc = (gravity * sin_t - cos_t * temp) /
+                           (half_length * (4.0 / 3.0 - pole_mass * cos_t * cos_t / total_mass));
+        double x_acc = temp - pole_moment * theta_acc * cos_t / total_mass;
+        x += tau * x_dot;
+        x_dot += tau * x_acc;
+        theta += tau * theta_dot;
+        theta_dot += tau * theta_acc;
+        state_ = {float(x), float(x_dot), float(theta), float(theta_dot)};
+        return std::fabs(x) > 2.4 || std::fabs(theta) > 12.0 * 2.0 * kPi / 360.0;
+    }
+
+    const std::vector<float>& State() const { return state_; }
+
+private:
+    std::mt19937 rng_;
+    std::vector<float> state_;
+};
+
+TEST_F(ReferenceTest, F_CartPole) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"state", InputType::NUMERIC, 4}};
+    spec.outputs = {{"push", OutputType::ACTION, {"left", "right"}}};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "push"}};
+    Agent agent(spec);
+
+    CartPole pole(61);
+    std::vector<int> rewards;
+    int solved_at = -1;
+    double best_average = 0.0;
+    for (int episode = 0; episode < 1000 && solved_at < 0; ++episode) {
+        pole.Reset();
+        int total = 0;
+        bool failed = false;
+        while (total < 200 && !failed) {
+            StepId step = agent.Observe({{"state", pole.State()}});
+            failed = pole.Step(agent.Act(step, "push") == "right");
+            agent.Feedback(step, "reward", 1.0);
+            ++total;
+            Tick();
+        }
+        agent.EndEpisode(failed);  // cut off at 200 steps: not terminal
+        rewards.push_back(total);
+        if (rewards.size() >= 100) {
+            double average = std::accumulate(rewards.end() - 100, rewards.end(), 0.0) / 100.0;
+            best_average = std::max(best_average, average);
+            if (average >= 195.0) solved_at = episode + 1;
+        }
+    }
+    std::cout << "F: " << (solved_at > 0 ? "average reward >= 195 after " + std::to_string(solved_at) + " episodes"
+                                         : "not solved in 1000 episodes")
+              << " (best 100-episode average " << best_average << ", " << agent.Stats().steps << " steps)\n";
+    EXPECT_GT(solved_at, 0);
+}
+
 }  // namespace
 }  // namespace agent
 }  // namespace dpan

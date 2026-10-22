@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 
@@ -48,6 +49,14 @@ void CheckConfig(const AgentConfig& c) {
     require(c.quality_rate > 0.0f && c.quality_rate <= 1.0f, "quality_rate must be in (0, 1]");
     require(c.anomaly_baseline > 0, "anomaly_baseline must be > 0");
     require(c.max_classes > 0, "max_classes must be > 0");
+    require(c.discount >= 0.0f && c.discount <= 1.0f, "discount must be in [0, 1]");
+    require(c.target_sync > 0, "target_sync must be > 0");
+    require(c.action_return_steps > 0, "action_return_steps must be > 0");
+    require(c.action_train_every > 0, "action_train_every must be > 0");
+    require(c.action_learning_rate >= c.min_learning_rate, "action_learning_rate must be >= min_learning_rate");
+    require(c.exploration_start >= 0.0f && c.exploration_start <= 1.0f && c.exploration_end >= 0.0f &&
+                c.exploration_end <= c.exploration_start,
+            "exploration rates must satisfy 0 <= exploration_end <= exploration_start <= 1");
     ValidateEncoderConfig(c.encoder);
 }
 
@@ -108,7 +117,9 @@ struct Agent::Impl {
         int value_slot{-1};  // index among VALUE outputs
         bool learn_classes{false};
         bool outcome_only{false};  // CLASS trained by OUTCOME feedback only
-        std::vector<std::string> classes;
+        std::vector<std::string> classes;  // class names, or action names for ACTION
+        std::vector<PatternID> action_ids;  // ACTION: one pattern ID per action (associations)
+        uint64_t acts{0};                   // ACTION: exploring Act calls
         std::map<std::string, size_t> class_index;
         std::vector<RunningStats> target_stats;
         uint64_t samples{0};
@@ -136,6 +147,8 @@ struct Agent::Impl {
         PatternID pattern;
         SamplePtr sample;
         std::map<size_t, size_t> predicted;  // output -> class returned by Predict
+        std::map<size_t, size_t> actions;    // output -> action chosen by Act
+        bool transition_complete{false};     // next state or terminal known (ACTION)
         float anomaly{0.5f};
         float anomaly_neural_weight{0.0f};
     };
@@ -150,7 +163,9 @@ struct Agent::Impl {
           config(c),
           encoder(spec.inputs, config.encoder),
           replay(config.replay_capacity, config.seed + 7),
-          schedule(config.plateau_factor, config.plateau_patience, config.min_learning_rate) {}
+          schedule(config.plateau_factor, config.plateau_patience, config.min_learning_rate) {
+        rng.seed(config.seed + 11);
+    }
 
     // ------------------------------------------------------------------ setup
 
@@ -171,6 +186,13 @@ struct Agent::Impl {
                 next_output = static_cast<int>(i);
             } else if (state.spec->type == OutputType::ANOMALY) {
                 has_anomaly = true;
+            } else if (state.spec->type == OutputType::ACTION) {
+                state.classes = state.spec->classes_or_actions;
+                for (size_t a = 0; a < state.classes.size(); ++a) {
+                    state.class_index[state.classes[a]] = a;
+                    state.action_ids.push_back(PatternID::Generate());
+                }
+                has_actions = true;
             }
             outputs.push_back(std::move(state));
         }
@@ -220,6 +242,10 @@ struct Agent::Impl {
                     out.head = static_cast<int>(heads.size());
                     heads.push_back({out.spec->name, HeadKind::REGRESSOR, observed_size});
                     break;
+                case OutputType::ACTION:
+                    out.head = static_cast<int>(heads.size());
+                    heads.push_back({out.spec->name, HeadKind::Q_VALUES, out.classes.size()});
+                    break;
                 default:
                     break;
             }
@@ -228,6 +254,7 @@ struct Agent::Impl {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
                                                      config.min_trunk_width, config.max_trunk_width);
             head_loss.assign(heads.size(), kNaN);
+            if (has_actions) target_network = std::make_unique<AgentNetwork>(*network);
         }
         if (has_anomaly) {
             autoencoder = std::make_unique<AnomalyAutoencoder>(encoder.OutputSize(), config.learning_rate,
@@ -397,6 +424,90 @@ struct Agent::Impl {
     }
 
     /// Records the class returned for a CLASS output (used by OUTCOME feedback)
+    // -------------------------------------------------------------- actions
+
+    float Exploration(const OutputState& out) const {
+        if (config.exploration_steps == 0) return config.exploration_end;
+        float progress = std::min(1.0f, static_cast<float>(out.acts) / static_cast<float>(config.exploration_steps));
+        return config.exploration_start - (config.exploration_start - config.exploration_end) * progress;
+    }
+
+    /// Q-values once the head is past the cold start
+    std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
+        if (!network || out.samples < config.cold_start_samples) return std::nullopt;
+        return network->Infer(Row(entry.fused), static_cast<size_t>(out.head)).Row(0);
+    }
+
+    /// Highest Q-value; ties (and the cold start) decided by association
+    /// strength; remaining ties by `rng` if given, else the first action
+    size_t GreedyAction(const Pending& entry, const OutputState& out, std::mt19937* tie_rng) const {
+        const size_t n = out.classes.size();
+        auto q = NeuralQ(entry, out);
+        auto strengths = patterns->ActionStrengths(entry.pattern, out.action_ids);
+        std::vector<size_t> candidates;
+        if (q) {
+            float best = *std::max_element(q->begin(), q->end());
+            float tolerance = 1e-6f * std::max(1.0f, std::fabs(best));
+            for (size_t a = 0; a < n; ++a) {
+                if ((*q)[a] >= best - tolerance) candidates.push_back(a);
+            }
+        } else {
+            for (size_t a = 0; a < n; ++a) candidates.push_back(a);
+        }
+        float strongest = -1.0f;
+        for (size_t a : candidates) strongest = std::max(strongest, strengths[a]);
+        std::vector<size_t> best;
+        for (size_t a : candidates) {
+            if (strengths[a] >= strongest) best.push_back(a);
+        }
+        if (tie_rng && best.size() > 1) {
+            return best[std::uniform_int_distribution<size_t>(0, best.size() - 1)(*tie_rng)];
+        }
+        return best.front();
+    }
+
+    std::string ActLocked(StepId step, size_t index, bool explore) {
+        Pending& entry = FindPending(step);
+        OutputState& out = outputs[index];
+        auto existing = entry.actions.find(index);
+        if (existing != entry.actions.end()) return out.classes[existing->second];
+
+        float epsilon = Exploration(out);
+        if (explore) out.acts++;
+        size_t action;
+        std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+        bool random = !entry.encoded || (explore && unit(rng) < epsilon);
+        if (random) {
+            action = std::uniform_int_distribution<size_t>(0, out.classes.size() - 1)(rng);
+        } else {
+            action = GreedyAction(entry, out, &rng);
+        }
+        entry.actions[index] = action;
+        if (entry.encoded) {
+            entry.sample->targets[static_cast<size_t>(out.head)].action = static_cast<int>(action);
+            entry.sample->targets[static_cast<size_t>(out.head)].exploratory = random;
+            last_acted_step = step;
+        }
+        return out.classes[action];
+    }
+
+    /// A transition becomes trainable once its next state or its end is known
+    void CompleteTransition(Pending& entry) {
+        if (entry.actions.empty() || !entry.encoded) return;
+        if (!entry.transition_complete) {
+            entry.transition_complete = true;
+            for (const auto& [index, action] : entry.actions) outputs[index].samples++;
+        }
+        MakeTrainable(entry.sample);
+    }
+
+    void LearnReward(Pending& entry, OutputState& out, size_t index, float reward) {
+        size_t action = entry.actions.at(index);
+        entry.sample->targets[static_cast<size_t>(out.head)].reward += reward;
+        patterns->ReinforceAction(entry.pattern, out.action_ids[action], reward);
+        if (entry.transition_complete) MakeTrainable(entry.sample);
+    }
+
     Prediction PredictLocked(Pending& entry, size_t index) const {
         const OutputState& out = outputs[index];
         Prediction prediction;
@@ -457,8 +568,22 @@ struct Agent::Impl {
                 prediction.confidence = std::min(1.0f, static_cast<float>(pattern_baseline.size()) /
                                                            static_cast<float>(config.anomaly_baseline));
                 break;
-            case OutputType::ACTION:
+            case OutputType::ACTION: {
+                size_t greedy = GreedyAction(entry, out, nullptr);
+                float epsilon = Exploration(out);
+                size_t n = out.classes.size();
+                prediction.available = true;
+                prediction.classes = out.classes;
+                prediction.probabilities.assign(n, epsilon / static_cast<float>(n));
+                prediction.probabilities[greedy] += 1.0f - epsilon;
+                prediction.label = out.classes[greedy];
+                prediction.confidence = prediction.probabilities[greedy];
+                if (auto q = NeuralQ(entry, out)) {
+                    prediction.values = *q;
+                    prediction.neural_weight = 1.0f;
+                }
                 break;
+            }
         }
         return prediction;
     }
@@ -531,6 +656,7 @@ struct Agent::Impl {
         // Check the value before anything is learned
         std::vector<float> target_values;
         bool correct = false;
+        float reward = 0.0f;
         if (type == FeedbackType::TARGET) {
             if (const double* number = std::get_if<double>(&value)) {
                 target_values.assign(1, static_cast<float>(*number));
@@ -551,6 +677,17 @@ struct Agent::Impl {
                                             ValueTypeName(value));
             }
             correct = *number != 0.0;
+        } else if (type == FeedbackType::REWARD) {
+            const double* number = std::get_if<double>(&value);
+            if (!number || !std::isfinite(*number)) {
+                throw std::invalid_argument("Feedback '" + name + "' (REWARD) expects a finite number, got " +
+                                            (number ? FormatNumber(*number) : std::string(ValueTypeName(value))));
+            }
+            reward = static_cast<float>(*number);
+        }
+        if (out.spec->type == OutputType::ACTION && entry.actions.count(fb->second.output) == 0) {
+            throw std::logic_error("Feedback '" + name + "' for step " + std::to_string(step) +
+                                   ": no action of output '" + out.spec->name + "' was chosen for it (call Act first)");
         }
 
         if (!entry.encoded) {
@@ -558,6 +695,11 @@ struct Agent::Impl {
             return;
         }
         feedback_count++;
+
+        if (out.spec->type == OutputType::ACTION) {
+            LearnReward(entry, out, fb->second.output, type == FeedbackType::OUTCOME ? (correct ? 1.0f : -1.0f) : reward);
+            return;
+        }
 
         switch (type) {
             case FeedbackType::LABEL:
@@ -644,6 +786,11 @@ struct Agent::Impl {
                 if (previous && previous->encoded) {
                     patterns->RecordTransition(previous->pattern, entry.pattern);
                     if (next_output >= 0) LearnNext(*previous, entry.observed);
+                    if (!previous->actions.empty()) {
+                        previous->sample->SetNext(*entry.sample);
+                        previous->sample->next_sample = entry.sample;
+                        CompleteTransition(*previous);
+                    }
                 }
             }
             previous_step = step;
@@ -697,6 +844,90 @@ struct Agent::Impl {
 
     // -------------------------------------------------------------- train
 
+    /// Multi-step return of one transition: rewards of up to
+    /// action_return_steps consecutive steps of the episode, discounted.
+    /// Stops early at a terminal step, where the chain is unknown, and
+    /// before a random (exploring) action, so the return estimates the
+    /// greedy policy (as in Watkins's Q(lambda))
+    struct Return {
+        float rewards{0.0f};
+        float discount{1.0f};             // discount of the bootstrap value
+        const Sample* bootstrap{nullptr};  // sample whose next state is bootstrapped (nullptr = terminal)
+    };
+
+    Return MultiStepReturn(const Sample& first, size_t h) const {
+        Return result;
+        const Sample* current = &first;
+        std::shared_ptr<Sample> hold;  // keeps the current link alive
+        for (size_t k = 0;; ++k) {
+            result.rewards += result.discount * current->targets[h].reward;
+            result.discount *= config.discount;
+            if (current->terminal) {
+                result.bootstrap = nullptr;
+                return result;
+            }
+            auto next = current->next_sample.lock();
+            bool usable = next && next->targets[h].action >= 0 && !next->targets[h].exploratory &&
+                          (next->has_next || next->terminal);
+            if (k + 1 >= config.action_return_steps || !usable) {
+                result.bootstrap = current;
+                return result;
+            }
+            hold = std::move(next);
+            current = hold.get();
+        }
+    }
+
+    /// Double DQN targets for one ACTION head: the multi-step return plus
+    /// its discount x the target network's value of the action the online
+    /// network picks in the state after the last step (no future part
+    /// after a terminal step)
+    void QTargets(const OutputState& out, const std::vector<SamplePtr>& batch,
+                  std::vector<std::vector<HeadTarget>>& owned,
+                  std::vector<std::vector<const HeadTarget*>>& targets) const {
+        const auto h = static_cast<size_t>(out.head);
+        const size_t width = encoder.OutputSize();
+        const size_t n = out.classes.size();
+        std::vector<size_t> rows, bootstrap;
+        std::map<size_t, Return> returns;
+        for (size_t r = 0; r < batch.size(); ++r) {
+            const Sample& sample = *batch[r];
+            if (sample.targets[h].action < 0 || !(sample.has_next || sample.terminal)) continue;
+            rows.push_back(r);
+            returns[r] = MultiStepReturn(sample, h);
+            if (returns[r].bootstrap) bootstrap.push_back(r);
+        }
+        if (rows.empty()) return;
+
+        std::map<size_t, float> future;
+        if (!bootstrap.empty()) {
+            nn::Matrix next(bootstrap.size(), width);
+            for (size_t i = 0; i < bootstrap.size(); ++i) {
+                returns[bootstrap[i]].bootstrap->FillNext(next.Data() + i * width, width);
+            }
+            nn::Matrix online = network->Infer(next, h);
+            nn::Matrix target = target_network->Infer(next, h);
+            for (size_t i = 0; i < bootstrap.size(); ++i) {
+                size_t best = 0;
+                for (size_t a = 1; a < n; ++a) {
+                    if (online(i, a) > online(i, best)) best = a;
+                }
+                future[bootstrap[i]] = target(i, best);
+            }
+        }
+        for (size_t r : rows) {
+            const HeadTarget& stored = batch[r]->targets[h];
+            HeadTarget& t = owned[h][r];
+            t = HeadTarget();
+            t.values.assign(n, kNaN);
+            const Return& g = returns[r];
+            auto it = future.find(r);
+            t.values[static_cast<size_t>(stored.action)] =
+                g.rewards + (it != future.end() ? g.discount * it->second : 0.0f);
+            targets[h][r] = &t;
+        }
+    }
+
     void Train() {
         if (replay.Size() == 0 || (!network && !autoencoder)) return;
 
@@ -710,6 +941,7 @@ struct Agent::Impl {
 
         const size_t width = encoder.OutputSize();
         float total_loss = 0.0f;
+        bool monitored = false;  // a loss that measures progress was added
 
         if (network) {
             nn::Matrix inputs(batch.size(), width);
@@ -720,7 +952,7 @@ struct Agent::Impl {
                 batch[r]->Fill(inputs.Data() + r * width, width);
             }
             for (const auto& out : outputs) {
-                if (out.head < 0) continue;
+                if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
                 auto h = static_cast<size_t>(out.head);
                 for (size_t r = 0; r < batch.size(); ++r) {
                     const HeadTarget& stored = batch[r]->targets[h];
@@ -738,6 +970,9 @@ struct Agent::Impl {
                     targets[h][r] = &t;
                 }
             }
+            for (const auto& out : outputs) {
+                if (out.spec->type == OutputType::ACTION) QTargets(out, batch, owned, targets);
+            }
             std::vector<float> scale(heads, 1.0f);
             for (size_t h = 0; h < heads; ++h) {
                 if (!std::isnan(head_loss[h])) scale[h] = 1.0f / std::max(head_loss[h], 1e-3f);
@@ -746,7 +981,12 @@ struct Agent::Impl {
             for (size_t h = 0; h < heads; ++h) {
                 if (std::isnan(losses[h])) continue;
                 head_loss[h] = std::isnan(head_loss[h]) ? losses[h] : 0.95f * head_loss[h] + 0.05f * losses[h];
-                total_loss += losses[h];
+                // Q-learning targets move with the network, so their loss is
+                // no measure of progress; it does not drive the plateau check
+                if (network->Head(h).kind != HeadKind::Q_VALUES) {
+                    total_loss += losses[h];
+                    monitored = true;
+                }
             }
         }
 
@@ -759,10 +999,15 @@ struct Agent::Impl {
                 nn::Matrix inputs(rows.size(), width);
                 for (size_t r = 0; r < rows.size(); ++r) rows[r]->Fill(inputs.Data() + r * width, width);
                 total_loss += autoencoder->TrainBatch(inputs, config.gradient_clip_norm);
+                monitored = true;
             }
         }
 
         training_steps++;
+        if (target_network && training_steps % config.target_sync == 0) {
+            target_network = std::make_unique<AgentNetwork>(*network);
+        }
+        if (!monitored) return;
         plateau_sum += total_loss;
         if (++plateau_count >= config.plateau_interval) {
             float mean = static_cast<float>(plateau_sum / static_cast<double>(plateau_count));
@@ -796,6 +1041,11 @@ struct Agent::Impl {
     size_t observed_size{0};
 
     std::unique_ptr<AgentNetwork> network;
+    std::unique_ptr<AgentNetwork> target_network;  // ACTION heads (Double DQN)
+    bool has_actions{false};
+    std::mt19937 rng;
+    std::optional<StepId> last_acted_step;  // in the current episode
+    uint64_t episodes{0};
     std::unique_ptr<AnomalyAutoencoder> autoencoder;
     std::unique_ptr<PatternMemory> patterns;
     ReplayBuffer replay;
@@ -830,18 +1080,6 @@ struct Agent::Impl {
 
 Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
     Validate(spec);
-    for (const auto& output : spec.outputs) {
-        if (output.type == OutputType::ACTION) {
-            throw std::invalid_argument("Output '" + output.name +
-                                        "': ACTION outputs are not supported yet (planned for Phase 3)");
-        }
-    }
-    for (const auto& fb : spec.feedback) {
-        if (fb.type == FeedbackType::REWARD) {
-            throw std::invalid_argument("Feedback '" + fb.name +
-                                        "': REWARD feedback is not supported yet (planned for Phase 3)");
-        }
-    }
     bool has_numeric = std::any_of(spec.inputs.begin(), spec.inputs.end(), [](const InputSpec& input) {
         return input.type == InputType::NUMERIC || input.type == InputType::TIME_SERIES;
     });
@@ -861,6 +1099,14 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         }
     }
     CheckConfig(config);
+    bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(),
+                                   [](const OutputSpec& output) { return output.type == OutputType::ACTION; });
+    if (has_actions) {
+        config.train_every = config.action_train_every;
+        config.learning_rate = config.action_learning_rate;
+        config.min_trunk_width = std::min(config.max_trunk_width,
+                                          std::max(config.min_trunk_width, config.action_min_trunk_width));
+    }
 
     impl_ = std::make_unique<Impl>(std::move(spec), config);
     impl_->learning_rate = config.learning_rate;
@@ -891,10 +1137,32 @@ void Agent::Feedback(StepId step, const std::string& feedback, const Value& valu
     impl_->FeedbackLocked(step, feedback, value);
 }
 
-void Agent::EndEpisode() {
+std::string Agent::Act(StepId step, const std::string& action_output, bool explore) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->encoder.ResetEpisode();
-    impl_->previous_step.reset();
+    for (size_t i = 0; i < impl_->outputs.size(); ++i) {
+        if (impl_->outputs[i].spec->name != action_output) continue;
+        if (impl_->outputs[i].spec->type != OutputType::ACTION) {
+            throw std::invalid_argument("Output '" + action_output + "' is not an ACTION output");
+        }
+        return impl_->ActLocked(step, i, explore);
+    }
+    throw std::invalid_argument("Unknown output '" + action_output + "'");
+}
+
+void Agent::EndEpisode(bool terminal) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    Impl& m = *impl_;
+    if (terminal && m.last_acted_step) {
+        // The last action of the episode has no future value
+        if (auto* last = m.TryFindPending(*m.last_acted_step); last && last->encoded) {
+            last->sample->terminal = true;
+            m.CompleteTransition(*last);
+        }
+    }
+    m.encoder.ResetEpisode();
+    m.previous_step.reset();
+    m.last_acted_step.reset();
+    m.episodes++;
 }
 
 AgentStats Agent::Stats() const {
@@ -902,6 +1170,7 @@ AgentStats Agent::Stats() const {
     const Impl& m = *impl_;
     AgentStats stats;
     stats.steps = m.steps;
+    stats.episodes = m.episodes;
     stats.feedback = m.feedback_count;
     stats.ignored_feedback = m.ignored_feedback;
     stats.training_steps = m.training_steps;
@@ -923,6 +1192,9 @@ AgentStats Agent::Stats() const {
         o.pattern_quality = out.Pattern(out.spec->type == OutputType::CLASS).value;
         if (out.spec->type == OutputType::ANOMALY) {
             o.neural_weight = m.anomaly_samples >= m.config.cold_start_samples ? 0.5f : 0.0f;
+        } else if (out.spec->type == OutputType::ACTION) {
+            o.neural_weight = out.samples >= m.config.cold_start_samples ? 1.0f : 0.0f;
+            o.exploration = m.Exploration(out);
         } else if (m.network && out.head >= 0) {
             o.neural_weight = m.BlendWeight(out, out.samples > 0,
                                             out.Pattern(out.spec->type == OutputType::CLASS).Measured(),

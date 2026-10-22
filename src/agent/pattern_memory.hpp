@@ -11,7 +11,9 @@
 // weights, target means) and the input values seen with them. Transitions
 // between consecutive patterns are kept as associations in an
 // AssociationLearningSystem, with strengths that approximate transition
-// probabilities. Predictions are k-nearest-pattern votes (over all patterns
+// probabilities; associations from states to action patterns are
+// strengthened or weakened by the sign of the rewards the actions receive.
+// Predictions are k-nearest-pattern votes (over all patterns
 // or only recently labelled ones) and association sequence predictions.
 //
 // Not thread-safe.
@@ -85,7 +87,16 @@ public:
     /// that most often follow `current`, weighted by transition strength
     std::optional<std::vector<float>> PredictNextObserved(PatternID current) const;
 
-    bool Contains(PatternID id) const { return slots_.count(id) > 0; }
+    /// Strengthen (reward > 0) or weaken (reward < 0) the association
+    /// between a stored state and an action pattern. New associations start
+    /// at 0.5. Action patterns are IDs chosen by the caller; they are not
+    /// stored states.
+    void ReinforceAction(PatternID state, PatternID action, float reward);
+
+    /// Association strength from `state` to each action (0.5 if none)
+    std::vector<float> ActionStrengths(PatternID state, const std::vector<PatternID>& actions) const;
+
+        bool Contains(PatternID id) const { return slots_.count(id) > 0; }
     size_t Size() const { return slots_.size(); }
     float TypicalDistance() const { return typical_distance_; }
     const AssociationLearningSystem& Associations() const { return associations_; }

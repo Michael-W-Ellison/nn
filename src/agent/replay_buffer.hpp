@@ -32,6 +32,17 @@ struct Sample {
     /// Trains the anomaly autoencoder
     bool reconstruct{false};
 
+    /// Q-learning: the next state of the episode (sparse fused vector), or
+    /// terminal if the episode ended after this step
+    std::vector<uint32_t> next_indices;
+    std::vector<float> next_values;
+    bool has_next{false};
+    bool terminal{false};
+
+    /// The next step's sample in the same episode, for multi-step returns
+    /// (weak, so a stream without episodes does not keep old samples alive)
+    std::weak_ptr<Sample> next_sample;
+
     /// Class used for balancing (-1 = none)
     int balance_class{-1};
 
@@ -39,6 +50,8 @@ struct Sample {
 
     void SetFused(const std::vector<float>& fused);
     void Fill(float* row, size_t size) const;
+    void SetNext(const Sample& next);
+    void FillNext(float* row, size_t size) const;
 };
 
 using SamplePtr = std::shared_ptr<Sample>;

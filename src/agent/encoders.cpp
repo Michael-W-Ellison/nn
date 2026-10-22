@@ -125,7 +125,7 @@ float RunningStats::Standardize(double x, float clip) const {
 // ============================================================================
 
 NumericEncoder::NumericEncoder(InputSpec spec, const EncoderConfig& config)
-    : Encoder(std::move(spec)), clip_(config.clip_sigma), size_(spec_.size) {
+    : Encoder(std::move(spec)), clip_(config.clip_sigma), statistics_limit_(config.statistics_limit), size_(spec_.size) {
     stats_.resize(size_);
 }
 
@@ -163,7 +163,7 @@ std::vector<float> NumericEncoder::Encode(const Value* value) const {
             continue;
         }
         RunningStats stats = i < stats_.size() ? stats_[i] : RunningStats{};
-        stats.Add(values[i]);
+        if (Learning(stats)) stats.Add(values[i]);
         out[i] = stats.Standardize(values[i], clip_);
     }
     out.back() = static_cast<float>(missing) / static_cast<float>(values.size());
@@ -181,7 +181,7 @@ void NumericEncoder::Update(const Value* value) {
     }
     for (size_t i = 0; i < values.size(); ++i) {
         if (std::isfinite(values[i])) {
-            stats_[i].Add(values[i]);
+            if (Learning(stats_[i])) stats_[i].Add(values[i]);
         }
     }
 }
@@ -380,6 +380,7 @@ void TextEncoder::Update(const Value* value) {
 TimeSeriesEncoder::TimeSeriesEncoder(InputSpec spec, const EncoderConfig& config)
     : Encoder(std::move(spec)),
       clip_(config.clip_sigma),
+      statistics_limit_(config.statistics_limit),
       window_(config.time_series_window),
       series_(spec_.size) {
     state_.resize(series_);
@@ -412,7 +413,7 @@ void TimeSeriesEncoder::Step(std::vector<Series>& series, const Value* value) co
     for (size_t s = 0; s < series.size(); ++s) {
         auto& current = series[s];
         if (!values.empty() && std::isfinite(values[s])) {
-            current.stats.Add(values[s]);
+            if (Learning(current.stats)) current.stats.Add(values[s]);
             current.values.push_back(values[s]);
         } else if (!current.values.empty()) {
             current.values.push_back(current.values.back());  // carry forward

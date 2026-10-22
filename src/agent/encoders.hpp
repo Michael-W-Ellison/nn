@@ -33,6 +33,12 @@ struct EncoderConfig {
     /// NUMERIC and TIME_SERIES values are standardized and clipped to ±clip_sigma
     float clip_sigma{5.0f};
 
+    /// NUMERIC and TIME_SERIES: values per element after which the running
+    /// statistics stop changing (0 = never). Fixed statistics keep the
+    /// encoding of a value stable, so stored samples stay consistent with
+    /// new ones.
+    uint64_t statistics_limit{5000};
+
     /// CATEGORICAL with an open vocabulary: hash buckets and the width of the
     /// learned embedding the agent puts after them
     size_t category_buckets{64};
@@ -125,7 +131,12 @@ public:
 private:
     std::vector<float> Values(const Value& value) const;
 
+    bool Learning(const RunningStats& stats) const {
+        return statistics_limit_ == 0 || stats.count < statistics_limit_;
+    }
+
     float clip_;
+    uint64_t statistics_limit_;
     size_t size_;
     std::vector<RunningStats> stats_;
 };
@@ -241,7 +252,12 @@ private:
     /// Applies one step to `series` (simulated in Encode, committed in Update)
     void Step(std::vector<Series>& series, const Value* value) const;
 
+    bool Learning(const RunningStats& stats) const {
+        return statistics_limit_ == 0 || stats.count < statistics_limit_;
+    }
+
     float clip_;
+    uint64_t statistics_limit_;
     size_t window_;
     size_t series_;
     std::vector<Series> state_;

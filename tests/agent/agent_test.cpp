@@ -28,12 +28,6 @@ std::vector<float> Point(std::mt19937& rng, int cls) {
 }
 
 TEST(AgentTest, RejectsUnsupportedOrInvalidSpecs) {
-    EnvironmentSpec action;
-    action.inputs = {{"x", InputType::NUMERIC}};
-    action.outputs = {{"move", OutputType::ACTION, {"left", "right"}}};
-    action.feedback = {{"reward", FeedbackType::REWARD, "move"}};
-    EXPECT_THROW(Agent{action}, std::invalid_argument);
-
     EnvironmentSpec next;
     next.inputs = {{"note", InputType::TEXT}};
     next.outputs = {{"next", OutputType::NEXT_OBSERVATION}};
@@ -304,6 +298,148 @@ TEST(AgentTest, SafeToUseFromSeveralThreads) {
     a.join();
     b.join();
     EXPECT_EQ(600u, agent.Stats().steps);
+}
+
+EnvironmentSpec ActionSpec() {
+    EnvironmentSpec spec;
+    spec.inputs = {{"state", InputType::NUMERIC, 1}};
+    spec.outputs = {{"move", OutputType::ACTION, {"good", "bad"}}};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "move"}, {"worked", FeedbackType::OUTCOME, "move"}};
+    return spec;
+}
+
+TEST(AgentActionTest, LearnsDiscountedValuesOfATwoStepChain) {
+    // Start (0) -> any action -> second state (1), reward 0;
+    // second state: "good" ends the episode with reward 1, "bad" with 0
+    AgentConfig config;
+    config.exploration_steps = 2000;
+    config.action_return_steps = 1;  // one-step targets: exact values under the greedy policy
+    Agent agent(ActionSpec(), config);
+    for (int episode = 0; episode < 3000; ++episode) {
+        StepId start = agent.Observe({{"state", 0.0}});
+        agent.Act(start, "move");
+        agent.Feedback(start, "reward", 0.0);
+        StepId second = agent.Observe({{"state", 1.0}});
+        std::string move = agent.Act(second, "move");
+        agent.Feedback(second, "reward", move == "good" ? 1.0 : 0.0);
+        agent.EndEpisode(true);
+    }
+    StepId start = agent.Observe({{"state", 0.0}});
+    Prediction at_start = agent.Predict(start, "move");
+    agent.EndEpisode(false);
+    StepId second = agent.Observe({{"state", 1.0}});
+    Prediction at_second = agent.Predict(second, "move");
+    ASSERT_EQ(2u, at_second.values.size());
+    EXPECT_NEAR(1.0f, at_second.values[0], 0.1f);
+    EXPECT_NEAR(0.0f, at_second.values[1], 0.1f);
+    EXPECT_NEAR(0.99f, at_start.values[0], 0.1f);
+    EXPECT_NEAR(0.99f, at_start.values[1], 0.1f);
+    EXPECT_EQ("good", at_second.label);
+    EXPECT_EQ("good", agent.Act(second, "move", false));
+    EXPECT_FLOAT_EQ(1.0f, at_second.neural_weight);
+}
+
+TEST(AgentActionTest, MultiStepReturnsReachBackOverSeveralSteps) {
+    // Chain of 4 states; only the last action is rewarded (1). With 3-step
+    // returns and the default discount, Q(first state) = 0.99^3.
+    AgentConfig config;
+    config.exploration_steps = 2000;
+    Agent agent(ActionSpec(), config);
+    EXPECT_EQ(3u, agent.Config().action_return_steps);
+    for (int episode = 0; episode < 2000; ++episode) {
+        for (int state = 0; state < 4; ++state) {
+            StepId step = agent.Observe({{"state", static_cast<double>(state)}});
+            agent.Act(step, "move");
+            agent.Feedback(step, "reward", state == 3 ? 1.0 : 0.0);
+        }
+        agent.EndEpisode(true);
+    }
+    StepId first = agent.Observe({{"state", 0.0}});
+    Prediction p = agent.Predict(first, "move");
+    ASSERT_EQ(2u, p.values.size());
+    EXPECT_NEAR(0.970f, p.values[0], 0.1f);
+    EXPECT_NEAR(0.970f, p.values[1], 0.1f);
+}
+
+TEST(AgentActionTest, ActionEnvironmentsUseActionSettings) {
+    Agent with_actions(ActionSpec());
+    EXPECT_EQ(1u, with_actions.Config().train_every);
+    EXPECT_FLOAT_EQ(5e-4f, with_actions.Config().learning_rate);
+    EXPECT_EQ(64u, with_actions.Config().min_trunk_width);
+    Agent without(ClassSpec());
+    EXPECT_EQ(8u, without.Config().train_every);
+    EXPECT_FLOAT_EQ(3e-3f, without.Config().learning_rate);
+}
+
+TEST(AgentActionTest, ExplorationFallsAndActIsRemembered) {
+    AgentConfig config;
+    config.exploration_steps = 100;
+    Agent agent(ActionSpec(), config);
+    EXPECT_FLOAT_EQ(1.0f, agent.Stats().outputs[0].exploration);
+    StepId step = 0;
+    for (int i = 0; i < 50; ++i) {
+        step = agent.Observe({{"state", 0.0}});
+        agent.Act(step, "move");
+    }
+    EXPECT_NEAR(0.525f, agent.Stats().outputs[0].exploration, 1e-4f);
+    std::string chosen = agent.Act(step, "move");
+    for (int i = 0; i < 10; ++i) EXPECT_EQ(chosen, agent.Act(step, "move"));  // same step: same action
+    Prediction p = agent.Predict(step, "move");
+    EXPECT_EQ((std::vector<std::string>{"good", "bad"}), p.classes);
+    EXPECT_NEAR(1.0f, p.probabilities[0] + p.probabilities[1], 1e-5f);
+    EXPECT_TRUE(p.values.empty());  // cold start: no Q-values yet
+}
+
+TEST(AgentActionTest, RewardsNeedAnAction) {
+    Agent agent(ActionSpec());
+    StepId step = agent.Observe({{"state", 0.0}});
+    EXPECT_THROW(agent.Feedback(step, "reward", 1.0), std::logic_error);
+    agent.Act(step, "move");
+    EXPECT_THROW(agent.Feedback(step, "reward", std::string("lots")), std::invalid_argument);
+    EXPECT_THROW(agent.Feedback(step, "reward", std::nan("")), std::invalid_argument);
+    EXPECT_NO_THROW(agent.Feedback(step, "reward", 1.0));
+    EXPECT_NO_THROW(agent.Feedback(step, "worked", 0.0));
+    EXPECT_THROW(agent.Act(step, "nothing"), std::invalid_argument);
+
+    EnvironmentSpec spec = ClassSpec();
+    Agent classifier(spec);
+    StepId other = classifier.Observe({{"x", std::vector<float>{0, 0}}});
+    EXPECT_THROW(classifier.Act(other, "kind"), std::invalid_argument);  // not an ACTION output
+}
+
+TEST(AgentActionTest, OutcomesActAsRewards) {
+    // A contextual bandit: the right action depends on the state
+    EnvironmentSpec spec = ActionSpec();
+    spec.feedback = {{"worked", FeedbackType::OUTCOME, "move"}};
+    AgentConfig config;
+    config.exploration_steps = 1000;
+    Agent agent(spec, config);
+    std::mt19937 rng(8);
+    int correct = 0;
+    for (int i = 0; i < 2500; ++i) {
+        double state = i % 2;
+        StepId step = agent.Observe({{"state", state}});
+        std::string move = agent.Act(step, "move", i < 2000);
+        bool worked = (state == 0.0) == (move == "good");
+        if (i >= 2000) correct += worked;
+        agent.Feedback(step, "worked", worked ? 1.0 : 0.0);
+        agent.EndEpisode(true);
+    }
+    EXPECT_GE(correct, 490);
+    EXPECT_EQ(2500u, agent.Stats().episodes);
+}
+
+TEST(AgentActionTest, CutOffEpisodesAreNotLearnedAsTerminal) {
+    Agent agent(ActionSpec());
+    StepId step = agent.Observe({{"state", 0.0}});
+    agent.Act(step, "move");
+    agent.Feedback(step, "reward", 1.0);
+    agent.EndEpisode(false);  // next state unknown: no transition
+    EXPECT_EQ(0u, agent.Stats().outputs[0].samples);
+    step = agent.Observe({{"state", 0.0}});
+    agent.Act(step, "move");
+    agent.EndEpisode(true);
+    EXPECT_EQ(1u, agent.Stats().outputs[0].samples);
 }
 
 }  // namespace

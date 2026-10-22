@@ -36,10 +36,19 @@ struct HeadTarget {
     /// elements have no target
     std::vector<float> values;
 
-    bool Empty() const { return label < 0 && negative < 0 && values.empty(); }
+    /// Q-values (stored samples only): action taken and the reward it
+    /// received; the agent turns them into a value target when it trains
+    int action{-1};
+    float reward{0.0f};
+    bool exploratory{false};  ///< The action was chosen at random
+
+    bool Empty() const { return label < 0 && negative < 0 && values.empty() && action < 0; }
 };
 
-enum class HeadKind { CLASSIFIER, REGRESSOR };
+/// CLASSIFIER: softmax cross-entropy. REGRESSOR: squared error.
+/// Q_VALUES: one value per action, Huber loss (quadratic within 1 of the
+/// target, linear beyond), trained on the taken action only.
+enum class HeadKind { CLASSIFIER, REGRESSOR, Q_VALUES };
 
 struct HeadSpec {
     std::string name;
@@ -56,6 +65,10 @@ public:
     /// @param min_width, max_width Trunk width = 2 x embedded size, clamped
     AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector<HeadSpec> heads,
                  float learning_rate, uint32_t seed, size_t min_width = 32, size_t max_width = 512);
+
+    /// Deep copy (weights and optimizer state), e.g. for a target network
+    AgentNetwork(const AgentNetwork& other);
+    AgentNetwork& operator=(const AgentNetwork&) = delete;
 
     size_t InputSize() const { return input_size_; }
     size_t EmbeddedSize() const { return embedded_size_; }

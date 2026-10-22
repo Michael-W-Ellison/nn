@@ -55,6 +55,35 @@ AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector
     seed_ = layer_seed;
 }
 
+namespace {
+
+std::unique_ptr<nn::Dense> CloneDense(const nn::Dense& dense) {
+    return std::unique_ptr<nn::Dense>(static_cast<nn::Dense*>(dense.Clone().release()));
+}
+
+}  // namespace
+
+AgentNetwork::AgentNetwork(const AgentNetwork& other)
+    : input_size_(other.input_size_),
+      embedded_size_(other.embedded_size_),
+      trunk_width_(other.trunk_width_),
+      learning_rate_(other.learning_rate_),
+      seed_(other.seed_),
+      head_specs_(other.head_specs_),
+      body_optimizer_(other.body_optimizer_),
+      head_optimizers_(other.head_optimizers_) {
+    for (const auto& embedding : other.embeddings_) {
+        embeddings_.push_back({embedding.offset, embedding.size, embedding.output_offset,
+                               embedding.dense ? CloneDense(*embedding.dense) : nullptr});
+    }
+    for (const auto& layer : other.trunk_) {
+        trunk_.push_back(layer->Clone());
+    }
+    for (const auto& head : other.heads_) {
+        heads_.push_back(head ? CloneDense(*head) : nullptr);
+    }
+}
+
 Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
     if (inputs.Cols() != input_size_) {
         throw std::invalid_argument("AgentNetwork: expected " + std::to_string(input_size_) +
@@ -225,8 +254,16 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
                     float t = target->values[j];
                     if (std::isnan(t)) continue;
                     float diff = output(r, j) - t;
-                    loss += static_cast<double>(diff) * diff;
-                    grad(r, j) = 2.0f * diff;
+                    if (head_specs_[h].kind == HeadKind::Q_VALUES && std::fabs(diff) > 1.0f) {
+                        loss += std::fabs(diff) - 0.5;  // Huber, linear part
+                        grad(r, j) = diff > 0.0f ? 1.0f : -1.0f;
+                    } else if (head_specs_[h].kind == HeadKind::Q_VALUES) {
+                        loss += 0.5 * diff * diff;
+                        grad(r, j) = diff;
+                    } else {
+                        loss += static_cast<double>(diff) * diff;
+                        grad(r, j) = 2.0f * diff;
+                    }
                     ++terms;
                 }
             }

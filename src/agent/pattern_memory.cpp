@@ -20,6 +20,7 @@ AssociationLearningSystem::Config TransitionConfig() {
 }
 
 constexpr float kMinTransitionStrength = 0.01f;
+constexpr float kNeutralActionStrength = 0.5f;
 
 }  // namespace
 
@@ -255,7 +256,9 @@ void PatternMemory::RecordTransition(PatternID from, PatternID to) {
     const float rate = config_.transition_rate;
     std::vector<std::pair<PatternID, float>> edges;
     for (const auto* edge : associations_.GetAssociations(from, true)) {
-        edges.emplace_back(edge->GetTarget(), edge->GetStrength());
+        if (Contains(edge->GetTarget())) {  // skip state -> action edges
+            edges.emplace_back(edge->GetTarget(), edge->GetStrength());
+        }
     }
     bool found = false;
     for (auto [target, strength] : edges) {
@@ -277,7 +280,13 @@ void PatternMemory::RecordTransition(PatternID from, PatternID to) {
 }
 
 std::optional<std::vector<float>> PatternMemory::PredictNextObserved(PatternID current) const {
-    auto ranked = associations_.PredictWithConfidence(current, 3);
+    // The 3 strongest transitions to stored patterns
+    std::vector<std::pair<PatternID, float>> ranked;
+    for (const auto* edge : associations_.GetAssociations(current, true)) {
+        if (Contains(edge->GetTarget())) ranked.emplace_back(edge->GetTarget(), edge->GetStrength());
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (ranked.size() > 3) ranked.resize(3);
     std::vector<double> sum(observed_size_, 0.0), weight(observed_size_, 0.0);
     for (const auto& [id, strength] : ranked) {
         auto it = slots_.find(id);
@@ -299,6 +308,29 @@ std::optional<std::vector<float>> PatternMemory::PredictNextObserved(PatternID c
     }
     if (!any) return std::nullopt;
     return result;
+}
+
+void PatternMemory::ReinforceAction(PatternID state, PatternID action, float reward) {
+    if (!Contains(state) || reward == 0.0f || std::isnan(reward)) return;
+    const auto* edge = associations_.GetAssociationMatrix().GetAssociation(state, action);
+    float strength = edge ? edge->GetStrength() : kNeutralActionStrength;
+    const float rate = config_.transition_rate;
+    strength = reward > 0.0f ? strength + rate * (1.0f - strength) : strength * (1.0f - rate);
+    if (edge) {
+        associations_.SetAssociationStrength(state, action, strength);
+    } else {
+        associations_.AddAssociation(state, action, AssociationType::FUNCTIONAL, strength);
+    }
+}
+
+std::vector<float> PatternMemory::ActionStrengths(PatternID state, const std::vector<PatternID>& actions) const {
+    std::vector<float> strengths(actions.size(), kNeutralActionStrength);
+    for (size_t a = 0; a < actions.size(); ++a) {
+        if (const auto* edge = associations_.GetAssociationMatrix().GetAssociation(state, actions[a])) {
+            strengths[a] = edge->GetStrength();
+        }
+    }
+    return strengths;
 }
 
 }  // namespace agent

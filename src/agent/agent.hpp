@@ -16,9 +16,14 @@
 // blended by their recent accuracy. Until a head has seen
 // cold_start_samples samples, predictions come from the patterns only.
 //
-// Supported in this version: CLASS (LABEL, OUTCOME), VALUE (TARGET),
-// NEXT_OBSERVATION and ANOMALY outputs. ACTION outputs and REWARD feedback
-// are rejected (Phase 3); Save/Load are Phase 5.
+// Actions: Act() chooses a discrete action for a step; REWARD (or OUTCOME)
+// feedback rewards it. Steps of an episode are linked: the next observed
+// step is the next state; EndEpisode(true) marks the last action terminal.
+// The network learns Q-values (Double DQN); state -> action associations
+// reinforced by reward sign break ties and choose actions during the cold
+// start.
+//
+// Not implemented yet: Save/Load (Phase 5).
 //
 // All public methods are thread-safe (one internal mutex).
 #pragma once
@@ -58,6 +63,20 @@ struct AgentConfig {
     size_t plateau_patience{10};     ///< Checks without improvement before the rate drops
     float plateau_factor{0.5f};
 
+    // Actions (Double DQN)
+    // When the spec has ACTION outputs these replace train_every,
+    // learning_rate and min_trunk_width: learning from rewards needs more
+    // updates per observation and a smaller, steadier step
+    size_t action_train_every{1};
+    float action_learning_rate{5e-4f};
+    size_t action_min_trunk_width{64};
+    size_t action_return_steps{3};       ///< Rewards summed before bootstrapping (multi-step returns)
+    float discount{0.99f};               ///< Weight of future rewards
+    size_t target_sync{500};             ///< Training steps between target network copies
+    float exploration_start{1.0f};       ///< Probability of a random action at first...
+    float exploration_end{0.05f};        ///< ...falling linearly to this
+    size_t exploration_steps{10000};     ///< ...over this many exploring Act calls per output
+
     // Pattern memory
     size_t pattern_capacity{10000};
     size_t pattern_dimension{64};
@@ -92,6 +111,10 @@ struct Prediction {
     std::vector<std::string> classes;
     std::vector<float> probabilities;
 
+    /// ACTION: `label` is the greedy action, `classes` the actions,
+    /// `probabilities` the chance Act(explore) picks each one, `values` the
+    /// Q-values (empty during the cold start)
+    ///
     /// VALUE: predicted values. NEXT_OBSERVATION: the next values of the
     /// NUMERIC and TIME_SERIES inputs, in spec order, in input units
     /// (NaN where nothing can be predicted yet).
@@ -119,10 +142,12 @@ struct OutputStats {
     float neural_quality{0.0f};
     float pattern_quality{0.0f};
     float neural_weight{0.0f};  ///< Current blend weight of the neural side
+    float exploration{0.0f};    ///< ACTION: current probability of a random action
 };
 
 struct AgentStats {
     uint64_t steps{0};
+    uint64_t episodes{0};          ///< EndEpisode calls
     uint64_t feedback{0};
     uint64_t ignored_feedback{0};  ///< For steps observed before the inputs could be encoded
     uint64_t training_steps{0};
@@ -161,24 +186,44 @@ public:
     /// @throws std::out_of_range if the step is unknown or has expired
     Prediction Predict(StepId step, const std::string& output) const;
 
+    /// Choose an action of an ACTION output for an open step. With explore,
+    /// a random action with the current exploration probability, otherwise
+    /// the action with the highest Q-value (association strength during the
+    /// cold start). Calling it again for the same step and output returns
+    /// the action already chosen.
+    /// @throws std::invalid_argument for an unknown output or one that is not ACTION
+    /// @throws std::out_of_range if the step is unknown or has expired
+    std::string Act(StepId step, const std::string& action_output, bool explore = true);
+
     /// Feedback for an open step:
     ///   LABEL    class name (string) or index of a declared class (number)
     ///   TARGET   number or vector of the output's size
-    ///   OUTCOME  number: nonzero = the prediction for that step was correct.
+    ///   REWARD   number: reward for the action Act chose at that step
+    ///            (rewards for one step add up)
+    ///   OUTCOME  ACTION outputs: reward +1 (nonzero) or -1 (zero).
+    ///            CLASS outputs: number: nonzero = the prediction for that step was correct.
     ///            Refers to the class last returned by Predict for the step
     ///            (or the current prediction if Predict was not called).
     ///            A CLASS output trained only by OUTCOME must list its
     ///            classes; it predicts from the first step.
     /// @throws std::invalid_argument for an unknown feedback name or bad value
     /// @throws std::out_of_range if the step is unknown or has expired
+    /// @throws std::logic_error for REWARD/OUTCOME on an ACTION output when
+    ///         Act was not called for the step
     void Feedback(StepId step, const std::string& feedback, const Value& value);
 
-    /// Start a new episode: clears time-series windows and sequence links
-    void EndEpisode();
+    /// End the current episode: clears time-series windows and sequence
+    /// links. terminal = the episode ended in a terminal state, so the last
+    /// action's value has no future part; false = it was cut off (e.g. a
+    /// time limit), so the last action is not learned from unless its next
+    /// state was observed.
+    void EndEpisode(bool terminal = true);
 
     AgentStats Stats() const;
 
     const EnvironmentSpec& Spec() const;
+    /// Settings in effect (with the action_* settings applied when the
+    /// spec has ACTION outputs)
     const AgentConfig& Config() const;
 
     /// Installs `clock` as the process-wide clock (dpan::SetClock); nullptr

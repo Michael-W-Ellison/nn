@@ -25,6 +25,19 @@ void Sample::Fill(float* row, size_t size) const {
     }
 }
 
+void Sample::SetNext(const Sample& next) {
+    next_indices = next.indices;
+    next_values = next.values;
+    has_next = true;
+}
+
+void Sample::FillNext(float* row, size_t size) const {
+    std::fill(row, row + size, 0.0f);
+    for (size_t i = 0; i < next_indices.size(); ++i) {
+        if (next_indices[i] < size) row[next_indices[i]] = next_values[i];
+    }
+}
+
 ReplayBuffer::ReplayBuffer(size_t capacity, uint32_t seed) : capacity_(capacity), rng_(seed) {
     if (capacity == 0) {
         throw std::invalid_argument("ReplayBuffer: capacity must be > 0");

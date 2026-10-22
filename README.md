@@ -24,7 +24,7 @@ scorer.
 | `dpan::memory` | Utility scoring, adaptive thresholds, pruning, active/warm/cold/archive tiers, decay, interference, consolidation |
 | `dpan::learning` | Attention mechanisms (basic, context-aware, multi-head, self-attention) and pattern importance |
 | `dpan::nn` | Neural networks: dense layers, activations, dropout, losses, SGD/Adam, `Sequential` training and persistence; `NeuralEncoder`/`Autoencoder`, `EmbeddingSimilarity`, `NeuralPredictionScorer` |
-| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes and the stream itself, and predicts classes, values, next observations and anomaly scores. Actions (reinforcement) and saving are not implemented yet. |
+| `dpan::agent` | Drop-in learner (`docs/AGENT_PLAN.md`): describe inputs, feedback and outputs in an `EnvironmentSpec`; `Agent` encodes observations, learns from labels, targets, outcomes, rewards and the stream itself, predicts classes, values, next observations and anomaly scores, and chooses actions (Double DQN). Saving is not implemented yet. |
 | `dpan::dpan` | All of the above |
 
 ## Requirements
@@ -105,6 +105,18 @@ StepId step = agent.Observe({{"reading", std::vector<float>{2.1f, 0.2f}}, {"sour
 Prediction state = agent.Predict(step, "state");      // label, probabilities, confidence
 float unusual = agent.Predict(step, "unusual").score;  // percentile among recent observations
 agent.Feedback(step, "label", std::string("hot"));     // may arrive later
+```
+
+Actions are learned from rewards:
+
+```cpp
+spec.outputs = {{"move", OutputType::ACTION, {"up", "down", "left", "right"}}};
+spec.feedback = {{"reward", FeedbackType::REWARD, "move"}};
+...
+StepId step = agent.Observe({{"position", std::vector<float>{x, y}}});
+std::string move = agent.Act(step, "move");          // explores; Act(step, "move", false) is greedy
+agent.Feedback(step, "reward", -0.04);
+agent.EndEpisode(true);                              // when the episode ends (true = terminal)
 ```
 
 Sizes, value ranges, vocabularies and (unless listed) class names are
