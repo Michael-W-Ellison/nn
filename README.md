@@ -45,7 +45,8 @@ scorer.
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build -j8          # run the test suite
-ctest --test-dir build -j8 -LE long # without the ~5-minute million-step test
+ctest --test-dir build -j8 -LE long # without the ~30-minute million-step test
+DPAN_SCENARIOS=1 ctest --test-dir build -j8 -L scenarios   # scenario tests (skipped otherwise)
 ```
 
 Options (defaults are ON when DPAN is the top-level project, OFF when it is

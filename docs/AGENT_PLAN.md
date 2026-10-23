@@ -69,7 +69,7 @@ one fused vector that feeds a shared network trunk.
 |---|---|
 | NUMERIC (scalar or vector) | Running mean and variance normalization, clipped to ±5σ. Missing values become 0 plus a "missing" indicator. |
 | CATEGORICAL, known set | One-hot vector |
-| CATEGORICAL, open vocabulary | Feature hashing into 64 buckets (configurable), followed by a learned embedding layer |
+| CATEGORICAL, open vocabulary | 1,024 slots (configurable): one per category in order of first appearance, hashing only once all slots are taken; followed by a learned embedding layer |
 | TEXT | Lowercase. Word and character tri-gram features hashed into 1,024 buckets, normalized, then a learned embedding layer. |
 | TIME_SERIES | A window of the last 16 values per series, plus their differences and summary statistics |
 | IMAGE (up to 64×64) | Scale to [0,1] at native size (longer side above `max_image_size`, default 64, is area-resampled down), then convolution and pooling layers to an embedding of `image_embedding_size` (default 64). |
@@ -785,4 +785,83 @@ Remaining: runs below −200 are 5 of 72 (C++ and Python together) instead
 of 12 of 72; on the C++ seeds that were not used to choose the setting, the
 new setting is slightly worse (1 run below −200 against 0); one Python run
 (seed 85) still ends at −511.8.
+
+### Scenario tests
+
+`tests/agent/scenarios_test.cpp`: ten uses beyond the reference
+environments, each with the default `AgentConfig`, seeds 1–3, and a pass
+criterion fixed before the first run. They are skipped unless
+`DPAN_SCENARIOS` is set, so the regular suite does not depend on them:
+`DPAN_SCENARIOS=1 ctest --test-dir build -L scenarios` (label `scenarios`;
+each test prints its metrics).
+
+| | Use | Criterion | Before the changes below | Now |
+|---|---|---|---|---|
+| S1 | Text classification, 3 classes, keywords with filler words and misspellings | accuracy ≥ 0.90 (last 1,000 of 3,000) | 0.94–0.96 | same |
+| S2 | 3 regression outputs, 5 inputs, 10% of input values missing | R² ≥ 0.7 for every output | 0.77–0.89 | same |
+| S3 | Plan environment H: text + numeric inputs, labels for 30% of steps, outcomes for the rest, 4 classes; an ANOMALY output alongside | accuracy ≥ 0.85 (last 2,000 of 6,000, non-anomalous steps), anomaly AUC ≥ 0.8 | 0.94–0.95, AUC 0.89–0.92 | same |
+| S4 | Regression whose target function changes at step 4,000 | MSE over steps 5,000–6,000 ≤ 2 × MSE over 3,000–4,000 | 0.026–0.028 vs limits 0.024–0.025 (fails) | same (fails) |
+| S5 | 250 open-vocabulary user IDs, 5 imbalanced classes (60/20/10/5/5%), 50 new users from step 4,000 | mean per-class recall ≥ 0.8 (last 2,000 of 8,000) | 0.45–0.55 (fails) | 1.0 |
+| S6 | Contextual bandit, 4 contexts, 3 actions, outcomes only | greedy action best in 4/4 contexts after 3,000 steps | 4/4 | same |
+| S7 | Continuous 2-D reaching, velocity in [−0.1, 0.1]², absolute positions as input | mean final distance of 20 greedy episodes ≤ 0.1 after 300 training episodes | 0.24–0.28 (fails) | same (fails) |
+| S8 | Image regression: x position of a blob in a 16×16 image | R² ≥ 0.8 | 0.9995–0.9996 | same |
+| S9 | Two related time series (the second lags the first by 3 steps) | MSE ≤ 0.5 × last value, both series | 0.066–0.076 | same |
+| S10 | Inputs at scale 10⁶ with offsets 10⁷ | accuracy ≥ 0.90 | 0.996–0.998 | same |
+
+S6 passes, but its success rate while exploring is about 0.5 after 3,000
+steps: the exploration rate falls over `exploration_steps` (10,000).
+
+**S5 and the category encoding.** S5 failed because open-vocabulary
+categories were hashed into 64 buckets, so 250 users shared buckets with
+users of other classes (with 1,024 hashed buckets it passed: mean recall
+0.90 and 0.91). Categories now get their own slot in the order they first
+appear, and hashing is used only once all slots are taken; the default
+`category_buckets` is 1,024 (was 64). Supporting changes:
+
+- Wider one-hot inputs made the memory reservation per pending step (a
+  dense copy of the fused vector and a dense upper bound for its sample)
+  take most of a small budget: in the million-step test (16 MiB, an
+  open-vocabulary channel with new categories at every step) the pattern
+  store fell to 1 pattern and the replay buffer to 2,184 samples. Pending
+  steps no longer keep a dense copy (the sample holds the fused vector
+  sparsely), and the reservation counts at most `MaxNonZero()` values per
+  sample (1 for a one-hot channel). The test now ends with 2,010 patterns
+  and 22,425 replay samples (2,958 and 28,868 with 64 buckets), within the
+  budget.
+- Cost: on that stream, 50,000 steps take 18.4 s with 1,024 slots against
+  12.6 s with 64, and 52.1 s against 15.7 s with an ANOMALY output (the
+  autoencoder reconstructs the full fused vector; 256 slots: 17.3 s and
+  30.1 s). The million-step test takes about 29 minutes instead of 5; its
+  timeout is now 3,600 s.
+- Checkpoint version 5: the category slots are in the encoder state; pending
+  steps have no dense fused vector.
+- Reference environments A–I give the same results as before these
+  changes (none has an open-vocabulary channel). All 1,999 tests pass with
+  GCC and Clang (the million-step test run separately; the scenario tests
+  skipped).
+
+**S7.** Not solved. Findings (outside the test suite):
+
+- With the relative position (target − position) as input instead of the
+  absolute positions, S7 passes at 300 episodes (final distances 0.010 and
+  0.052), so the actor-critic can solve the task; it is slow to learn the
+  difference of two inputs.
+- TD3 on a one-step task with a 2-D action learns the best action (mean
+  error 0.105, as with one dimension), so multi-dimensional actions work.
+- Learning continues past 300 episodes: at 1,000 episodes seeds 2 and 3
+  reach 0.067 and 0.080, but seed 1 collapses (0.17 at episode 500, 1.04 by
+  episode 1,000); during the collapse the share of greedy actions at a bound
+  rises from about 0.15 to 0.44. The critic's value at the episode start is
+  −24 to −28 against realised (50-step) returns of −11 to −14.
+- Settings at 300 episodes, seeds 1–3 (final distance): 128 hidden units
+  0.10, 0.11, 0.23; 256 units 0.39, 0.08, 0.15; learning rates 3e-3 0.13,
+  0.11, 0.13; random start 3,000 steps 0.19, 0.10, 0.12; four updates per
+  step 0.26, 0.09, 0.19; τ 0.01 0.23, 0.17, 0.26; learning rates 3e-3 with
+  128 units 0.14, 0.04, 0.12. None passes at all three seeds; no default
+  was changed.
+
+**S4.** The agent detects the change (one drift event) and recovers from
+an error of 5.3 right after it to 0.026–0.028 at 1,000–2,000 steps after;
+the criterion asks for at most twice the error before the change (0.024–
+0.025; the noise floor is 0.01).
 

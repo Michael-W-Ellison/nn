@@ -140,7 +140,9 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 3: CONTINUOUS_ACTION outputs (bounds in the spec, TD3 settings, actor-critics,
 //    continuous actions in samples and pending steps)
 // 4: continuous_updates_per_step in the config
-constexpr uint32_t kCheckpointVersion = 4;
+// 5: slots of open-vocabulary categories in the encoder state; pending steps
+//    without a dense copy of the fused vector
+constexpr uint32_t kCheckpointVersion = 5;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -470,7 +472,6 @@ struct Agent::Impl {
     struct Pending {
         StepId step{0};
         bool encoded{false};
-        std::vector<float> fused;
         std::vector<float> point;
         std::vector<float> observed;  // raw NUMERIC/TIME_SERIES values
         PatternID pattern;
@@ -676,9 +677,10 @@ struct Agent::Impl {
     /// have left the replay buffer): dense fused vectors for the state and
     /// the next state, and one target per head
     size_t PendingEntryBytes() const {
-        size_t fused = encoder.OutputSize();
+        // The fused vectors are stored sparsely: at most MaxNonZero() values
+        size_t fused = encoder.MaxNonZero();
         size_t heads = network ? network->HeadCount() : 0;
-        size_t entry = sizeof(Pending) + 256 + (fused + config.pattern_dimension + observed_size) * sizeof(float);
+        size_t entry = sizeof(Pending) + 256 + (config.pattern_dimension + observed_size) * sizeof(float);
         size_t continuous = 0;
         for (size_t index : continuous_outputs) {
             continuous += sizeof(ContinuousTarget) + 64 + 3 * outputs[index].spec->size * sizeof(float);
@@ -697,7 +699,7 @@ struct Agent::Impl {
             if (sample && !sample->in_replay && counted.insert(sample.get()).second) bytes += sample->MemoryBytes();
         };
         for (const auto& entry : pending) {
-            bytes += sizeof(Pending) + 256 + (entry.fused.size() + entry.point.size() + entry.observed.size()) * sizeof(float);
+            bytes += sizeof(Pending) + 256 + (entry.point.size() + entry.observed.size()) * sizeof(float);
             for (const auto& [index, action] : entry.continuous_actions) bytes += 64 + action.size() * sizeof(float);
             add_sample(entry.sample);
         }
@@ -785,6 +787,13 @@ struct Agent::Impl {
     }
 
     // ------------------------------------------------------------ pending
+
+    /// The step's fused vector as a one-row matrix (from its sample)
+    nn::Matrix FusedRow(const Pending& entry) const {
+        nn::Matrix row(1, encoder.OutputSize());
+        entry.sample->Fill(row.Data(), row.Cols());
+        return row;
+    }
 
     Pending& FindPending(StepId step) const {
         if (step == 0 || step > steps) {
@@ -1013,7 +1022,7 @@ struct Agent::Impl {
             network->Head(static_cast<size_t>(out.head)).size == 0) {
             return std::nullopt;
         }
-        auto probabilities = Softmax(network->Infer(Row(entry.fused), out.head));
+        auto probabilities = Softmax(network->Infer(FusedRow(entry), out.head));
         probabilities.resize(out.classes.size(), 0.0f);
         return probabilities;
     }
@@ -1032,14 +1041,14 @@ struct Agent::Impl {
 
     std::optional<std::vector<float>> NeuralValue(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(Row(entry.fused), out.head).Row(0);
+        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], out.target_stats[i]);
         return z;
     }
 
     std::optional<std::vector<float>> NeuralNext(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(Row(entry.fused), out.head).Row(0);
+        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], ObservedStats(i));
         return z;
     }
@@ -1056,7 +1065,7 @@ struct Agent::Impl {
     /// Q-values once the head is past the cold start
     std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples < config.cold_start_samples) return std::nullopt;
-        return network->Infer(Row(entry.fused), static_cast<size_t>(out.head)).Row(0);
+        return network->Infer(FusedRow(entry), static_cast<size_t>(out.head)).Row(0);
     }
 
     /// Highest Q-value; ties (and the cold start) decided by association
@@ -1147,7 +1156,7 @@ struct Agent::Impl {
             for (auto& a : normalized) a = uniform(rng);
         } else {
             const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-            nn::Matrix greedy = ac.Act(Row(entry.fused));
+            nn::Matrix greedy = ac.Act(FusedRow(entry));
             std::normal_distribution<float> noise(0.0f, config.continuous_exploration_noise);
             for (size_t i = 0; i < n; ++i) {
                 float a = greedy(0, i);
@@ -1253,7 +1262,7 @@ struct Agent::Impl {
                 break;
             case OutputType::CONTINUOUS_ACTION: {
                 const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-                nn::Matrix state = Row(entry.fused);
+                nn::Matrix state = FusedRow(entry);
                 nn::Matrix greedy = ac.Act(state);
                 prediction.available = true;
                 prediction.values = ToBounds(*out.spec, greedy.Data());
@@ -1473,20 +1482,21 @@ struct Agent::Impl {
         entry.step = step;
         if (fused && patterns) {
             entry.encoded = true;
-            entry.fused = std::move(*fused);
             entry.observed = Observed(observation);
-            entry.point = patterns->Project(entry.fused);
+            entry.point = patterns->Project(*fused);
 
             auto placement = patterns->Insert(entry.point, step, entry.observed);
             entry.pattern = placement.id;
-            // Distance to the nearest pattern before this state was stored
-            if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
 
+            // The fused vector is kept once, sparsely, in the sample
             entry.sample = std::make_shared<Sample>();
             entry.sample->step = step;
-            entry.sample->SetFused(entry.fused);
+            entry.sample->SetFused(*fused);
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
             entry.sample->continuous.resize(actor_critics.size());
+
+            // Distance to the nearest pattern before this state was stored
+            if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
 
             if (has_anomaly) {
                 entry.sample->reconstruct = true;
@@ -1541,7 +1551,7 @@ struct Agent::Impl {
         float pattern_percentile = std::isfinite(distance) ? Percentile(pattern_baseline, distance) : 0.5f;
         float neural_percentile = 0.5f;
         float weight = 0.0f;
-        float error = autoencoder->Errors(Row(entry.fused))[0];
+        float error = autoencoder->Errors(FusedRow(entry))[0];
         if (anomaly_samples >= config.cold_start_samples) {
             neural_percentile = Percentile(neural_baseline, error);
             weight = 0.5f;
@@ -1876,7 +1886,6 @@ struct Agent::Impl {
         for (const auto& entry : pending) {
             io::Write<uint64_t>(out, entry.step);
             io::Write<uint8_t>(out, entry.encoded ? 1 : 0);
-            WriteVector(out, entry.fused);
             WriteVector(out, entry.point);
             WriteVector(out, entry.observed);
             io::Write<uint64_t>(out, entry.pattern.value());
@@ -2005,7 +2014,6 @@ struct Agent::Impl {
             Pending entry;
             entry.step = io::Read<uint64_t>(in);
             entry.encoded = io::Read<uint8_t>(in) != 0;
-            entry.fused = ReadVector<float>(in);
             entry.point = ReadVector<float>(in);
             entry.observed = ReadVector<float>(in);
             entry.pattern = PatternID(io::Read<uint64_t>(in));

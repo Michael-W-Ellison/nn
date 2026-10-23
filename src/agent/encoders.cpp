@@ -322,6 +322,9 @@ std::optional<std::string> HashedCategoryEncoder::Category(const Value& value) c
 }
 
 size_t HashedCategoryEncoder::Bucket(const std::string& category) const {
+    auto it = slots_.find(category);
+    if (it != slots_.end()) return it->second;
+    if (slot_names_.size() < buckets_) return slot_names_.size();
     return static_cast<size_t>(Hash(category, kCategorySeed) % buckets_);
 }
 
@@ -341,6 +344,9 @@ void HashedCategoryEncoder::Update(const Value* value) {
         return;
     }
     if (auto category = Category(*value)) {
+        if (slot_names_.size() < buckets_ && slots_.emplace(*category, slot_names_.size()).second) {
+            slot_names_.push_back(*category);
+        }
         auto it = observed_.find(*category);
         if (it != observed_.end()) {
             ++it->second;
@@ -356,6 +362,8 @@ void HashedCategoryEncoder::SaveState(std::ostream& out) const {
         io::WriteString(out, category);
         io::Write<uint64_t>(out, count);
     }
+    io::WriteSize(out, slot_names_.size());
+    for (const auto& category : slot_names_) io::WriteString(out, category);
 }
 
 void HashedCategoryEncoder::LoadState(std::istream& in) {
@@ -364,6 +372,17 @@ void HashedCategoryEncoder::LoadState(std::istream& in) {
     for (size_t i = 0; i < n; ++i) {
         std::string category = io::ReadString(in);
         observed_[category] = io::Read<uint64_t>(in);
+    }
+    slots_.clear();
+    slot_names_.clear();
+    n = io::ReadSize(in, 1u << 30);
+    if (n > buckets_) throw std::runtime_error("HashedCategoryEncoder::LoadState: more slots than category_buckets");
+    for (size_t i = 0; i < n; ++i) {
+        std::string category = io::ReadString(in);
+        if (!slots_.emplace(category, i).second) {
+            throw std::runtime_error("HashedCategoryEncoder::LoadState: duplicate category");
+        }
+        slot_names_.push_back(std::move(category));
     }
 }
 
@@ -814,6 +833,12 @@ ObservationEncoder::ObservationEncoder(std::vector<InputSpec> inputs, EncoderCon
 bool ObservationEncoder::Ready() const {
     return std::all_of(encoders_.begin(), encoders_.end(),
                        [](const auto& encoder) { return encoder->OutputSize() > 0; });
+}
+
+size_t ObservationEncoder::MaxNonZero() const {
+    size_t total = 0;
+    for (const auto& encoder : encoders_) total += encoder->MaxNonZero();
+    return total;
 }
 
 size_t ObservationEncoder::OutputSize() const {

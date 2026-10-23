@@ -9,6 +9,7 @@
 #include <numeric>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 namespace dpan {
@@ -171,7 +172,7 @@ TEST(OneHotEncoderTest, RejectsBadIndicesAndTypes) {
 
 TEST(HashedCategoryEncoderTest, SameCategorySameBucket) {
     HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
-    EXPECT_EQ(65u, encoder.OutputSize());
+    EXPECT_EQ(1025u, encoder.OutputSize());
     EXPECT_EQ(8u, encoder.EmbeddingSize());
 
     Value a = Text("alice");
@@ -190,21 +191,78 @@ TEST(HashedCategoryEncoderTest, SameCategorySameBucket) {
     EXPECT_FLOAT_EQ(1.0f, std::accumulate(missing.begin(), missing.end(), 0.0f));
 }
 
-TEST(HashedCategoryEncoderTest, SpreadsCategoriesOverBuckets) {
+TEST(HashedCategoryEncoderTest, CategoriesGetOwnSlotsInOrderOfAppearance) {
     HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
+    for (const char* name : {"carol", "alice", "carol", "bob"}) {
+        Value v = Text(name);
+        // Encoded before Update (as ObservationEncoder does): a new category
+        // already gets the slot Update will give it
+        auto encoded = encoder.Encode(&v);
+        encoder.Update(&v);
+        EXPECT_FLOAT_EQ(1.0f, encoded[encoder.Bucket(name)]) << name;
+    }
+    EXPECT_EQ(0u, encoder.Bucket("carol"));
+    EXPECT_EQ(1u, encoder.Bucket("alice"));
+    EXPECT_EQ(2u, encoder.Bucket("bob"));
+    EXPECT_EQ((std::vector<std::string>{"carol", "alice", "bob"}), encoder.SlotCategories());
+    EXPECT_EQ(3u, encoder.Bucket("dave"));  // the next free slot
+
+    // 1000 categories, 1024 slots: no two share a slot
     std::set<size_t> used;
     for (int i = 0; i < 1000; ++i) {
+        Value v = Text("user" + std::to_string(i));
+        encoder.Update(&v);
         used.insert(encoder.Bucket("user" + std::to_string(i)));
     }
-    EXPECT_EQ(64u, used.size());
+    EXPECT_EQ(1000u, used.size());
 }
 
-TEST(HashedCategoryEncoderTest, BucketsAreFixedAcrossBuilds) {
-    // Saved models depend on these values staying the same
-    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
-    HashedCategoryEncoder other({"other", InputType::CATEGORICAL}, {});
+TEST(HashedCategoryEncoderTest, HashesCategoriesOnceTheSlotsAreTaken) {
+    EncoderConfig config;
+    config.category_buckets = 8;
+    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, config);
+    HashedCategoryEncoder other({"other", InputType::CATEGORICAL}, config);
+    for (int i = 0; i < 8; ++i) {
+        Value v = Text("first" + std::to_string(i));
+        encoder.Update(&v);
+        other.Update(&v);
+    }
+    std::set<size_t> used;
+    for (int i = 0; i < 1000; ++i) {
+        std::string name = "user" + std::to_string(i);
+        Value v = Text(name);
+        size_t before = encoder.Bucket(name);
+        encoder.Update(&v);
+        EXPECT_EQ(before, encoder.Bucket(name));  // no slot of its own any more
+        EXPECT_LT(before, 8u);
+        used.insert(before);
+    }
+    EXPECT_EQ(8u, used.size());
+    // Hash buckets do not depend on the channel; saved models rely on them
     EXPECT_EQ(encoder.Bucket("alice"), other.Bucket("alice"));
-    EXPECT_NE(encoder.Bucket("alice"), encoder.Bucket("bob"));
+    EXPECT_EQ(8u, encoder.SlotCategories().size());
+}
+
+TEST(HashedCategoryEncoderTest, SavesAndLoadsSlots) {
+    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
+    for (const char* name : {"x", "y", "z"}) {
+        Value v = Text(name);
+        encoder.Update(&v);
+    }
+    std::stringstream buffer;
+    encoder.SaveState(buffer);
+    HashedCategoryEncoder loaded({"user", InputType::CATEGORICAL}, {});
+    loaded.LoadState(buffer);
+    EXPECT_EQ(encoder.SlotCategories(), loaded.SlotCategories());
+    for (const char* name : {"x", "y", "z", "new"}) EXPECT_EQ(encoder.Bucket(name), loaded.Bucket(name)) << name;
+
+    // More saved slots than this encoder has is malformed
+    EncoderConfig small;
+    small.category_buckets = 2;
+    HashedCategoryEncoder too_small({"user", InputType::CATEGORICAL}, small);
+    std::stringstream again;
+    encoder.SaveState(again);
+    EXPECT_THROW(too_small.LoadState(again), std::runtime_error);
 }
 
 TEST(HashedCategoryEncoderTest, TracksObservedVocabularyUpToLimit) {
@@ -550,17 +608,17 @@ TEST(ObservationEncoderTest, FusesChannelsInSpecOrder) {
     EXPECT_EQ(3u, layout[1].offset);
     EXPECT_EQ(4u, layout[1].size);
     EXPECT_EQ(7u, layout[2].offset);
-    EXPECT_EQ(65u, layout[2].size);
+    EXPECT_EQ(1025u, layout[2].size);
     EXPECT_EQ(8u, layout[2].embedding_size);
-    EXPECT_EQ(72u, layout[3].offset);
+    EXPECT_EQ(1032u, layout[3].offset);
     EXPECT_EQ(1025u, layout[3].size);
-    EXPECT_EQ(1097u, encoder.OutputSize());
-    EXPECT_EQ(1097u, fused->size());
+    EXPECT_EQ(2057u, encoder.OutputSize());
+    EXPECT_EQ(2057u, fused->size());
 
     // Missing channels set their indicators
-    EXPECT_FLOAT_EQ(1.0f, (*fused)[3 + 3]);    // color missing
-    EXPECT_FLOAT_EQ(1.0f, (*fused)[7 + 64]);   // user missing
-    EXPECT_FLOAT_EQ(0.0f, (*fused)[72 + 1024]);
+    EXPECT_FLOAT_EQ(1.0f, (*fused)[3 + 3]);      // color missing
+    EXPECT_FLOAT_EQ(1.0f, (*fused)[7 + 1024]);   // user missing
+    EXPECT_FLOAT_EQ(0.0f, (*fused)[1032 + 1024]);
 }
 
 TEST(ObservationEncoderTest, PeekMatchesEncodeWithoutLearning) {
@@ -622,7 +680,7 @@ TEST(ObservationEncoderTest, AllInputTypesTogether) {
     };
     auto fused = encoder.Encode(observation);
     ASSERT_TRUE(fused.has_value());
-    size_t expected = 2 + 4 + 65 + 1025 + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
+    size_t expected = 2 + 4 + 1025 + 1025 + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
     EXPECT_EQ(expected, fused->size());
     auto layout = encoder.Layout();
     EXPECT_EQ(2u, layout.back().image_height);

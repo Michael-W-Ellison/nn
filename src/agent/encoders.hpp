@@ -40,9 +40,11 @@ struct EncoderConfig {
     /// new ones.
     uint64_t statistics_limit{5000};
 
-    /// CATEGORICAL with an open vocabulary: hash buckets and the width of the
-    /// learned embedding the agent puts after them
-    size_t category_buckets{64};
+    /// CATEGORICAL with an open vocabulary: slots and the width of the
+    /// learned embedding the agent puts after them. The first
+    /// category_buckets distinct categories get one slot each, in the order
+    /// they first appear; later ones are hashed into the slots.
+    size_t category_buckets{1024};
     size_t category_embedding_size{8};
 
     /// TEXT: hash buckets for words and character tri-grams, embedding width
@@ -76,6 +78,10 @@ public:
 
     /// Length of the encoding; 0 while the size has not been inferred yet
     virtual size_t OutputSize() const = 0;
+
+    /// Most non-zero values an encoding can have (bounds the memory of a
+    /// sparse sample); OutputSize() unless the encoding is one-hot
+    virtual size_t MaxNonZero() const { return OutputSize(); }
 
     /// Width of the learned embedding layer the agent applies to this
     /// encoding (0 = use the encoding directly). The layer is part of the
@@ -165,6 +171,7 @@ public:
     explicit OneHotEncoder(InputSpec spec);
 
     size_t OutputSize() const override { return spec_.categories.size() + 2; }
+    size_t MaxNonZero() const override { return 1; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
     void SaveState(std::ostream& out) const override;
@@ -182,13 +189,16 @@ private:
     std::vector<uint64_t> counts_;
 };
 
-/// CATEGORICAL with an open vocabulary: feature hashing.
+/// CATEGORICAL with an open vocabulary. Categories get slots in the order
+/// they first appear, one each until all category_buckets slots are taken
+/// (no collisions); after that, new categories are hashed into the slots.
 /// Output: category_buckets slots (one set), missing indicator.
 class HashedCategoryEncoder : public Encoder {
 public:
     HashedCategoryEncoder(InputSpec spec, const EncoderConfig& config);
 
     size_t OutputSize() const override { return buckets_ + 1; }
+    size_t MaxNonZero() const override { return 1; }
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
@@ -198,7 +208,12 @@ public:
     /// Categories seen so far with their counts (up to max_tracked_categories)
     const std::map<std::string, uint64_t>& ObservedCategories() const { return observed_; }
 
+    /// Slot of a category: its own if it has one, else the next free slot if
+    /// any is left (the one Update will give it), else its hash bucket
     size_t Bucket(const std::string& category) const;
+
+    /// Categories with their own slot, in slot order
+    const std::vector<std::string>& SlotCategories() const { return slot_names_; }
 
 private:
     /// Category as a string; nullopt for a missing value (NaN)
@@ -208,6 +223,8 @@ private:
     size_t embedding_size_;
     size_t max_tracked_;
     std::map<std::string, uint64_t> observed_;
+    std::map<std::string, size_t> slots_;
+    std::vector<std::string> slot_names_;
 };
 
 /// TEXT: lowercased words and character tri-grams of each word (with
@@ -360,6 +377,8 @@ public:
 
     /// Fused vector length (0 until Ready())
     size_t OutputSize() const;
+    /// Most non-zero values of a fused vector (sum over the channels)
+    size_t MaxNonZero() const;
 
     /// Channel positions in the fused vector (offsets valid once Ready())
     std::vector<ChannelLayout> Layout() const;
