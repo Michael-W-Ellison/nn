@@ -112,7 +112,7 @@ TEST(ContinuousTest, ActionsStayInBoundsAndAreRemembered) {
         if (i % 10 == 9) agent.EndEpisode(true);
     }
     AgentStats stats = agent.Stats();
-    EXPECT_FLOAT_EQ(0.1f, stats.outputs[0].exploration);  // past the random start
+    EXPECT_FLOAT_EQ(AgentConfig{}.continuous_exploration_noise, stats.outputs[0].exploration);  // past the random start
     EXPECT_EQ(OutputType::CONTINUOUS_ACTION, stats.outputs[0].type);
     EXPECT_GT(stats.outputs[0].samples, 250u);
     EXPECT_FLOAT_EQ(1.0f, stats.outputs[0].neural_weight);
@@ -124,7 +124,7 @@ TEST(ContinuousTest, ActionsStayInBoundsAndAreRemembered) {
     ASSERT_EQ(2u, p.values.size());
     EXPECT_GE(p.values[0], -3.0f);
     EXPECT_LE(p.values[1], 200.0f);
-    EXPECT_FLOAT_EQ(0.9f, p.confidence);
+    EXPECT_FLOAT_EQ(1.0f - AgentConfig{}.continuous_exploration_noise, p.confidence);
     EXPECT_TRUE(std::isfinite(p.score));
     // The greedy action is the prediction
     EXPECT_EQ(p.values, agent.ActContinuous(step, "arm", false));

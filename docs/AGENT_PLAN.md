@@ -91,7 +91,7 @@ loss.
 | LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent accuracy |
 | TARGET → VALUE | Regression head, MSE loss | Average of the k nearest patterns' targets | Same weighting, by recent error |
 | REWARD → ACTION | Double DQN: Q-value head (Huber loss), target network synced every 500 training steps, 3-step returns cut at exploratory actions, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties and choose during the cold start |
-| REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, two updates per training step, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.1 of the half-range) | — | The actor's action, scaled to the bounds |
+| REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, two updates per training step, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.5 of the half-range); 2 × 128 hidden units | — | The actor's action, scaled to the bounds |
 | OUTCOME (correct/incorrect) | A correct outcome counts as the label for the earlier prediction; an incorrect one is a negative example for the predicted class | `Reinforce(correct)` on associations; the neural prediction scorer is trained on outcomes | As above |
 | No feedback → NEXT_OBSERVATION | Head predicting the next fused state, MSE loss | Association sequence prediction | Neural head, with an association fallback |
 | No feedback → ANOMALY | Autoencoder reconstruction error | Distance to the nearest stored pattern | Score converted to a percentile against a running baseline |
@@ -681,7 +681,7 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
   feedback. JSON: `{"type": "continuous_action", "size": n, "low": [...],
   "high": [...]}`.
 - **Learner** (`src/agent/actor_critic.hpp`). TD3 on the fused state: actor
-  (2 × 64 ReLU, tanh output) and two critics (2 × 64 ReLU on [state,
+  (2 × 64 ReLU, tanh output; 128 units since the S7 change below) and two critics (2 × 64 ReLU on [state,
   action]), each with a target copy; one critic update per training step
   (mean squared error toward reward + discount × min of the target critics
   at the smoothed target action, noise std 0.2 clipped to 0.5); every 2nd
@@ -695,7 +695,8 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
 - **Acting.** `Agent::ActContinuous(step, output, explore)`: uniform random
   actions for the first `continuous_random_steps` (1,000) exploring calls,
   then the actor's action plus Gaussian noise (std
-  `continuous_exploration_noise` = 0.1 of the half-range), clipped to the
+  `continuous_exploration_noise` = 0.1 of the half-range; 0.5 since the S7
+  change below), clipped to the
   bounds; without explore, the actor's action. Calling it again for the
   same step returns the same action. `Act` on such an output (and
   `ActContinuous` on an ACTION output) throws `std::invalid_argument`.
@@ -803,7 +804,7 @@ each test prints its metrics).
 | S4 | Regression whose target function changes at step 4,000 | MSE over steps 5,000–6,000 ≤ 2 × MSE over 3,000–4,000 | 0.026–0.028 vs limits 0.024–0.025 (fails) | same (fails) |
 | S5 | 250 open-vocabulary user IDs, 5 imbalanced classes (60/20/10/5/5%), 50 new users from step 4,000 | mean per-class recall ≥ 0.8 (last 2,000 of 8,000) | 0.45–0.55 (fails) | 1.0 |
 | S6 | Contextual bandit, 4 contexts, 3 actions, outcomes only | greedy action best in 4/4 contexts after 3,000 steps | 4/4 | same |
-| S7 | Continuous 2-D reaching, velocity in [−0.1, 0.1]², absolute positions as input | mean final distance of 20 greedy episodes ≤ 0.1 after 300 training episodes | 0.24–0.28 (fails) | same (fails) |
+| S7 | Continuous 2-D reaching, velocity in [−0.1, 0.1]², absolute positions as input | mean final distance of 20 greedy episodes ≤ 0.1 after 300 training episodes | 0.24–0.28 (fails) | 0.065–0.073 |
 | S8 | Image regression: x position of a blob in a 16×16 image | R² ≥ 0.8 | 0.9995–0.9996 | same |
 | S9 | Two related time series (the second lags the first by 3 steps) | MSE ≤ 0.5 × last value, both series | 0.066–0.076 | same |
 | S10 | Inputs at scale 10⁶ with offsets 10⁷ | accuracy ≥ 0.90 | 0.996–0.998 | same |
@@ -840,7 +841,7 @@ appear, and hashing is used only once all slots are taken; the default
   GCC and Clang (the million-step test run separately; the scenario tests
   skipped).
 
-**S7.** Not solved. Findings (outside the test suite):
+**S7.** Findings before the change below (outside the test suite):
 
 - With the relative position (target − position) as input instead of the
   absolute positions, S7 passes at 300 episodes (final distances 0.010 and
@@ -864,4 +865,38 @@ appear, and hashing is used only once all slots are taken; the default
 an error of 5.3 right after it to 0.026–0.028 at 1,000–2,000 steps after;
 the criterion asks for at most twice the error before the change (0.024–
 0.025; the noise floor is 0.01).
+
+**S7 change: exploration noise 0.5 and 128 hidden units.** More
+exploration noise was the one setting that moved S7 toward the criterion
+(final distance at seeds 1–3: noise 0.3 0.13, 0.10, 0.14; 0.5 0.12, 0.07,
+0.10; 0.7 0.10, 0.07, 0.11). Decaying the noise from 0.5 to 0.1 over the
+first 10,000 exploring steps was worse (0.14–0.17), so the noise helps
+through more varied training data throughout, not only early exploration.
+Two combinations passed at seeds 1–3; both were checked on the pendulum
+(environment I) because the settings apply to every continuous output:
+
+| Setting | S7 seeds 1–3 | S7 seeds 4–11 | Pendulum, the 24 C++ seeds used before: runs < −200, stuck episodes, worst |
+|---|---|---|---|
+| Phase 8 settings | 0.24–0.28 | — | 3, 0, −215.4 |
+| Noise 0.5, learning rates 3e-3 | 0.080, 0.094, 0.051 | 8 of 8 pass | 2, **19**, −1,293.5 (rejected) |
+| **Noise 0.5, 128 hidden units** | 0.065, 0.073, 0.073 | 7 of 8 pass (seed 4: 0.50) | **0, 0, −195.6** |
+
+The defaults are now `continuous_exploration_noise` 0.5 (was 0.1) and
+`continuous_hidden` 128 (was 64). Further checks of the new defaults:
+
+| | Before | After |
+|---|---|---|
+| Pendulum, 24 C++ seeds not used before (17–47): runs < −200, worst, mean | 1, −230.9, −151.2 | 1, −205.8, −150.3 |
+| Pendulum through Python, seeds 81–104: runs < −200, worst, mean | 1, −511.8, −171.2 | 0, −186.2, −157.4 |
+| Environment I test (seed 81) | −122.9 | −117.1 |
+| Time of the I test alone | about 94 s | about 315 s |
+| Scenario tests passing | 24 of 30 | 27 of 30 (S4 fails) |
+
+The 128-unit networks cost about 3–4× per training step for continuous
+outputs; the timeouts of the reference tests are now 1,800 s (C++ and
+Python). Exploring episodes score lower with the larger noise (pendulum:
+last 20 training episodes −454.9); greedy actions are unaffected, and
+`Prediction::confidence` of a continuous output is now 0.5 after the random
+start (1 − the noise). All 1,999 tests pass (the million-step test is
+unaffected: it has no continuous output).
 

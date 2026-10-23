@@ -81,11 +81,11 @@ struct AgentConfig {
     // Continuous actions (TD3). The actor and two critics read the fused
     // state; actions are scaled to [-1, 1] inside, to each output's bounds
     // outside. Uses discount, batch_size and action_train_every.
-    size_t continuous_hidden{64};                 ///< Units per hidden layer (actor and critics)
+    size_t continuous_hidden{128};                ///< Units per hidden layer (actor and critics)
     float continuous_actor_learning_rate{1e-3f};
     float continuous_critic_learning_rate{1e-3f};
     size_t continuous_random_steps{1000};         ///< First exploring ActContinuous calls: uniform random actions
-    float continuous_exploration_noise{0.1f};     ///< Then Gaussian noise of this std (fraction of the half-range)
+    float continuous_exploration_noise{0.5f};     ///< Then Gaussian noise of this std (fraction of the half-range)
     float continuous_target_noise{0.2f};          ///< Target policy smoothing noise (fraction of the half-range)
     float continuous_noise_clip{0.5f};
     size_t continuous_policy_delay{2};            ///< Critic updates per actor update

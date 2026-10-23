@@ -61,7 +61,7 @@ if(DPAN_BUILD_TESTS)
                  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
         set_tests_properties(python.${short} PROPERTIES
             ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;PYTHONDONTWRITEBYTECODE=1"
-            TIMEOUT 900)
+            TIMEOUT 1800)
     endforeach()
     set_tests_properties(python.test_api PROPERTIES TIMEOUT 300)
     foreach(test IN LISTS DPAN_PYTHON_TESTS)

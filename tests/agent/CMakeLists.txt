@@ -10,7 +10,7 @@ gtest_discover_tests(agent_encoders_test)
 
 add_executable(agent_reference_test reference_environments_test.cpp)
 target_link_libraries(agent_reference_test dpan_agent GTest::gtest_main)
-gtest_discover_tests(agent_reference_test PROPERTIES LABELS reference TIMEOUT 600)
+gtest_discover_tests(agent_reference_test PROPERTIES LABELS reference TIMEOUT 1800)
 
 add_executable(agent_test agent_test.cpp)
 target_link_libraries(agent_test dpan_agent GTest::gtest_main)
