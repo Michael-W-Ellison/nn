@@ -90,6 +90,10 @@ struct AgentConfig {
     float continuous_noise_clip{0.5f};
     size_t continuous_policy_delay{2};            ///< Critic updates per actor update
     float continuous_tau{0.005f};                 ///< Rate at which target networks follow the live ones
+    /// TD3 updates per training step (each further one on its own batch from
+    /// the replay buffer). Two learn the pendulum (environment I) more
+    /// reliably than one, at twice the cost.
+    size_t continuous_updates_per_step{2};
 
     // Concept drift (section 4, rule 5): a Page-Hinkley test on each
     // output's prequential network loss (ANOMALY: reconstruction error;

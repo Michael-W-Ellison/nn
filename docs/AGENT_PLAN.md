@@ -91,7 +91,7 @@ loss.
 | LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent accuracy |
 | TARGET → VALUE | Regression head, MSE loss | Average of the k nearest patterns' targets | Same weighting, by recent error |
 | REWARD → ACTION | Double DQN: Q-value head (Huber loss), target network synced every 500 training steps, 3-step returns cut at exploratory actions, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties and choose during the cold start |
-| REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.1 of the half-range) | — | The actor's action, scaled to the bounds |
+| REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, two updates per training step, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.1 of the half-range) | — | The actor's action, scaled to the bounds |
 | OUTCOME (correct/incorrect) | A correct outcome counts as the label for the earlier prediction; an incorrect one is a negative example for the predicted class | `Reinforce(correct)` on associations; the neural prediction scorer is trained on outcomes | As above |
 | No feedback → NEXT_OBSERVATION | Head predicting the next fused state, MSE loss | Association sequence prediction | Neural head, with an association fallback |
 | No feedback → ANOMALY | Autoencoder reconstruction error | Distance to the nearest stored pattern | Score converted to a percentile against a running baseline |
@@ -687,6 +687,9 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
   at the smoothed target action, noise std 0.2 clipped to 0.5); every 2nd
   step the actor follows the first critic's gradient and the targets move
   by τ = 0.005. Adam, learning rate 1e-3 for both; no gradient clipping.
+  Two such updates per training step (`continuous_updates_per_step`; the
+  second on its own batch from the replay buffer; see "Environment I
+  stability" below).
   Actions are in [−1, 1] inside and scaled to the bounds outside. One-step
   returns (the discrete learner's multi-step returns are not used).
 - **Acting.** `Agent::ActContinuous(step, output, explore)`: uniform random
@@ -703,7 +706,8 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
 - **Settings.** `continuous_hidden`, `continuous_actor_learning_rate`,
   `continuous_critic_learning_rate`, `continuous_random_steps`,
   `continuous_exploration_noise`, `continuous_target_noise`,
-  `continuous_noise_clip`, `continuous_policy_delay`, `continuous_tau`;
+  `continuous_noise_clip`, `continuous_policy_delay`, `continuous_tau`,
+  `continuous_updates_per_step`;
   `discount`, `batch_size` and the action settings (`action_train_every`:
   training every observation) are shared with discrete actions.
 - **Safety and memory.** The actor-critics are in the snapshots and the
@@ -713,10 +717,72 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
   memory budget (live, target and snapshot copies).
 - **Checkpoint.** Version 3: bounds in the spec, the TD3 settings, the
   actor-critics with their optimizer state and update counters, the actions
-  in samples and pending steps. Version 2 checkpoints are rejected.
+  in samples and pending steps. Version 4 adds
+  `continuous_updates_per_step` to the configuration; earlier versions are
+  rejected.
 - **APIs.** C: `dpan_agent_act_continuous(agent, step, output, explore,
   values, capacity, count)`; it checks `capacity` before choosing. Python:
   `agent.act_continuous(step, output, explore=True)` returns a list.
 - **Supporting change.** `nn::Sequential::Backward` returns the gradient
   with respect to its input (the actor update needs it through the critic).
+
+### Environment I stability
+
+With the Phase 8 settings, I passed at its test seed but not reliably:
+over C++ seeds 1–48, 6 runs ended below −200 and 2 of them had greedy
+episodes that never swung the pendulum up (returns −960 to −1,690); through
+Python, 6 of 24 seeds (81–104) ended below −200. A trace of such an episode
+shows the pendulum spinning at the speed limit (−8) with the torque at its
+bound (−2) in every step: the greedy policy has a region where it
+saturates.
+
+Settings and changes tried (outside the test suite; greedy mean return of
+20 episodes after 200 training episodes per seed; "stuck" = greedy episodes
+below −800). The first block was run on 16 seeds including the six
+failures above, later ones on 24 (those 16 and 22, 27, 42, 12–16):
+
+| Change | Seeds | Runs < −200 | Stuck episodes | Worst |
+|---|---|---|---|---|
+| Phase 8 settings | 16 | 6 | 8 | −580.7 |
+| Batch 128 | 16 | 6 | 11 | −654.5 |
+| 128 hidden units | 16 | 2 | 0 | −215.8 |
+| Actor learning rate 3e-4 | 16 | 2 | 6 | −432.8 |
+| Exploration noise 0.2 | 16 | 1 | 0 | −201.0 |
+| Exploration noise 0.3 | 16 | 2 | 3 | −361.0 |
+| Random start 2,000 steps | 16 | 1 | 0 | −203.5 |
+| Noise 0.2 and random start 2,000 | 16 | 1 | 0 | −209.1 |
+| Exploration noise 0.2, all 48 seeds | 48 | 3 | 10 | −690.8 |
+| 128 hidden units, 16 further seeds | 16 | 1 | 8 | −749.2 |
+| Linear actor output with inverted gradients at the bounds (Hausknecht & Stone 2016) | 24 | 6 | 0 | −248.1 |
+| ... with noise 0.2 / batch 128 / 128 units / random start 2,000 / policy delay 1 / learning rates 2e-3 / τ 0.01 / target noise 0.1 | 24 | 4–11 | 0–3 | −226.8 to −400.3 |
+| tanh actor with a penalty on its input beyond ±2.5 | 24 | 6 | 5 | −442.9 |
+| tanh actor with a minimum gradient of 0.1 toward the inside | 24 | 5 | 10 | −735.2 |
+| Greedy actions from the target actor (inverted gradients) | 24 | 5 | 4 | −433.9 |
+| Inverted gradients, two updates per step | 24 | 6 | 0 | −258.5 |
+| **tanh actor, two updates per step** | 24 | **3** | **0** | **−215.4** |
+
+Inverted gradients removed the stuck episodes in C++ (0 over 48 seeds;
+spread of the 48 results 30.9 against 67.6) but lowered the mean (−169.1
+against −164.7), and through Python it ended 11 of 24 seeds below −200
+(against 6), so it was not adopted. Two updates per step was adopted
+(`continuous_updates_per_step` = 2):
+
+| | Phase 8 settings | Two updates per step |
+|---|---|---|
+| C++ seeds 1–48: runs < −200 | 6 | 4 |
+| C++ seeds 1–48: stuck episodes | 8 | 0 |
+| C++ seeds 1–48: worst run | −580.7 | −230.9 |
+| C++ seeds 1–48: mean, spread (std) | −164.7, 67.6 | −158.9, about 27.8 |
+| C++ seeds not used to choose (24): runs < −200, mean | 0, −142.5 | 1, −151.2 |
+| Python seeds 81–104: runs < −200 | 6 | 1 |
+| Python seeds 81–104: mean, worst | −186.2, −473.6 | −171.2, −511.8 |
+| Test seed (C++ 81) | −111.3 | −122.9 (BLAS build −123.0) |
+| Time of the I test | about 50 s | about 94 s |
+
+All 1,968 tests pass with the change (the million-step test excluded).
+
+Remaining: runs below −200 are 5 of 72 (C++ and Python together) instead
+of 12 of 72; on the C++ seeds that were not used to choose the setting, the
+new setting is slightly worse (1 run below −200 against 0); one Python run
+(seed 85) still ends at −511.8.
 

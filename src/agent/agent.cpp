@@ -79,6 +79,7 @@ void CheckConfig(const AgentConfig& c) {
                 c.continuous_noise_clip >= 0.0f,
             "continuous noise settings must be >= 0");
     require(c.continuous_policy_delay > 0, "continuous_policy_delay must be > 0");
+    require(c.continuous_updates_per_step > 0, "continuous_updates_per_step must be > 0");
     require(c.continuous_tau > 0.0f && c.continuous_tau <= 1.0f, "continuous_tau must be in (0, 1]");
     ValidateEncoderConfig(c.encoder);
 }
@@ -138,7 +139,8 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 2: image settings in the config; embeddings stored as layer sequences
 // 3: CONTINUOUS_ACTION outputs (bounds in the spec, TD3 settings, actor-critics,
 //    continuous actions in samples and pending steps)
-constexpr uint32_t kCheckpointVersion = 3;
+// 4: continuous_updates_per_step in the config
+constexpr uint32_t kCheckpointVersion = 4;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -296,6 +298,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.continuous_noise_clip);
     io::WriteSize(out, c.continuous_policy_delay);
     io::Write<float>(out, c.continuous_tau);
+    io::WriteSize(out, c.continuous_updates_per_step);
 }
 
 AgentConfig LoadConfig(std::istream& in) {
@@ -366,6 +369,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.continuous_noise_clip = io::Read<float>(in);
     c.continuous_policy_delay = io::ReadSize(in);
     c.continuous_tau = io::Read<float>(in);
+    c.continuous_updates_per_step = io::ReadSize(in);
     return c;
 }
 
@@ -1766,8 +1770,11 @@ struct Agent::Impl {
             // Q-learning targets move with the critics, so the loss is not
             // compared with divergence_loss (rewards set its scale); only
             // non-finite values roll back
-            float loss = TrainContinuous(slot, batch);
-            diverged = diverged || std::isinf(loss);
+            // The first update uses this batch; each further one draws its own
+            for (size_t update = 0; update < config.continuous_updates_per_step; ++update) {
+                float loss = TrainContinuous(slot, update == 0 ? batch : replay.Draw(config.batch_size));
+                diverged = diverged || std::isinf(loss);
+            }
         }
 
         training_steps++;
