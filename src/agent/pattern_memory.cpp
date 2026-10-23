@@ -273,6 +273,20 @@ void PatternMemory::AddValue(PatternID id, size_t value_output, const std::vecto
     }
 }
 
+void PatternMemory::ForgetLabels(size_t class_output) {
+    for (auto& p : prototypes_) {
+        std::fill(p.class_weights.at(class_output).begin(), p.class_weights[class_output].end(), 0.0f);
+        p.class_counts[class_output] = 0;
+    }
+}
+
+void PatternMemory::ForgetValues(size_t value_output) {
+    for (auto& p : prototypes_) {
+        std::fill(p.value_means.at(value_output).begin(), p.value_means[value_output].end(), 0.0f);
+        p.value_counts[value_output] = 0;
+    }
+}
+
 std::optional<std::vector<float>> PatternMemory::ClassFromNeighbors(
     const std::vector<std::pair<size_t, float>>& neighbors, size_t class_output, size_t class_count) const {
     if (neighbors.empty() || class_count == 0) return std::nullopt;

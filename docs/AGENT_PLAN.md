@@ -396,6 +396,10 @@ errors is found within 30 samples). Reference environments A–F still pass
   detections) once old labels returned with replay. After a drift that
   only changes the input distribution, still-valid labels are lost too and
   the network relearns them.
+- **Pre-drift labels and targets are also forgotten by the pattern memory**
+  (added with scenario S4): every pattern's class weights or target means
+  for the drifted output are cleared, so the pattern side votes only with
+  feedback received after the detection (see "S4 change" below).
 - **Capacity.** When the learning rate would drop at a plateau, after
   10,000 samples, while the network trails the pattern side by a clear
   margin on some output (2 points of accuracy, or 10% more error) — the
@@ -801,7 +805,7 @@ each test prints its metrics).
 | S1 | Text classification, 3 classes, keywords with filler words and misspellings | accuracy ≥ 0.90 (last 1,000 of 3,000) | 0.94–0.96 | same |
 | S2 | 3 regression outputs, 5 inputs, 10% of input values missing | R² ≥ 0.7 for every output | 0.77–0.89 | same |
 | S3 | Plan environment H: text + numeric inputs, labels for 30% of steps, outcomes for the rest, 4 classes; an ANOMALY output alongside | accuracy ≥ 0.85 (last 2,000 of 6,000, non-anomalous steps), anomaly AUC ≥ 0.8 | 0.94–0.95, AUC 0.89–0.92 | same |
-| S4 | Regression whose target function changes at step 4,000 | MSE over steps 5,000–6,000 ≤ 2 × MSE over 3,000–4,000 | 0.026–0.028 vs limits 0.024–0.025 (fails) | same (fails) |
+| S4 | Regression whose target function changes at step 4,000 | MSE over steps 5,000–6,000 ≤ 2 × MSE over 3,000–4,000 | 0.026–0.028 vs limits 0.024–0.025 (fails) | 0.013–0.014 |
 | S5 | 250 open-vocabulary user IDs, 5 imbalanced classes (60/20/10/5/5%), 50 new users from step 4,000 | mean per-class recall ≥ 0.8 (last 2,000 of 8,000) | 0.45–0.55 (fails) | 1.0 |
 | S6 | Contextual bandit, 4 contexts, 3 actions, outcomes only | greedy action best in 4/4 contexts after 3,000 steps | 4/4 | same |
 | S7 | Continuous 2-D reaching, velocity in [−0.1, 0.1]², absolute positions as input | mean final distance of 20 greedy episodes ≤ 0.1 after 300 training episodes | 0.24–0.28 (fails) | 0.065–0.073 |
@@ -899,4 +903,33 @@ last 20 training episodes −454.9); greedy actions are unaffected, and
 `Prediction::confidence` of a continuous output is now 0.5 after the random
 start (1 − the noise). All 1,999 tests pass (the million-step test is
 unaffected: it has no continuous output).
+
+**S4 change: the pattern memory forgets pre-drift feedback.** After the
+change of target function the network recovered quickly (its error back to
+about 0.011 by step 5,000), but the pattern side did not: its standardized
+error was still 0.06 at step 6,000, against 0.008 before the change, and it
+kept 9–18% of the blend. Each pattern's target is a running mean that moves
+10% toward each new target the pattern receives, and in a 2-D input space
+with thousands of patterns most receive few new targets, so the votes stayed
+close to the old function; the short-term vote did not help, because it
+only selects patterns that received some recent target, and their means
+still mostly reflected old ones. A fresh agent trained on the new function
+alone reaches 0.0164 over its samples 1,000–2,000, so the shortfall was
+recovery, not learning speed.
+
+On a detected drift, the agent already dropped pre-drift targets of the
+drifted output from the replay buffer; it now also clears every pattern's
+class weights (CLASS) or target means (VALUE) for that output
+(`PatternMemory::ForgetLabels` / `ForgetValues`). Until new feedback
+arrives the pattern side does not vote, and the network predicts alone.
+
+| | Before | After |
+|---|---|---|
+| S4 seeds 1–3: MSE 1,000–2,000 steps after the change (limits 0.0244–0.0250) | 0.0257, 0.0275, 0.0270 | 0.0140, 0.0132, 0.0134 |
+| S4 seeds 1–3: MSE over the first 200 steps after the change | 5.27–5.37 | 0.87–1.27 |
+| S4 seeds 4–11 (not used to choose) | not run | 8 of 8 pass (0.0134–0.0155) |
+| Scenario tests passing | 27 of 30 | 30 of 30 |
+| Reference environment A (accuracy after the drift) | 0.983 | 0.9835 (others unchanged; they detect no drift) |
+
+All 1,999 tests pass.
 

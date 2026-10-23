@@ -976,6 +976,11 @@ struct Agent::Impl {
                     return std::all_of(sample.targets.begin(), sample.targets.end(),
                                        [](const HeadTarget& t) { return t.Empty(); });
                 });
+            // The same for the pattern side: its stored labels and target
+            // means follow the old concept, and they adapt to new ones only
+            // as fast as each pattern receives new feedback
+            if (out.spec->type == OutputType::CLASS) patterns->ForgetLabels(static_cast<size_t>(out.class_slot));
+            else patterns->ForgetValues(static_cast<size_t>(out.value_slot));
         }
         // Restart the learning-rate schedule (the loss rose because the data
         // changed, not because training stalled) and raise the rate

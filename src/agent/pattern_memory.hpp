@@ -72,6 +72,12 @@ public:
     void AddNegative(PatternID id, size_t class_output, size_t class_index);
     void AddValue(PatternID id, size_t value_output, const std::vector<float>& values);
 
+    /// Forget every pattern's labels (class weights) or targets for one
+    /// output, e.g. after a drift made them describe an old concept; those
+    /// patterns stop voting for the output until they receive new ones
+    void ForgetLabels(size_t class_output);
+    void ForgetValues(size_t value_output);
+
     /// Class probabilities voted by the k nearest patterns with labels for
     /// this output (nullopt if none have labels). horizon > 0 limits the
     /// vote to patterns that received one of the output's last `horizon`
