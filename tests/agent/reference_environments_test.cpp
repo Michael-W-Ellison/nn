@@ -443,6 +443,160 @@ TEST_F(ReferenceTest, F_CartPole) {
     EXPECT_GT(solved_at, 0);
 }
 
+// ============================================================================
+// G: small images
+// ============================================================================
+//
+// 32x32 grayscale images (values 0-255) with one filled shape: square,
+// circle, triangle or plus sign, of random size (half-width 4-9 pixels),
+// position and brightness, with pixel noise. A categorical input gives the
+// lighting ("day" or "night"; night images are darker and noisier) and says
+// nothing about the shape. Labels arrive right after each prediction.
+// Pass: accuracy >= 95% on samples 4000-5000.
+
+Image DrawShape(int shape, bool night, std::mt19937& rng) {
+    const int side = 32;
+    std::uniform_int_distribution<int> size(4, 9);
+    int r = size(rng);
+    std::uniform_int_distribution<int> center(r + 1, side - r - 2);
+    int cx = center(rng), cy = center(rng);
+    std::uniform_real_distribution<float> brightness(night ? 90.0f : 160.0f, night ? 140.0f : 255.0f);
+    std::normal_distribution<float> noise(0.0f, night ? 30.0f : 15.0f);
+    float level = brightness(rng);
+    Image image{side, side, 1, std::vector<float>(side * side)};
+    for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+            int dx = x - cx, dy = y - cy;
+            bool inside = false;
+            switch (shape) {
+                case 0: inside = std::abs(dx) <= r && std::abs(dy) <= r; break;                     // square
+                case 1: inside = dx * dx + dy * dy <= r * r; break;                                 // circle
+                case 2: inside = dy >= -r && dy <= r && std::abs(dx) * 2 <= (dy + r); break;        // triangle
+                default: inside = (std::abs(dx) <= r && std::abs(dy) <= r / 3) ||
+                                  (std::abs(dy) <= r && std::abs(dx) <= r / 3); break;              // plus sign
+            }
+            float value = (inside ? level : 20.0f) + noise(rng);
+            image.pixels[y * side + x] = std::min(255.0f, std::max(0.0f, value));
+        }
+    }
+    return image;
+}
+
+TEST_F(ReferenceTest, G_SmallImages) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"camera", InputType::IMAGE, 0, {}, 32, 32, 1},
+                   {"lighting", InputType::CATEGORICAL, 0, {"day", "night"}}};
+    spec.outputs = {{"shape", OutputType::CLASS, {"square", "circle", "triangle", "plus"}}};
+    spec.feedback = {{"label", FeedbackType::LABEL, "shape"}};
+    Agent agent(spec);
+
+    std::mt19937 rng(71);
+    std::uniform_int_distribution<int> pick_shape(0, 3);
+    std::bernoulli_distribution night(0.4);
+    const int total = 5000, measured_from = 4000;
+    int correct = 0;
+    for (int i = 0; i < total; ++i) {
+        int shape = pick_shape(rng);
+        bool dark = night(rng);
+        StepId step = agent.Observe({{"camera", DrawShape(shape, dark, rng)},
+                                     {"lighting", std::string(dark ? "night" : "day")}});
+        Prediction p = agent.Predict(step, "shape");
+        if (i >= measured_from) correct += p.available && p.label == spec.outputs[0].classes_or_actions[shape];
+        agent.Feedback(step, "label", static_cast<double>(shape));
+        Tick();
+    }
+    double accuracy = static_cast<double>(correct) / (total - measured_from);
+    AgentStats stats = agent.Stats();
+    std::cout << "G: accuracy " << accuracy << " on samples " << measured_from << "-" << total << " (network weight "
+              << stats.outputs[0].neural_weight << ", network accuracy " << stats.outputs[0].neural_quality
+              << ", patterns " << stats.outputs[0].pattern_quality << ")\n";
+    EXPECT_GE(accuracy, 0.95);
+}
+
+// ============================================================================
+// I: pendulum swing-up (continuous action)
+// ============================================================================
+//
+// The Pendulum-v1 task: angle theta (0 = upright), speed limited to +-8,
+// gravity 10, mass 1, length 1, steps of 0.05 s, torque in [-2, 2]. Input:
+// (cos theta, sin theta, speed). Reward -(theta^2 + 0.1 speed^2 + 0.001
+// torque^2), theta normalized to [-pi, pi]. Episodes start at a uniform
+// angle and a speed in [-1, 1] and are cut off after 200 steps (not
+// terminal). 200 training episodes with exploration, then 20 episodes with
+// the greedy action. Pass: their mean return >= -200.
+
+class Pendulum {
+public:
+    explicit Pendulum(uint32_t seed) : rng_(seed) {}
+
+    void Reset() {
+        theta_ = std::uniform_real_distribution<double>(-kPi, kPi)(rng_);
+        speed_ = std::uniform_real_distribution<double>(-1.0, 1.0)(rng_);
+    }
+
+    std::vector<float> State() const {
+        return {static_cast<float>(std::cos(theta_)), static_cast<float>(std::sin(theta_)),
+                static_cast<float>(speed_)};
+    }
+
+    /// Applies the torque; returns the reward
+    double Step(double torque) {
+        const double gravity = 10.0, mass = 1.0, length = 1.0, dt = 0.05;
+        torque = std::clamp(torque, -2.0, 2.0);
+        double angle = std::remainder(theta_, 2.0 * kPi);
+        double cost = angle * angle + 0.1 * speed_ * speed_ + 0.001 * torque * torque;
+        speed_ += (3.0 * gravity / (2.0 * length) * std::sin(theta_) + 3.0 / (mass * length * length) * torque) * dt;
+        speed_ = std::clamp(speed_, -8.0, 8.0);
+        theta_ += speed_ * dt;
+        return -cost;
+    }
+
+private:
+    std::mt19937 rng_;
+    double theta_{0.0};
+    double speed_{0.0};
+};
+
+TEST_F(ReferenceTest, I_PendulumSwingUp) {
+    EnvironmentSpec spec;
+    spec.inputs = {{"state", InputType::NUMERIC, 3}};
+    OutputSpec torque;
+    torque.name = "torque";
+    torque.type = OutputType::CONTINUOUS_ACTION;
+    torque.size = 1;
+    torque.low = {-2.0f};
+    torque.high = {2.0f};
+    spec.outputs = {torque};
+    spec.feedback = {{"reward", FeedbackType::REWARD, "torque"}};
+    Agent agent(spec);
+
+    Pendulum pendulum(81);
+    auto run_episode = [&](bool explore) {
+        pendulum.Reset();
+        double total = 0.0;
+        for (int t = 0; t < 200; ++t) {
+            StepId step = agent.Observe({{"state", pendulum.State()}});
+            double reward = pendulum.Step(agent.ActContinuous(step, "torque", explore)[0]);
+            agent.Feedback(step, "reward", reward);
+            total += reward;
+            Tick();
+        }
+        agent.EndEpisode(false);  // time limit: not terminal
+        return total;
+    };
+
+    double last_training = 0.0;
+    for (int episode = 0; episode < 200; ++episode) {
+        double total = run_episode(true);
+        if (episode >= 180) last_training += total / 20.0;
+    }
+    double greedy = 0.0;
+    for (int episode = 0; episode < 20; ++episode) greedy += run_episode(false) / 20.0;
+    std::cout << "I: mean return of 20 greedy episodes " << greedy << " (last 20 training episodes "
+              << last_training << ", " << agent.Stats().steps << " steps)\n";
+    EXPECT_GE(greedy, -200.0);
+}
+
 }  // namespace
 }  // namespace agent
 }  // namespace dpan

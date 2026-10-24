@@ -4,8 +4,9 @@
 //
 //   fused vector -> channel embeddings -> trunk (2 x Dense+ReLU) -> one head per output
 //
-// Channels with an embedding size (hashed categories, text) are projected by
-// their own learned Dense layer; other channels pass through. Each head is a
+// Channels with an embedding size are mapped by their own learned layers:
+// hashed categories and text by a Dense projection, images by convolution
+// and pooling layers and a projection; other channels pass through. Each head is a
 // Dense layer on the trunk output: classifiers produce logits (softmax
 // cross-entropy), regressors produce values (squared error). A head is
 // trained only on the samples that have a target for it.
@@ -68,6 +69,11 @@ public:
 
     /// Deep copy (weights and optimizer state), e.g. for a target network
     AgentNetwork(const AgentNetwork& other);
+
+    /// Write / read everything: layout, weights, heads, optimizer state
+    /// @throws std::runtime_error on malformed data (Deserialize)
+    void Serialize(std::ostream& out) const;
+    static std::unique_ptr<AgentNetwork> Deserialize(std::istream& in);
     AgentNetwork& operator=(const AgentNetwork&) = delete;
 
     size_t InputSize() const { return input_size_; }
@@ -110,13 +116,21 @@ public:
     void SetLearningRate(float learning_rate);
 
 private:
+    /// A channel's part of the network input: passed through, or its
+    /// features (without the missing indicator) mapped by `model` to
+    /// `width` values (a Dense projection, or convolution, pooling and a
+    /// projection for images); the missing indicator follows
     struct Embedding {
         size_t offset;
         size_t size;       // channel size including the missing indicator
         size_t output_offset;
-        std::unique_ptr<nn::Dense> dense;  // nullptr = pass through
+        size_t width{0};
+        std::unique_ptr<nn::Sequential> model;  // nullptr = pass through
     };
 
+    static std::unique_ptr<nn::Sequential> ImageModel(const ChannelLayout& channel, uint32_t& seed);
+
+    AgentNetwork() = default;
     nn::Matrix Embed(const nn::Matrix& inputs, bool training) const;
     nn::Matrix TrunkInfer(const nn::Matrix& embedded) const;
     std::vector<nn::Parameter> BodyParameters();
@@ -124,8 +138,8 @@ private:
     size_t input_size_{0};
     size_t embedded_size_{0};
     size_t trunk_width_{0};
-    float learning_rate_;
-    uint32_t seed_;
+    float learning_rate_{0.0f};
+    uint32_t seed_{0};
     std::vector<Embedding> embeddings_;
     std::vector<std::unique_ptr<nn::Layer>> trunk_;
     std::vector<HeadSpec> head_specs_;
@@ -146,6 +160,9 @@ public:
     /// One optimization step; returns the batch loss
     float TrainBatch(const nn::Matrix& inputs, float clip_norm);
 
+    void Serialize(std::ostream& out) const;
+    static std::unique_ptr<AnomalyAutoencoder> Deserialize(std::istream& in);
+
     void SetLearningRate(float learning_rate) { optimizer_.SetLearningRate(learning_rate); }
 
     size_t ParameterCount() const { return parameter_count_; }
@@ -156,6 +173,8 @@ public:
     std::vector<nn::Parameter> Parameters() { return model_.Parameters(); }
 
 private:
+    AnomalyAutoencoder() = default;
+
     nn::Sequential model_;
     nn::Adam optimizer_;
     size_t parameter_count_{0};

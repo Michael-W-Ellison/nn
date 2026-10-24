@@ -10,6 +10,8 @@
 #include "agent/network.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <iosfwd>
 #include <memory>
 #include <random>
 #include <unordered_map>
@@ -17,6 +19,12 @@
 
 namespace dpan {
 namespace agent {
+
+/// What one sample teaches one CONTINUOUS_ACTION output (TD3)
+struct ContinuousTarget {
+    std::vector<float> action;  ///< In [-1, 1]; empty = no action chosen
+    float reward{0.0f};
+};
 
 struct Sample {
     uint64_t step{0};
@@ -28,6 +36,9 @@ struct Sample {
     /// One entry per network head (raw units for regressors; the agent
     /// standardizes them when it trains)
     std::vector<HeadTarget> targets;
+
+    /// One entry per CONTINUOUS_ACTION output
+    std::vector<ContinuousTarget> continuous;
 
     /// Trains the anomaly autoencoder
     bool reconstruct{false};
@@ -56,6 +67,11 @@ struct Sample {
 
     /// Estimated memory use, including the shared_ptr control block
     size_t MemoryBytes() const;
+
+    /// Write / read the contents (not next_sample or in_replay, which the
+    /// owner restores)
+    void Save(std::ostream& out) const;
+    static std::shared_ptr<Sample> Load(std::istream& in);
 };
 
 using SamplePtr = std::shared_ptr<Sample>;
@@ -96,6 +112,17 @@ public:
     size_t Capacity() const { return capacity_; }
     size_t MemoryBytes() const { return bytes_; }
     void SetMemoryBudget(size_t bytes);
+
+    /// Write / restore the buffer: samples as IDs given by `id` (the owner
+    /// writes the samples themselves), order, sizes and random state
+    void SaveState(std::ostream& out, const std::function<uint64_t(const Sample*)>& id) const;
+    void LoadState(std::istream& in, const std::function<std::shared_ptr<Sample>(uint64_t)>& sample);
+
+    /// Visit the stored samples in order
+    template <typename Visit>
+    void ForEach(Visit visit) const {
+        for (const auto& sample : samples_) visit(sample);
+    }
 
 private:
     void Evict();

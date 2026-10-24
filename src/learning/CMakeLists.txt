@@ -2,7 +2,7 @@
 #
 # Learning module: attention mechanisms and pattern importance
 
-add_library(dpan_learning
+add_library(dpan_learning STATIC
     attention_utils.cpp
     basic_attention.cpp
     context_aware_attention.cpp

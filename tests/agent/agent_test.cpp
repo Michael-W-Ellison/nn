@@ -381,7 +381,7 @@ TEST(AgentActionTest, MultiStepReturnsReachBackOverSeveralSteps) {
 TEST(AgentActionTest, ActionEnvironmentsUseActionSettings) {
     Agent with_actions(ActionSpec());
     EXPECT_EQ(1u, with_actions.Config().train_every);
-    EXPECT_FLOAT_EQ(5e-4f, with_actions.Config().learning_rate);
+    EXPECT_FLOAT_EQ(2e-4f, with_actions.Config().learning_rate);
     EXPECT_EQ(64u, with_actions.Config().min_trunk_width);
     Agent without(ClassSpec());
     EXPECT_EQ(8u, without.Config().train_every);

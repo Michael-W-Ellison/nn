@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <optional>
@@ -39,9 +40,11 @@ struct EncoderConfig {
     /// new ones.
     uint64_t statistics_limit{5000};
 
-    /// CATEGORICAL with an open vocabulary: hash buckets and the width of the
-    /// learned embedding the agent puts after them
-    size_t category_buckets{64};
+    /// CATEGORICAL with an open vocabulary: slots and the width of the
+    /// learned embedding the agent puts after them. The first
+    /// category_buckets distinct categories get one slot each, in the order
+    /// they first appear; later ones are hashed into the slots.
+    size_t category_buckets{1024};
     size_t category_embedding_size{8};
 
     /// TEXT: hash buckets for words and character tri-grams, embedding width
@@ -51,8 +54,13 @@ struct EncoderConfig {
     /// TIME_SERIES: number of most recent values kept per series
     size_t time_series_window{16};
 
-    /// IMAGE: images are resampled to image_size x image_size and flattened
-    size_t image_size{16};
+    /// IMAGE: 0 = keep each image's size, scaled down if its longer side
+    /// exceeds max_image_size; > 0 = resample to image_size x image_size.
+    /// The agent's network reads images with convolution and pooling layers
+    /// and projects them to image_embedding_size values.
+    size_t image_size{0};
+    size_t max_image_size{64};
+    size_t image_embedding_size{64};
 
     /// Open-vocabulary categories recorded for inspection (hashing itself
     /// has no limit)
@@ -71,6 +79,10 @@ public:
     /// Length of the encoding; 0 while the size has not been inferred yet
     virtual size_t OutputSize() const = 0;
 
+    /// Most non-zero values an encoding can have (bounds the memory of a
+    /// sparse sample); OutputSize() unless the encoding is one-hot
+    virtual size_t MaxNonZero() const { return OutputSize(); }
+
     /// Width of the learned embedding layer the agent applies to this
     /// encoding (0 = use the encoding directly). The layer is part of the
     /// agent's network, not of the encoder.
@@ -88,6 +100,12 @@ public:
 
     /// Clear per-episode state (TIME_SERIES windows); learned statistics stay
     virtual void ResetEpisode() {}
+
+    /// Write / restore everything learned (statistics, sizes, vocabularies,
+    /// windows). LoadState expects an encoder built from the same spec.
+    /// @throws std::runtime_error on malformed data
+    virtual void SaveState(std::ostream& out) const = 0;
+    virtual void LoadState(std::istream& in) = 0;
 
 protected:
     explicit Encoder(InputSpec spec) : spec_(std::move(spec)) {}
@@ -113,6 +131,9 @@ struct RunningStats {
 
     /// (x - mean) / stddev clipped to ±clip; 0 when the deviation is 0
     float Standardize(double x, float clip) const;
+
+    void Save(std::ostream& out) const;
+    void Load(std::istream& in);
 };
 
 /// NUMERIC: standardized with running mean and variance, clipped to ±5σ.
@@ -124,6 +145,8 @@ public:
     size_t OutputSize() const override { return size_ == 0 ? 0 : size_ + 1; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     size_t Size() const { return size_; }
     const std::vector<RunningStats>& Statistics() const { return stats_; }
@@ -148,8 +171,11 @@ public:
     explicit OneHotEncoder(InputSpec spec);
 
     size_t OutputSize() const override { return spec_.categories.size() + 2; }
+    size_t MaxNonZero() const override { return 1; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Times each category was seen; the last entry counts unknown categories
     const std::vector<uint64_t>& Counts() const { return counts_; }
@@ -163,21 +189,31 @@ private:
     std::vector<uint64_t> counts_;
 };
 
-/// CATEGORICAL with an open vocabulary: feature hashing.
+/// CATEGORICAL with an open vocabulary. Categories get slots in the order
+/// they first appear, one each until all category_buckets slots are taken
+/// (no collisions); after that, new categories are hashed into the slots.
 /// Output: category_buckets slots (one set), missing indicator.
 class HashedCategoryEncoder : public Encoder {
 public:
     HashedCategoryEncoder(InputSpec spec, const EncoderConfig& config);
 
     size_t OutputSize() const override { return buckets_ + 1; }
+    size_t MaxNonZero() const override { return 1; }
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Categories seen so far with their counts (up to max_tracked_categories)
     const std::map<std::string, uint64_t>& ObservedCategories() const { return observed_; }
 
+    /// Slot of a category: its own if it has one, else the next free slot if
+    /// any is left (the one Update will give it), else its hash bucket
     size_t Bucket(const std::string& category) const;
+
+    /// Categories with their own slot, in slot order
+    const std::vector<std::string>& SlotCategories() const { return slot_names_; }
 
 private:
     /// Category as a string; nullopt for a missing value (NaN)
@@ -187,6 +223,8 @@ private:
     size_t embedding_size_;
     size_t max_tracked_;
     std::map<std::string, uint64_t> observed_;
+    std::map<std::string, size_t> slots_;
+    std::vector<std::string> slot_names_;
 };
 
 /// TEXT: lowercased words and character tri-grams of each word (with
@@ -201,6 +239,8 @@ public:
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Lowercased words: runs of ASCII letters and digits, or of non-ASCII
     /// bytes (kept whole, so UTF-8 words are not split)
@@ -230,6 +270,8 @@ public:
     size_t OutputSize() const override;
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
     void ResetEpisode() override;
 
     size_t SeriesCount() const { return series_; }
@@ -265,15 +307,25 @@ private:
 
 /// IMAGE: pixel values scaled to [0, 1] (the range, [0, 1] or [0, 255] or
 /// wider, is inferred from the largest pixel seen), converted to the spec's
-/// channel count and resampled to image_size x image_size by area
-/// averaging. Output: image_size² x channels values, missing indicator.
+/// channel count and kept at their size (longer side at most
+/// max_image_size) or resampled to image_size x image_size, by area
+/// averaging. Output: height x width x channels values (row-major,
+/// interleaved channels), missing indicator. The size is unknown until the
+/// first image if the spec does not declare it.
 class ImageEncoder : public Encoder {
 public:
     ImageEncoder(InputSpec spec, const EncoderConfig& config);
 
-    size_t OutputSize() const override { return side_ * side_ * spec_.image_channels + 1; }
+    size_t OutputSize() const override;
+    size_t EmbeddingSize() const override { return embedding_size_; }
+
+    /// Size of the encoded image (0 while unknown)
+    size_t EncodedHeight() const { return width_ == 0 && fixed_side_ == 0 ? 0 : EncodedDims(width_, height_).first; }
+    size_t EncodedWidth() const { return width_ == 0 && fixed_side_ == 0 ? 0 : EncodedDims(width_, height_).second; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
     /// Image size declared in the spec or inferred from the first image
     size_t Width() const { return width_; }
@@ -286,7 +338,12 @@ private:
     const Image& Check(const Value& value) const;
     static float ScaleFor(float max_pixel);
 
-    size_t side_;
+    /// (height, width) of the encoding of a width x height image
+    std::pair<size_t, size_t> EncodedDims(size_t width, size_t height) const;
+
+    size_t fixed_side_;
+    size_t max_side_;
+    size_t embedding_size_;
     size_t width_;
     size_t height_;
     float max_pixel_{0.0f};
@@ -303,6 +360,10 @@ struct ChannelLayout {
     size_t offset;
     size_t size;
     size_t embedding_size;
+    /// IMAGE channels: shape of the encoded image (0 for other types)
+    size_t image_height{0};
+    size_t image_width{0};
+    size_t image_channels{0};
 };
 
 /// Encodes whole observations into one fused vector (channels in spec order)
@@ -316,6 +377,8 @@ public:
 
     /// Fused vector length (0 until Ready())
     size_t OutputSize() const;
+    /// Most non-zero values of a fused vector (sum over the channels)
+    size_t MaxNonZero() const;
 
     /// Channel positions in the fused vector (offsets valid once Ready())
     std::vector<ChannelLayout> Layout() const;
@@ -332,6 +395,11 @@ public:
 
     /// Clear per-episode state of all channels
     void ResetEpisode();
+
+    /// Write / restore the learned state of every channel (the inputs and
+    /// config come from the constructor)
+    void SaveState(std::ostream& out) const;
+    void LoadState(std::istream& in);
 
     size_t ChannelCount() const { return encoders_.size(); }
     const Encoder& Channel(size_t index) const { return *encoders_.at(index); }

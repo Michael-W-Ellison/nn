@@ -80,11 +80,12 @@ Matrix Sequential::Forward(const Matrix& input, bool training) {
     return output;
 }
 
-void Sequential::Backward(const Matrix& grad_output) {
+Matrix Sequential::Backward(const Matrix& grad_output) {
     Matrix grad = grad_output;
     for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
         grad = (*it)->Backward(grad);
     }
+    return grad;
 }
 
 void Sequential::ZeroGradients() {

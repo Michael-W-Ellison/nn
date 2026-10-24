@@ -9,6 +9,7 @@
 #include <numeric>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 namespace dpan {
@@ -171,7 +172,7 @@ TEST(OneHotEncoderTest, RejectsBadIndicesAndTypes) {
 
 TEST(HashedCategoryEncoderTest, SameCategorySameBucket) {
     HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
-    EXPECT_EQ(65u, encoder.OutputSize());
+    EXPECT_EQ(1025u, encoder.OutputSize());
     EXPECT_EQ(8u, encoder.EmbeddingSize());
 
     Value a = Text("alice");
@@ -190,21 +191,78 @@ TEST(HashedCategoryEncoderTest, SameCategorySameBucket) {
     EXPECT_FLOAT_EQ(1.0f, std::accumulate(missing.begin(), missing.end(), 0.0f));
 }
 
-TEST(HashedCategoryEncoderTest, SpreadsCategoriesOverBuckets) {
+TEST(HashedCategoryEncoderTest, CategoriesGetOwnSlotsInOrderOfAppearance) {
     HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
+    for (const char* name : {"carol", "alice", "carol", "bob"}) {
+        Value v = Text(name);
+        // Encoded before Update (as ObservationEncoder does): a new category
+        // already gets the slot Update will give it
+        auto encoded = encoder.Encode(&v);
+        encoder.Update(&v);
+        EXPECT_FLOAT_EQ(1.0f, encoded[encoder.Bucket(name)]) << name;
+    }
+    EXPECT_EQ(0u, encoder.Bucket("carol"));
+    EXPECT_EQ(1u, encoder.Bucket("alice"));
+    EXPECT_EQ(2u, encoder.Bucket("bob"));
+    EXPECT_EQ((std::vector<std::string>{"carol", "alice", "bob"}), encoder.SlotCategories());
+    EXPECT_EQ(3u, encoder.Bucket("dave"));  // the next free slot
+
+    // 1000 categories, 1024 slots: no two share a slot
     std::set<size_t> used;
     for (int i = 0; i < 1000; ++i) {
+        Value v = Text("user" + std::to_string(i));
+        encoder.Update(&v);
         used.insert(encoder.Bucket("user" + std::to_string(i)));
     }
-    EXPECT_EQ(64u, used.size());
+    EXPECT_EQ(1000u, used.size());
 }
 
-TEST(HashedCategoryEncoderTest, BucketsAreFixedAcrossBuilds) {
-    // Saved models depend on these values staying the same
-    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
-    HashedCategoryEncoder other({"other", InputType::CATEGORICAL}, {});
+TEST(HashedCategoryEncoderTest, HashesCategoriesOnceTheSlotsAreTaken) {
+    EncoderConfig config;
+    config.category_buckets = 8;
+    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, config);
+    HashedCategoryEncoder other({"other", InputType::CATEGORICAL}, config);
+    for (int i = 0; i < 8; ++i) {
+        Value v = Text("first" + std::to_string(i));
+        encoder.Update(&v);
+        other.Update(&v);
+    }
+    std::set<size_t> used;
+    for (int i = 0; i < 1000; ++i) {
+        std::string name = "user" + std::to_string(i);
+        Value v = Text(name);
+        size_t before = encoder.Bucket(name);
+        encoder.Update(&v);
+        EXPECT_EQ(before, encoder.Bucket(name));  // no slot of its own any more
+        EXPECT_LT(before, 8u);
+        used.insert(before);
+    }
+    EXPECT_EQ(8u, used.size());
+    // Hash buckets do not depend on the channel; saved models rely on them
     EXPECT_EQ(encoder.Bucket("alice"), other.Bucket("alice"));
-    EXPECT_NE(encoder.Bucket("alice"), encoder.Bucket("bob"));
+    EXPECT_EQ(8u, encoder.SlotCategories().size());
+}
+
+TEST(HashedCategoryEncoderTest, SavesAndLoadsSlots) {
+    HashedCategoryEncoder encoder({"user", InputType::CATEGORICAL}, {});
+    for (const char* name : {"x", "y", "z"}) {
+        Value v = Text(name);
+        encoder.Update(&v);
+    }
+    std::stringstream buffer;
+    encoder.SaveState(buffer);
+    HashedCategoryEncoder loaded({"user", InputType::CATEGORICAL}, {});
+    loaded.LoadState(buffer);
+    EXPECT_EQ(encoder.SlotCategories(), loaded.SlotCategories());
+    for (const char* name : {"x", "y", "z", "new"}) EXPECT_EQ(encoder.Bucket(name), loaded.Bucket(name)) << name;
+
+    // More saved slots than this encoder has is malformed
+    EncoderConfig small;
+    small.category_buckets = 2;
+    HashedCategoryEncoder too_small({"user", InputType::CATEGORICAL}, small);
+    std::stringstream again;
+    encoder.SaveState(again);
+    EXPECT_THROW(too_small.LoadState(again), std::runtime_error);
 }
 
 TEST(HashedCategoryEncoderTest, TracksObservedVocabularyUpToLimit) {
@@ -384,6 +442,13 @@ TEST(TimeSeriesEncoderTest, RejectsWrongSeriesCount) {
 // ImageEncoder
 // ============================================================================
 
+/// Phase 1 behaviour: every image resampled to 16 x 16
+EncoderConfig Resample16() {
+    EncoderConfig config;
+    config.image_size = 16;
+    return config;
+}
+
 Image Gray(size_t w, size_t h, std::function<float(size_t, size_t)> f) {
     Image image{w, h, 1, std::vector<float>(w * h)};
     for (size_t y = 0; y < h; ++y)
@@ -392,7 +457,7 @@ Image Gray(size_t w, size_t h, std::function<float(size_t, size_t)> f) {
 }
 
 TEST(ImageEncoderTest, DownsamplesByAreaAveraging) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     EXPECT_EQ(16u * 16u + 1, encoder.OutputSize());
     Value checker = Gray(32, 32, [](size_t x, size_t y) { return float((x + y) % 2); });
     auto e = encoder.Encode(&checker);
@@ -401,7 +466,7 @@ TEST(ImageEncoderTest, DownsamplesByAreaAveraging) {
 }
 
 TEST(ImageEncoderTest, UpsamplesSmallImages) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     Value small = Gray(4, 4, [](size_t x, size_t y) { return (y * 4 + x) / 15.0f; });
     auto e = encoder.Encode(&small);
     for (size_t y = 0; y < 16; ++y)
@@ -410,7 +475,7 @@ TEST(ImageEncoderTest, UpsamplesSmallImages) {
 }
 
 TEST(ImageEncoderTest, PreservesMeanForUnevenSizes) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     std::mt19937 rng(3);
     std::uniform_real_distribution<float> u(0, 1);
     Value image = Gray(20, 12, [&](size_t, size_t) { return u(rng); });
@@ -422,7 +487,7 @@ TEST(ImageEncoderTest, PreservesMeanForUnevenSizes) {
 }
 
 TEST(ImageEncoderTest, InfersPixelRange) {
-    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    ImageEncoder encoder({"cam", InputType::IMAGE}, Resample16());
     EXPECT_FLOAT_EQ(1.0f, encoder.PixelScale());
     Value bytes = Gray(16, 16, [](size_t x, size_t) { return x < 8 ? 0.0f : 255.0f; });
     auto e = encoder.Encode(&bytes);
@@ -438,12 +503,12 @@ TEST(ImageEncoderTest, InfersPixelRange) {
 
 TEST(ImageEncoderTest, ConvertsChannels) {
     InputSpec gray_spec{"cam", InputType::IMAGE};
-    ImageEncoder gray(gray_spec, {});
+    ImageEncoder gray(gray_spec, Resample16());
     Value rgb = Image{1, 1, 3, {0.3f, 0.6f, 0.9f}};
     EXPECT_NEAR(0.6f, gray.Encode(&rgb)[0], 1e-6f);
 
     InputSpec rgb_spec{"cam", InputType::IMAGE, 0, {}, 0, 0, 3};
-    ImageEncoder color(rgb_spec, {});
+    ImageEncoder color(rgb_spec, Resample16());
     EXPECT_EQ(16u * 16u * 3 + 1, color.OutputSize());
     Value single = Image{1, 1, 1, {0.4f}};
     auto e = color.Encode(&single);
@@ -452,10 +517,31 @@ TEST(ImageEncoderTest, ConvertsChannels) {
     EXPECT_FLOAT_EQ(0.4f, e[2]);
 
     InputSpec rgba_spec{"cam", InputType::IMAGE, 0, {}, 0, 0, 4};
-    ImageEncoder alpha(rgba_spec, {});
+    ImageEncoder alpha(rgba_spec, Resample16());
     auto ea = alpha.Encode(&rgb);
     EXPECT_FLOAT_EQ(0.9f, ea[2]);
     EXPECT_FLOAT_EQ(1.0f, ea[3]);  // opaque
+}
+
+TEST(ImageEncoderTest, KeepsSizeUpToTheLimitByDefault) {
+    ImageEncoder encoder({"cam", InputType::IMAGE}, {});
+    EXPECT_EQ(0u, encoder.OutputSize());  // unknown until the first image
+    EXPECT_TRUE(encoder.Encode(nullptr).empty());
+    EXPECT_EQ(64u, encoder.EmbeddingSize());
+    Value small = Gray(20, 12, [](size_t x, size_t y) { return float(x + y) / 30.0f; });
+    auto e = encoder.Encode(&small);
+    ASSERT_EQ(20u * 12u + 1, e.size());
+    EXPECT_FLOAT_EQ(float(3 + 2) / 30.0f, e[2 * 20 + 3]);  // pixel (3, 2) unchanged
+    encoder.Update(&small);
+    EXPECT_EQ(12u, encoder.EncodedHeight());
+    EXPECT_EQ(20u, encoder.EncodedWidth());
+
+    ImageEncoder large({"cam", InputType::IMAGE, 0, {}, 128, 96}, {});
+    EXPECT_EQ(48u, large.EncodedHeight());  // longer side scaled to 64
+    EXPECT_EQ(64u, large.EncodedWidth());
+    EXPECT_EQ(48u * 64u + 1, large.OutputSize());
+    Value big = Gray(128, 96, [](size_t, size_t) { return 0.5f; });
+    EXPECT_NEAR(0.5f, large.Encode(&big)[100], 1e-6f);
 }
 
 TEST(ImageEncoderTest, ChecksSizes) {
@@ -522,17 +608,17 @@ TEST(ObservationEncoderTest, FusesChannelsInSpecOrder) {
     EXPECT_EQ(3u, layout[1].offset);
     EXPECT_EQ(4u, layout[1].size);
     EXPECT_EQ(7u, layout[2].offset);
-    EXPECT_EQ(65u, layout[2].size);
+    EXPECT_EQ(1025u, layout[2].size);
     EXPECT_EQ(8u, layout[2].embedding_size);
-    EXPECT_EQ(72u, layout[3].offset);
+    EXPECT_EQ(1032u, layout[3].offset);
     EXPECT_EQ(1025u, layout[3].size);
-    EXPECT_EQ(1097u, encoder.OutputSize());
-    EXPECT_EQ(1097u, fused->size());
+    EXPECT_EQ(2057u, encoder.OutputSize());
+    EXPECT_EQ(2057u, fused->size());
 
     // Missing channels set their indicators
-    EXPECT_FLOAT_EQ(1.0f, (*fused)[3 + 3]);    // color missing
-    EXPECT_FLOAT_EQ(1.0f, (*fused)[7 + 64]);   // user missing
-    EXPECT_FLOAT_EQ(0.0f, (*fused)[72 + 1024]);
+    EXPECT_FLOAT_EQ(1.0f, (*fused)[3 + 3]);      // color missing
+    EXPECT_FLOAT_EQ(1.0f, (*fused)[7 + 1024]);   // user missing
+    EXPECT_FLOAT_EQ(0.0f, (*fused)[1032 + 1024]);
 }
 
 TEST(ObservationEncoderTest, PeekMatchesEncodeWithoutLearning) {
@@ -594,8 +680,14 @@ TEST(ObservationEncoderTest, AllInputTypesTogether) {
     };
     auto fused = encoder.Encode(observation);
     ASSERT_TRUE(fused.has_value());
-    size_t expected = 2 + 4 + 65 + 1025 + (2 * (2 * 16 + 3) + 2) + (16 * 16 * 3 + 1);
+    size_t expected = 2 + 4 + 1025 + 1025 + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
     EXPECT_EQ(expected, fused->size());
+    auto layout = encoder.Layout();
+    EXPECT_EQ(2u, layout.back().image_height);
+    EXPECT_EQ(2u, layout.back().image_width);
+    EXPECT_EQ(3u, layout.back().image_channels);
+    EXPECT_EQ(64u, layout.back().embedding_size);
+    EXPECT_EQ(0u, layout.front().image_height);
     for (float x : *fused) EXPECT_TRUE(std::isfinite(x));
 }
 

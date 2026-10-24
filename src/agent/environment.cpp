@@ -1,6 +1,7 @@
 // File: src/agent/environment.cpp
 #include "agent/environment.hpp"
 
+#include <cmath>
 #include <set>
 #include <stdexcept>
 
@@ -35,6 +36,7 @@ const char* ToString(OutputType type) {
         case OutputType::ACTION: return "ACTION";
         case OutputType::NEXT_OBSERVATION: return "NEXT_OBSERVATION";
         case OutputType::ANOMALY: return "ANOMALY";
+        case OutputType::CONTINUOUS_ACTION: return "CONTINUOUS_ACTION";
     }
     return "UNKNOWN";
 }
@@ -84,9 +86,11 @@ bool Accepts(OutputType output, FeedbackType feedback) {
     switch (feedback) {
         case FeedbackType::LABEL: return output == OutputType::CLASS;
         case FeedbackType::TARGET: return output == OutputType::VALUE;
-        case FeedbackType::REWARD: return output == OutputType::ACTION;
+        case FeedbackType::REWARD:
+            return output == OutputType::ACTION || output == OutputType::CONTINUOUS_ACTION;
         case FeedbackType::OUTCOME:
-            return output == OutputType::CLASS || output == OutputType::ACTION;
+            return output == OutputType::CLASS || output == OutputType::ACTION ||
+                   output == OutputType::CONTINUOUS_ACTION;
     }
     return false;
 }
@@ -156,8 +160,26 @@ std::vector<std::string> ValidationErrors(const EnvironmentSpec& spec) {
                 }
                 break;
         }
-        if (output.type == OutputType::VALUE && output.size == 0) {
+        bool sized = output.type == OutputType::VALUE || output.type == OutputType::CONTINUOUS_ACTION;
+        if (sized && output.size == 0) {
             errors.push_back(owner + ": size must be at least 1");
+        }
+        if (output.type == OutputType::CONTINUOUS_ACTION) {
+            bool defaults = output.low.empty() && output.high.empty();
+            if (!defaults && (output.low.size() != output.size || output.high.size() != output.size)) {
+                errors.push_back(owner + ": low and high must have size (" + std::to_string(output.size) +
+                                 ") values each, or both be empty for [-1, 1]");
+            } else {
+                for (size_t i = 0; i < output.low.size(); ++i) {
+                    if (!std::isfinite(output.low[i]) || !std::isfinite(output.high[i]) ||
+                        !(output.low[i] < output.high[i])) {
+                        errors.push_back(owner + ": bounds of value " + std::to_string(i) +
+                                         " must be finite with low < high");
+                    }
+                }
+            }
+        } else if (!output.low.empty() || !output.high.empty()) {
+            errors.push_back(owner + ": low and high are only allowed for CONTINUOUS_ACTION outputs");
         }
     }
 

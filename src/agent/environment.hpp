@@ -17,7 +17,7 @@ namespace agent {
 
 enum class InputType { NUMERIC, CATEGORICAL, TEXT, IMAGE, TIME_SERIES };
 enum class FeedbackType { LABEL, TARGET, REWARD, OUTCOME };
-enum class OutputType { CLASS, VALUE, ACTION, NEXT_OBSERVATION, ANOMALY };
+enum class OutputType { CLASS, VALUE, ACTION, NEXT_OBSERVATION, ANOMALY, CONTINUOUS_ACTION };
 
 const char* ToString(InputType type);
 const char* ToString(FeedbackType type);
@@ -60,8 +60,14 @@ struct OutputSpec {
     /// ACTION: action names (required). Empty for other types.
     std::vector<std::string> classes_or_actions;
 
-    /// VALUE only: number of values predicted
+    /// VALUE: number of values predicted. CONTINUOUS_ACTION: number of
+    /// action values (dimensions).
     size_t size{1};
+
+    /// CONTINUOUS_ACTION only: bounds of each action value (low < high).
+    /// Both empty = [-1, 1] in every dimension; otherwise `size` values each.
+    std::vector<float> low;
+    std::vector<float> high;
 };
 
 struct EnvironmentSpec {

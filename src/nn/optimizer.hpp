@@ -105,6 +105,10 @@ public:
     /// @param loss Loss after the last step (monitored by ReduceOnPlateau)
     /// @return Learning rate for the next step
     virtual float NextRate(size_t step, float base_rate, float current_rate, float loss) = 0;
+
+    /// Write / restore internal state (schedules without state write nothing)
+    virtual void SaveState(std::ostream&) const {}
+    virtual void LoadState(std::istream&) {}
 };
 
 /// base_rate * gamma^(step / step_size)
@@ -146,6 +150,8 @@ public:
     ReduceOnPlateau(float factor = 0.5f, size_t patience = 10, float min_rate = 1e-6f,
                     float threshold = 1e-4f);
     float NextRate(size_t step, float base_rate, float current_rate, float loss) override;
+    void SaveState(std::ostream& out) const override;
+    void LoadState(std::istream& in) override;
 
 private:
     float factor_;

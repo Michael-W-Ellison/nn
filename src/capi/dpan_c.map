@@ -1,0 +1,5 @@
+/* Symbols exported by libdpan_c on ELF platforms: the C API only */
+{
+  global: dpan_*;
+  local: *;
+};

@@ -14,6 +14,14 @@ option(DPAN_BUILD_CLI "Build the dpan_cli interactive tool (requires libyaml)" $
 option(DPAN_INSTALL "Generate install rules and the DPAN CMake package" ON)
 option(DPAN_WITH_SQLITE "Build the SQLite-backed PersistentBackend (requires SQLite3)" ON)
 option(DPAN_WITH_ZLIB "Compress archive-tier files with zlib (requires ZLIB)" ON)
+option(DPAN_WITH_BLAS "Use BLAS (cblas, e.g. OpenBLAS) for matrix products in the nn module" OFF)
+option(DPAN_BUILD_C_API "Build the C API shared library dpan_c" ON)
+option(DPAN_BUILD_PYTHON "Build the Python module dpan (requires Python 3 development files; uses pybind11)" OFF)
+
+# BLAS vendor: OpenBLAS unless the user chose one (FindBLAS BLA_VENDOR)
+if(DPAN_WITH_BLAS AND NOT DEFINED BLA_VENDOR)
+    set(BLA_VENDOR OpenBLAS)
+endif()
 
 if(DPAN_BUILD_CLI AND NOT DPAN_WITH_SQLITE)
     message(STATUS "DPAN_WITH_SQLITE is OFF: dpan_cli and its tests are not built")
@@ -53,9 +61,16 @@ add_subdirectory(src/memory)
 add_subdirectory(src/learning)
 add_subdirectory(src/nn)
 add_subdirectory(src/agent)
+if(DPAN_BUILD_C_API)
+    enable_language(C)  # the C API example and test are C
+    add_subdirectory(src/capi)
+endif()
 
 target_link_libraries(dpan_core PUBLIC Threads::Threads)
 
+# The module libraries are always static: core, storage, similarity and
+# discovery depend on each other, which CMake allows only between static
+# libraries. The shared library is the C API (dpan_c, DPAN_BUILD_C_API).
 set(DPAN_LIBRARIES
     dpan_core
     dpan_storage
@@ -100,6 +115,11 @@ if(DPAN_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Python bindings (after the tests: they register Python tests)
+if(DPAN_BUILD_PYTHON)
+    add_subdirectory(python)
+endif()
+
 # Example applications
 if(DPAN_BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -109,7 +129,12 @@ endif()
 if(DPAN_INSTALL)
     include(CMakePackageConfigHelpers)
 
-    install(TARGETS ${DPAN_LIBRARIES} dpan
+    set(DPAN_INSTALL_TARGETS ${DPAN_LIBRARIES} dpan)
+    if(TARGET dpan_c)
+        list(APPEND DPAN_INSTALL_TARGETS dpan_c)
+        install(FILES src/capi/dpan_c.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dpan/capi)
+    endif()
+    install(TARGETS ${DPAN_INSTALL_TARGETS}
         EXPORT DPANTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

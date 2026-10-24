@@ -51,6 +51,18 @@ target_link_libraries(neural_network_example dpan_nn dpan_storage)
 add_executable(agent_example agent/agent_example.cpp)
 target_link_libraries(agent_example dpan_agent)
 
+# Drop-in agent through the C API (compiled as C)
+if(TARGET dpan_c)
+    add_executable(agent_c_example c_api/agent_c_example.c)
+    target_link_libraries(agent_c_example dpan_c)
+    set_target_properties(agent_c_example PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+    if(DPAN_BUILD_TESTS)
+        add_test(NAME agent_c_example
+                 COMMAND agent_c_example ${CMAKE_CURRENT_BINARY_DIR}/agent_c_example.dpag)
+        set_tests_properties(agent_c_example PROPERTIES TIMEOUT 600)
+    endif()
+endif()
+
 # Make examples available as build targets
 add_custom_target(examples
     DEPENDS
@@ -62,6 +74,7 @@ add_custom_target(examples
         activation_propagation_demo
         neural_network_example
         agent_example
+        $<$<TARGET_EXISTS:dpan_c>:agent_c_example>
 )
 
 message(STATUS "Example applications configured:")

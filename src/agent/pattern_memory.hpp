@@ -72,6 +72,12 @@ public:
     void AddNegative(PatternID id, size_t class_output, size_t class_index);
     void AddValue(PatternID id, size_t value_output, const std::vector<float>& values);
 
+    /// Forget every pattern's labels (class weights) or targets for one
+    /// output, e.g. after a drift made them describe an old concept; those
+    /// patterns stop voting for the output until they receive new ones
+    void ForgetLabels(size_t class_output);
+    void ForgetValues(size_t value_output);
+
     /// Class probabilities voted by the k nearest patterns with labels for
     /// this output (nullopt if none have labels). horizon > 0 limits the
     /// vote to patterns that received one of the output's last `horizon`
@@ -116,6 +122,15 @@ public:
 
     /// Estimated memory use: patterns, projection and associations
     size_t MemoryBytes() const;
+
+    /// Write / restore all patterns, associations and counters. LoadState
+    /// expects a memory constructed with the same sizes and config.
+    /// @throws std::runtime_error on malformed data
+    void SaveState(std::ostream& out) const;
+    void LoadState(std::istream& in);
+
+    /// Largest pattern ID in use (0 if none)
+    PatternID::ValueType MaxPatternId() const;
 
     /// Change the byte budget (takes effect at the next insertion)
     void SetMemoryBudget(size_t bytes) { config_.memory_budget_bytes = bytes; }

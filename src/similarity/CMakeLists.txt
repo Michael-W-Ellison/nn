@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Similarity library
-add_library(dpan_similarity
+add_library(dpan_similarity STATIC
     similarity_metric.cpp
     geometric_similarity.cpp
     frequency_similarity.cpp

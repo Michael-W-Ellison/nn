@@ -69,6 +69,25 @@ void CheckGradients(Sequential& model, const Matrix& input, const Matrix& target
 // Matrix
 // ============================================================================
 
+TEST(ScheduleTest, ReduceOnPlateauStateRoundTrips) {
+    ReduceOnPlateau schedule(0.5f, 3, 1e-6f);
+    float rate = 1.0f;
+    for (float loss : {1.0f, 0.9f, 0.95f, 0.96f}) rate = schedule.NextRate(0, 1.0f, rate, loss);  // 2 steps without improvement
+    std::stringstream state;
+    schedule.SaveState(state);
+    ReduceOnPlateau restored(0.5f, 3, 1e-6f);
+    restored.LoadState(state);
+    ReduceOnPlateau fresh(0.5f, 3, 1e-6f);
+    float a = rate, b = rate, c = rate;
+    for (float loss : {0.97f, 0.97f, 0.97f, 0.97f, 0.5f, 0.6f}) {
+        a = schedule.NextRate(0, 1.0f, a, loss);
+        b = restored.NextRate(0, 1.0f, b, loss);
+        c = fresh.NextRate(0, 1.0f, c, loss);
+        EXPECT_EQ(a, b);
+    }
+    EXPECT_NE(a, c);  // without the state, the drop comes later
+}
+
 TEST(NNMatrixTest, MatMulVariantsAgreeWithExplicitTranspose) {
     Matrix a = RandomMatrix(3, 4, 1);
     Matrix b = RandomMatrix(4, 2, 2);

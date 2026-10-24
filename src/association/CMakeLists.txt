@@ -2,7 +2,7 @@
 #
 # Association Learning System module
 
-add_library(dpan_association
+add_library(dpan_association STATIC
     association_edge.cpp
     association_matrix.cpp
     co_occurrence_tracker.cpp

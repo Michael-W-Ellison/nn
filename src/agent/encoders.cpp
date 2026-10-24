@@ -1,6 +1,8 @@
 // File: src/agent/encoders.cpp
 #include "agent/encoders.hpp"
 
+#include "core/binary_io.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <locale>
@@ -82,8 +84,8 @@ void ValidateEncoderConfig(const EncoderConfig& config) {
     if (config.time_series_window == 0) {
         throw std::invalid_argument("EncoderConfig: time_series_window must be > 0");
     }
-    if (config.image_size == 0) {
-        throw std::invalid_argument("EncoderConfig: image_size must be > 0");
+    if (config.max_image_size == 0) {
+        throw std::invalid_argument("EncoderConfig: max_image_size must be > 0");
     }
 }
 
@@ -119,6 +121,33 @@ float RunningStats::Standardize(double x, float clip) const {
     }
     return Clip(deviation / sd, clip);
 }
+
+void RunningStats::Save(std::ostream& out) const {
+    io::Write<uint64_t>(out, count);
+    io::Write<double>(out, mean);
+    io::Write<double>(out, m2);
+}
+
+void RunningStats::Load(std::istream& in) {
+    count = io::Read<uint64_t>(in);
+    mean = io::Read<double>(in);
+    m2 = io::Read<double>(in);
+}
+
+namespace {
+
+void SaveStats(std::ostream& out, const std::vector<RunningStats>& stats) {
+    io::WriteSize(out, stats.size());
+    for (const auto& s : stats) s.Save(out);
+}
+
+std::vector<RunningStats> LoadStats(std::istream& in) {
+    std::vector<RunningStats> stats(io::ReadSize(in, 1u << 24));
+    for (auto& s : stats) s.Load(in);
+    return stats;
+}
+
+}  // namespace
 
 // ============================================================================
 // NumericEncoder
@@ -186,6 +215,16 @@ void NumericEncoder::Update(const Value* value) {
     }
 }
 
+void NumericEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, size_);
+    SaveStats(out, stats_);
+}
+
+void NumericEncoder::LoadState(std::istream& in) {
+    size_ = io::ReadSize(in, 1u << 24);
+    stats_ = LoadStats(in);
+}
+
 // ============================================================================
 // OneHotEncoder
 // ============================================================================
@@ -239,6 +278,17 @@ void OneHotEncoder::Update(const Value* value) {
     }
 }
 
+void OneHotEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, counts_.size());
+    for (uint64_t c : counts_) io::Write<uint64_t>(out, c);
+}
+
+void OneHotEncoder::LoadState(std::istream& in) {
+    size_t n = io::ReadSize(in, 1u << 24);
+    if (n != counts_.size()) throw std::runtime_error(Describe() + ": saved state has another category count");
+    for (auto& c : counts_) c = io::Read<uint64_t>(in);
+}
+
 // ============================================================================
 // HashedCategoryEncoder
 // ============================================================================
@@ -272,6 +322,9 @@ std::optional<std::string> HashedCategoryEncoder::Category(const Value& value) c
 }
 
 size_t HashedCategoryEncoder::Bucket(const std::string& category) const {
+    auto it = slots_.find(category);
+    if (it != slots_.end()) return it->second;
+    if (slot_names_.size() < buckets_) return slot_names_.size();
     return static_cast<size_t>(Hash(category, kCategorySeed) % buckets_);
 }
 
@@ -291,12 +344,45 @@ void HashedCategoryEncoder::Update(const Value* value) {
         return;
     }
     if (auto category = Category(*value)) {
+        if (slot_names_.size() < buckets_ && slots_.emplace(*category, slot_names_.size()).second) {
+            slot_names_.push_back(*category);
+        }
         auto it = observed_.find(*category);
         if (it != observed_.end()) {
             ++it->second;
         } else if (observed_.size() < max_tracked_) {
             observed_.emplace(*category, 1);
         }
+    }
+}
+
+void HashedCategoryEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, observed_.size());
+    for (const auto& [category, count] : observed_) {
+        io::WriteString(out, category);
+        io::Write<uint64_t>(out, count);
+    }
+    io::WriteSize(out, slot_names_.size());
+    for (const auto& category : slot_names_) io::WriteString(out, category);
+}
+
+void HashedCategoryEncoder::LoadState(std::istream& in) {
+    observed_.clear();
+    size_t n = io::ReadSize(in, 1u << 30);
+    for (size_t i = 0; i < n; ++i) {
+        std::string category = io::ReadString(in);
+        observed_[category] = io::Read<uint64_t>(in);
+    }
+    slots_.clear();
+    slot_names_.clear();
+    n = io::ReadSize(in, 1u << 30);
+    if (n > buckets_) throw std::runtime_error("HashedCategoryEncoder::LoadState: more slots than category_buckets");
+    for (size_t i = 0; i < n; ++i) {
+        std::string category = io::ReadString(in);
+        if (!slots_.emplace(category, i).second) {
+            throw std::runtime_error("HashedCategoryEncoder::LoadState: duplicate category");
+        }
+        slot_names_.push_back(std::move(category));
     }
 }
 
@@ -372,6 +458,10 @@ void TextEncoder::Update(const Value* value) {
     }
     ++texts_seen_;
 }
+
+void TextEncoder::SaveState(std::ostream& out) const { io::Write<uint64_t>(out, texts_seen_); }
+
+void TextEncoder::LoadState(std::istream& in) { texts_seen_ = io::Read<uint64_t>(in); }
 
 // ============================================================================
 // TimeSeriesEncoder
@@ -507,12 +597,52 @@ void TimeSeriesEncoder::ResetEpisode() {
     }
 }
 
+void TimeSeriesEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, series_);
+    io::WriteSize(out, state_.size());
+    for (const auto& current : state_) {
+        current.stats.Save(out);
+        io::WriteSize(out, current.values.size());
+        for (double v : current.values) io::Write<double>(out, v);
+    }
+}
+
+void TimeSeriesEncoder::LoadState(std::istream& in) {
+    series_ = io::ReadSize(in, 1u << 24);
+    state_.assign(io::ReadSize(in, 1u << 24), Series());
+    for (auto& current : state_) {
+        current.stats.Load(in);
+        size_t n = io::ReadSize(in, 1u << 24);
+        for (size_t i = 0; i < n; ++i) current.values.push_back(io::Read<double>(in));
+    }
+}
+
 // ============================================================================
 // ImageEncoder
 // ============================================================================
 
 ImageEncoder::ImageEncoder(InputSpec spec, const EncoderConfig& config)
-    : Encoder(std::move(spec)), side_(config.image_size), width_(spec_.width), height_(spec_.height) {}
+    : Encoder(std::move(spec)),
+      fixed_side_(config.image_size),
+      max_side_(config.max_image_size),
+      embedding_size_(config.image_embedding_size),
+      width_(spec_.width),
+      height_(spec_.height) {}
+
+std::pair<size_t, size_t> ImageEncoder::EncodedDims(size_t width, size_t height) const {
+    if (fixed_side_ > 0) return {fixed_side_, fixed_side_};
+    size_t longer = std::max(width, height);
+    if (longer <= max_side_) return {height, width};
+    double scale = static_cast<double>(max_side_) / static_cast<double>(longer);
+    return {std::max<size_t>(1, static_cast<size_t>(std::lround(height * scale))),
+            std::max<size_t>(1, static_cast<size_t>(std::lround(width * scale)))};
+}
+
+size_t ImageEncoder::OutputSize() const {
+    if (width_ == 0 && fixed_side_ == 0) return 0;  // size known with the first image
+    auto [h, w] = EncodedDims(width_, height_);
+    return h * w * spec_.image_channels + 1;
+}
 
 float ImageEncoder::ScaleFor(float max_pixel) {
     if (max_pixel <= 1.0f) return 1.0f;
@@ -545,12 +675,14 @@ const Image& ImageEncoder::Check(const Value& value) const {
 
 std::vector<float> ImageEncoder::Encode(const Value* value) const {
     const size_t channels = spec_.image_channels;
-    std::vector<float> out(OutputSize(), 0.0f);
     if (value == nullptr) {
-        out.back() = 1.0f;
+        std::vector<float> out(OutputSize(), 0.0f);
+        if (!out.empty()) out.back() = 1.0f;
         return out;
     }
     const Image& image = Check(*value);
+    const auto [out_h, out_w] = EncodedDims(image.width, image.height);
+    std::vector<float> out(out_h * out_w * channels + 1, 0.0f);
 
     float max_pixel = max_pixel_;
     for (float p : image.pixels) {
@@ -586,24 +718,29 @@ std::vector<float> ImageEncoder::Encode(const Value* value) const {
         }
     }
 
+    if (out_h == h && out_w == w) {
+        std::copy(converted.begin(), converted.end(), out.begin());
+        return out;
+    }
+
     // Resample: columns first, then rows
-    auto x_weights = AreaWeights(w, side_);
-    auto y_weights = AreaWeights(h, side_);
-    std::vector<float> columns(h * side_ * channels, 0.0f);
+    auto x_weights = AreaWeights(w, out_w);
+    auto y_weights = AreaWeights(h, out_h);
+    std::vector<float> columns(h * out_w * channels, 0.0f);
     for (size_t y = 0; y < h; ++y) {
-        for (size_t x = 0; x < side_; ++x) {
+        for (size_t x = 0; x < out_w; ++x) {
             for (const auto& [source_x, weight] : x_weights[x]) {
                 for (size_t k = 0; k < channels; ++k) {
-                    columns[(y * side_ + x) * channels + k] +=
+                    columns[(y * out_w + x) * channels + k] +=
                         weight * converted[(y * w + source_x) * channels + k];
                 }
             }
         }
     }
-    for (size_t y = 0; y < side_; ++y) {
+    for (size_t y = 0; y < out_h; ++y) {
         for (const auto& [source_y, weight] : y_weights[y]) {
-            for (size_t i = 0; i < side_ * channels; ++i) {
-                out[y * side_ * channels + i] += weight * columns[source_y * side_ * channels + i];
+            for (size_t i = 0; i < out_w * channels; ++i) {
+                out[y * out_w * channels + i] += weight * columns[source_y * out_w * channels + i];
             }
         }
     }
@@ -624,6 +761,18 @@ void ImageEncoder::Update(const Value* value) {
             max_pixel_ = std::max(max_pixel_, p);
         }
     }
+}
+
+void ImageEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, width_);
+    io::WriteSize(out, height_);
+    io::Write<float>(out, max_pixel_);
+}
+
+void ImageEncoder::LoadState(std::istream& in) {
+    width_ = io::ReadSize(in, 1u << 24);
+    height_ = io::ReadSize(in, 1u << 24);
+    max_pixel_ = io::Read<float>(in);
 }
 
 // ============================================================================
@@ -686,6 +835,12 @@ bool ObservationEncoder::Ready() const {
                        [](const auto& encoder) { return encoder->OutputSize() > 0; });
 }
 
+size_t ObservationEncoder::MaxNonZero() const {
+    size_t total = 0;
+    for (const auto& encoder : encoders_) total += encoder->MaxNonZero();
+    return total;
+}
+
 size_t ObservationEncoder::OutputSize() const {
     if (!Ready()) {
         return 0;
@@ -702,8 +857,13 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
     size_t offset = 0;
     for (const auto& encoder : encoders_) {
         size_t size = encoder->OutputSize();
-        layout.push_back({encoder->Spec().name, encoder->Spec().type, offset, size,
-                          encoder->EmbeddingSize()});
+        ChannelLayout channel{encoder->Spec().name, encoder->Spec().type, offset, size, encoder->EmbeddingSize()};
+        if (const auto* image = dynamic_cast<const ImageEncoder*>(encoder.get())) {
+            channel.image_height = image->EncodedHeight();
+            channel.image_width = image->EncodedWidth();
+            channel.image_channels = image->Spec().image_channels;
+        }
+        layout.push_back(channel);
         offset += size;
     }
     return layout;
@@ -752,6 +912,18 @@ std::optional<std::vector<float>> ObservationEncoder::Encode(const Observation& 
         encoders_[i]->Update(values[i]);
     }
     return fused;
+}
+
+void ObservationEncoder::SaveState(std::ostream& out) const {
+    io::WriteSize(out, encoders_.size());
+    for (const auto& encoder : encoders_) encoder->SaveState(out);
+}
+
+void ObservationEncoder::LoadState(std::istream& in) {
+    if (io::ReadSize(in, 1u << 20) != encoders_.size()) {
+        throw std::runtime_error("ObservationEncoder::LoadState: saved state has another channel count");
+    }
+    for (auto& encoder : encoders_) encoder->LoadState(in);
 }
 
 void ObservationEncoder::ResetEpisode() {

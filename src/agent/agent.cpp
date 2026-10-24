@@ -1,7 +1,9 @@
 // File: src/agent/agent.cpp
 #include "agent/agent.hpp"
+#include "agent/actor_critic.hpp"
 
 #include "agent/agent_testing.hpp"
+#include "core/binary_io.hpp"
 #include "agent/drift_detector.hpp"
 #include "agent/network.hpp"
 #include "agent/pattern_memory.hpp"
@@ -12,6 +14,8 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <cstdio>
+#include <fstream>
 #include <limits>
 #include <locale>
 #include <map>
@@ -68,6 +72,15 @@ void CheckConfig(const AgentConfig& c) {
     require(c.exploration_start >= 0.0f && c.exploration_start <= 1.0f && c.exploration_end >= 0.0f &&
                 c.exploration_end <= c.exploration_start,
             "exploration rates must satisfy 0 <= exploration_end <= exploration_start <= 1");
+    require(c.continuous_hidden > 0, "continuous_hidden must be > 0");
+    require(c.continuous_actor_learning_rate > 0.0f && c.continuous_critic_learning_rate > 0.0f,
+            "continuous learning rates must be > 0");
+    require(c.continuous_exploration_noise >= 0.0f && c.continuous_target_noise >= 0.0f &&
+                c.continuous_noise_clip >= 0.0f,
+            "continuous noise settings must be >= 0");
+    require(c.continuous_policy_delay > 0, "continuous_policy_delay must be > 0");
+    require(c.continuous_updates_per_step > 0, "continuous_updates_per_step must be > 0");
+    require(c.continuous_tau > 0.0f && c.continuous_tau <= 1.0f, "continuous_tau must be in (0, 1]");
     ValidateEncoderConfig(c.encoder);
 }
 
@@ -118,6 +131,303 @@ float Percentile(const std::deque<float>& baseline, float x) {
     return static_cast<float>(below / static_cast<double>(baseline.size()));
 }
 
+// ============================================================================
+// Checkpoint format helpers
+// ============================================================================
+
+constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
+// 2: image settings in the config; embeddings stored as layer sequences
+// 3: CONTINUOUS_ACTION outputs (bounds in the spec, TD3 settings, actor-critics,
+//    continuous actions in samples and pending steps)
+// 4: continuous_updates_per_step in the config
+// 5: slots of open-vocabulary categories in the encoder state; pending steps
+//    without a dense copy of the fused vector
+constexpr uint32_t kCheckpointVersion = 5;
+
+template <typename T>
+void WriteVector(std::ostream& out, const std::vector<T>& values) {
+    io::WriteSize(out, values.size());
+    for (const T& v : values) io::Write<T>(out, v);
+}
+
+template <typename T>
+std::vector<T> ReadVector(std::istream& in) {
+    std::vector<T> values(io::ReadSize(in, 1u << 30));
+    for (T& v : values) v = io::Read<T>(in);
+    return values;
+}
+
+void WriteStrings(std::ostream& out, const std::vector<std::string>& values) {
+    io::WriteSize(out, values.size());
+    for (const auto& v : values) io::WriteString(out, v);
+}
+
+std::vector<std::string> ReadStrings(std::istream& in) {
+    std::vector<std::string> values(io::ReadSize(in, 1u << 24));
+    for (auto& v : values) v = io::ReadString(in, 1u << 20);
+    return values;
+}
+
+template <typename Enum>
+Enum ReadEnum(std::istream& in, Enum last) {
+    auto value = io::Read<uint8_t>(in);
+    if (value > static_cast<uint8_t>(last)) throw std::runtime_error("Agent checkpoint: bad enum value");
+    return static_cast<Enum>(value);
+}
+
+void SaveSpec(std::ostream& out, const EnvironmentSpec& spec) {
+    io::WriteSize(out, spec.inputs.size());
+    for (const auto& i : spec.inputs) {
+        io::WriteString(out, i.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(i.type));
+        io::WriteSize(out, i.size);
+        WriteStrings(out, i.categories);
+        io::WriteSize(out, i.width);
+        io::WriteSize(out, i.height);
+        io::WriteSize(out, i.image_channels);
+    }
+    io::WriteSize(out, spec.feedback.size());
+    for (const auto& f : spec.feedback) {
+        io::WriteString(out, f.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(f.type));
+        io::WriteString(out, f.output);
+    }
+    io::WriteSize(out, spec.outputs.size());
+    for (const auto& o : spec.outputs) {
+        io::WriteString(out, o.name);
+        io::Write<uint8_t>(out, static_cast<uint8_t>(o.type));
+        WriteStrings(out, o.classes_or_actions);
+        io::WriteSize(out, o.size);
+        WriteVector(out, o.low);
+        WriteVector(out, o.high);
+    }
+}
+
+EnvironmentSpec LoadSpec(std::istream& in) {
+    EnvironmentSpec spec;
+    spec.inputs.resize(io::ReadSize(in, 1u << 16));
+    for (auto& i : spec.inputs) {
+        i.name = io::ReadString(in, 1u << 16);
+        i.type = ReadEnum(in, InputType::TIME_SERIES);
+        i.size = io::ReadSize(in);
+        i.categories = ReadStrings(in);
+        i.width = io::ReadSize(in);
+        i.height = io::ReadSize(in);
+        i.image_channels = io::ReadSize(in);
+    }
+    spec.feedback.resize(io::ReadSize(in, 1u << 16));
+    for (auto& f : spec.feedback) {
+        f.name = io::ReadString(in, 1u << 16);
+        f.type = ReadEnum(in, FeedbackType::OUTCOME);
+        f.output = io::ReadString(in, 1u << 16);
+    }
+    spec.outputs.resize(io::ReadSize(in, 1u << 16));
+    for (auto& o : spec.outputs) {
+        o.name = io::ReadString(in, 1u << 16);
+        o.type = ReadEnum(in, OutputType::CONTINUOUS_ACTION);
+        o.classes_or_actions = ReadStrings(in);
+        o.size = io::ReadSize(in);
+        o.low = ReadVector<float>(in);
+        o.high = ReadVector<float>(in);
+    }
+    return spec;
+}
+
+void SaveConfig(std::ostream& out, const AgentConfig& c) {
+    io::Write<uint32_t>(out, c.seed);
+    io::Write<float>(out, c.learning_rate);
+    io::Write<float>(out, c.min_learning_rate);
+    io::WriteSize(out, c.min_trunk_width);
+    io::WriteSize(out, c.max_trunk_width);
+    io::Write<float>(out, c.gradient_clip_norm);
+    io::WriteSize(out, c.train_every);
+    io::WriteSize(out, c.batch_size);
+    io::Write<float>(out, c.new_sample_share);
+    io::WriteSize(out, c.replay_capacity);
+    io::WriteSize(out, c.cold_start_samples);
+    io::WriteSize(out, c.feedback_timeout);
+    io::WriteSize(out, c.plateau_interval);
+    io::WriteSize(out, c.plateau_patience);
+    io::Write<float>(out, c.plateau_factor);
+    io::WriteSize(out, c.action_train_every);
+    io::Write<float>(out, c.action_learning_rate);
+    io::WriteSize(out, c.action_min_trunk_width);
+    io::WriteSize(out, c.action_return_steps);
+    io::Write<float>(out, c.discount);
+    io::WriteSize(out, c.target_sync);
+    io::Write<float>(out, c.exploration_start);
+    io::Write<float>(out, c.exploration_end);
+    io::WriteSize(out, c.exploration_steps);
+    io::Write<uint8_t>(out, c.detect_drift ? 1 : 0);
+    io::Write<double>(out, c.drift_delta);
+    io::Write<double>(out, c.drift_threshold);
+    io::WriteSize(out, c.drift_warmup);
+    io::Write<float>(out, c.drift_learning_rate_factor);
+    io::Write<float>(out, c.drift_new_sample_share);
+    io::WriteSize(out, c.drift_recent_window);
+    io::WriteSize(out, c.drift_recovery_max_samples);
+    io::WriteSize(out, c.snapshot_interval);
+    io::Write<float>(out, c.divergence_loss);
+    io::Write<uint8_t>(out, c.grow_capacity ? 1 : 0);
+    io::WriteSize(out, c.capacity_min_samples);
+    io::Write<float>(out, c.capacity_growth);
+    io::WriteSize(out, c.memory_budget_bytes);
+    io::WriteSize(out, c.pattern_capacity);
+    io::WriteSize(out, c.pattern_dimension);
+    io::WriteSize(out, c.neighbors);
+    io::Write<float>(out, c.merge_ratio);
+    io::WriteSize(out, c.pattern_label_horizon);
+    io::Write<float>(out, c.quality_rate);
+    io::WriteSize(out, c.anomaly_baseline);
+    io::WriteSize(out, c.max_classes);
+    io::Write<float>(out, c.encoder.clip_sigma);
+    io::Write<uint64_t>(out, c.encoder.statistics_limit);
+    io::WriteSize(out, c.encoder.category_buckets);
+    io::WriteSize(out, c.encoder.category_embedding_size);
+    io::WriteSize(out, c.encoder.text_buckets);
+    io::WriteSize(out, c.encoder.text_embedding_size);
+    io::WriteSize(out, c.encoder.time_series_window);
+    io::WriteSize(out, c.encoder.image_size);
+    io::WriteSize(out, c.encoder.max_image_size);
+    io::WriteSize(out, c.encoder.image_embedding_size);
+    io::WriteSize(out, c.encoder.max_tracked_categories);
+    io::WriteSize(out, c.continuous_hidden);
+    io::Write<float>(out, c.continuous_actor_learning_rate);
+    io::Write<float>(out, c.continuous_critic_learning_rate);
+    io::WriteSize(out, c.continuous_random_steps);
+    io::Write<float>(out, c.continuous_exploration_noise);
+    io::Write<float>(out, c.continuous_target_noise);
+    io::Write<float>(out, c.continuous_noise_clip);
+    io::WriteSize(out, c.continuous_policy_delay);
+    io::Write<float>(out, c.continuous_tau);
+    io::WriteSize(out, c.continuous_updates_per_step);
+}
+
+AgentConfig LoadConfig(std::istream& in) {
+    AgentConfig c;
+    c.seed = io::Read<uint32_t>(in);
+    c.learning_rate = io::Read<float>(in);
+    c.min_learning_rate = io::Read<float>(in);
+    c.min_trunk_width = io::ReadSize(in);
+    c.max_trunk_width = io::ReadSize(in);
+    c.gradient_clip_norm = io::Read<float>(in);
+    c.train_every = io::ReadSize(in);
+    c.batch_size = io::ReadSize(in);
+    c.new_sample_share = io::Read<float>(in);
+    c.replay_capacity = io::ReadSize(in);
+    c.cold_start_samples = io::ReadSize(in);
+    c.feedback_timeout = io::ReadSize(in);
+    c.plateau_interval = io::ReadSize(in);
+    c.plateau_patience = io::ReadSize(in);
+    c.plateau_factor = io::Read<float>(in);
+    c.action_train_every = io::ReadSize(in);
+    c.action_learning_rate = io::Read<float>(in);
+    c.action_min_trunk_width = io::ReadSize(in);
+    c.action_return_steps = io::ReadSize(in);
+    c.discount = io::Read<float>(in);
+    c.target_sync = io::ReadSize(in);
+    c.exploration_start = io::Read<float>(in);
+    c.exploration_end = io::Read<float>(in);
+    c.exploration_steps = io::ReadSize(in);
+    c.detect_drift = io::Read<uint8_t>(in) != 0;
+    c.drift_delta = io::Read<double>(in);
+    c.drift_threshold = io::Read<double>(in);
+    c.drift_warmup = io::ReadSize(in);
+    c.drift_learning_rate_factor = io::Read<float>(in);
+    c.drift_new_sample_share = io::Read<float>(in);
+    c.drift_recent_window = io::ReadSize(in);
+    c.drift_recovery_max_samples = io::ReadSize(in);
+    c.snapshot_interval = io::ReadSize(in);
+    c.divergence_loss = io::Read<float>(in);
+    c.grow_capacity = io::Read<uint8_t>(in) != 0;
+    c.capacity_min_samples = io::ReadSize(in);
+    c.capacity_growth = io::Read<float>(in);
+    c.memory_budget_bytes = io::ReadSize(in);
+    c.pattern_capacity = io::ReadSize(in);
+    c.pattern_dimension = io::ReadSize(in);
+    c.neighbors = io::ReadSize(in);
+    c.merge_ratio = io::Read<float>(in);
+    c.pattern_label_horizon = io::ReadSize(in);
+    c.quality_rate = io::Read<float>(in);
+    c.anomaly_baseline = io::ReadSize(in);
+    c.max_classes = io::ReadSize(in);
+    c.encoder.clip_sigma = io::Read<float>(in);
+    c.encoder.statistics_limit = io::Read<uint64_t>(in);
+    c.encoder.category_buckets = io::ReadSize(in);
+    c.encoder.category_embedding_size = io::ReadSize(in);
+    c.encoder.text_buckets = io::ReadSize(in);
+    c.encoder.text_embedding_size = io::ReadSize(in);
+    c.encoder.time_series_window = io::ReadSize(in);
+    c.encoder.image_size = io::ReadSize(in);
+    c.encoder.max_image_size = io::ReadSize(in);
+    c.encoder.image_embedding_size = io::ReadSize(in);
+    c.encoder.max_tracked_categories = io::ReadSize(in);
+    c.continuous_hidden = io::ReadSize(in);
+    c.continuous_actor_learning_rate = io::Read<float>(in);
+    c.continuous_critic_learning_rate = io::Read<float>(in);
+    c.continuous_random_steps = io::ReadSize(in);
+    c.continuous_exploration_noise = io::Read<float>(in);
+    c.continuous_target_noise = io::Read<float>(in);
+    c.continuous_noise_clip = io::Read<float>(in);
+    c.continuous_policy_delay = io::ReadSize(in);
+    c.continuous_tau = io::Read<float>(in);
+    c.continuous_updates_per_step = io::ReadSize(in);
+    return c;
+}
+
+void SaveQuality(std::ostream& out, const Quality& q) {
+    io::Write<float>(out, q.value);
+    io::Write<uint64_t>(out, q.count);
+}
+
+Quality LoadQuality(std::istream& in) {
+    Quality q;
+    q.value = io::Read<float>(in);
+    q.count = io::Read<uint64_t>(in);
+    return q;
+}
+
+void SaveOptional(std::ostream& out, const std::optional<StepId>& value) {
+    io::Write<uint8_t>(out, value ? 1 : 0);
+    io::Write<uint64_t>(out, value.value_or(0));
+}
+
+std::optional<StepId> LoadOptional(std::istream& in) {
+    bool has = io::Read<uint8_t>(in) != 0;
+    uint64_t value = io::Read<uint64_t>(in);
+    return has ? std::optional<StepId>(value) : std::nullopt;
+}
+
+void SaveIndexMap(std::ostream& out, const std::map<size_t, size_t>& values) {
+    io::WriteSize(out, values.size());
+    for (const auto& [key, value] : values) {
+        io::WriteSize(out, key);
+        io::WriteSize(out, value);
+    }
+}
+
+std::map<size_t, size_t> LoadIndexMap(std::istream& in) {
+    std::map<size_t, size_t> values;
+    size_t n = io::ReadSize(in, 1u << 20);
+    for (size_t i = 0; i < n; ++i) {
+        size_t key = io::ReadSize(in);
+        values[key] = io::ReadSize(in);
+    }
+    return values;
+}
+
+void SaveRandom(std::ostream& out, const std::mt19937& rng) {
+    std::ostringstream text;
+    text << rng;
+    io::WriteString(out, text.str());
+}
+
+void LoadRandom(std::istream& in, std::mt19937& rng) {
+    std::istringstream text(io::ReadString(in, 1u << 20));
+    text >> rng;
+    if (!text) throw std::runtime_error("Agent checkpoint: bad random state");
+}
+
 }  // namespace
 
 struct Agent::Impl {
@@ -126,6 +436,7 @@ struct Agent::Impl {
         int head{-1};        // network head
         int class_slot{-1};  // index among CLASS outputs (pattern memory)
         int value_slot{-1};  // index among VALUE outputs
+        int continuous_slot{-1};  // index among CONTINUOUS_ACTION outputs (actor_critics)
         bool learn_classes{false};
         bool outcome_only{false};  // CLASS trained by OUTCOME feedback only
         std::vector<std::string> classes;  // class names, or action names for ACTION
@@ -161,13 +472,13 @@ struct Agent::Impl {
     struct Pending {
         StepId step{0};
         bool encoded{false};
-        std::vector<float> fused;
         std::vector<float> point;
         std::vector<float> observed;  // raw NUMERIC/TIME_SERIES values
         PatternID pattern;
         SamplePtr sample;
         std::map<size_t, size_t> predicted;  // output -> class returned by Predict
         std::map<size_t, size_t> actions;    // output -> action chosen by Act
+        std::map<size_t, std::vector<float>> continuous_actions;  // output -> action chosen by ActContinuous
         bool transition_complete{false};     // next state or terminal known (ACTION)
         float anomaly{0.5f};
         float anomaly_neural_weight{0.0f};
@@ -218,6 +529,9 @@ struct Agent::Impl {
                     state.action_ids.push_back(PatternID::Generate());
                 }
                 has_actions = true;
+            } else if (state.spec->type == OutputType::CONTINUOUS_ACTION) {
+                state.continuous_slot = static_cast<int>(continuous_outputs.size());
+                continuous_outputs.push_back(i);
             }
             outputs.push_back(std::move(state));
         }
@@ -239,8 +553,12 @@ struct Agent::Impl {
         if (logger) logger(level, message);
     }
 
-    void BuildModels() {
-        auto layout = encoder.Layout();
+    /// Positions of NUMERIC/TIME_SERIES values and one head per output
+    /// (needs the input sizes); used when building and when loading
+    std::vector<HeadSpec> PrepareLayout() {
+        observed_channels.clear();
+        observed_offsets.clear();
+        observed_size = 0;
         for (size_t i = 0; i < spec.inputs.size(); ++i) {
             const auto& input = spec.inputs[i];
             if (input.type == InputType::NUMERIC || input.type == InputType::TIME_SERIES) {
@@ -275,6 +593,23 @@ struct Agent::Impl {
                     break;
             }
         }
+        return heads;
+    }
+
+    std::unique_ptr<PatternMemory> MakePatternMemory() const {
+        PatternMemory::Config memory;
+        memory.dimension = config.pattern_dimension;
+        memory.memory_budget_bytes = 1;  // set by AllocateMemory()
+        memory.capacity = config.pattern_capacity;
+        memory.merge_ratio = config.merge_ratio;
+        memory.seed = config.seed + 5;
+        return std::make_unique<PatternMemory>(encoder.OutputSize(), class_outputs, value_sizes, observed_size,
+                                               memory);
+    }
+
+    void BuildModels() {
+        auto layout = encoder.Layout();
+        auto heads = PrepareLayout();
         if (!heads.empty()) {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
                                                      config.min_trunk_width, config.max_trunk_width);
@@ -285,14 +620,21 @@ struct Agent::Impl {
             autoencoder = std::make_unique<AnomalyAutoencoder>(encoder.OutputSize(), config.learning_rate,
                                                                config.seed + 3);
         }
-        PatternMemory::Config memory;
-        memory.dimension = config.pattern_dimension;
-        memory.memory_budget_bytes = 1;  // set by AllocateMemory()
-        memory.capacity = config.pattern_capacity;
-        memory.merge_ratio = config.merge_ratio;
-        memory.seed = config.seed + 5;
-        patterns = std::make_unique<PatternMemory>(encoder.OutputSize(), class_outputs, value_sizes,
-                                                   observed_size, memory);
+        actor_critics.clear();
+        for (size_t index : continuous_outputs) {
+            ActorCriticConfig ac;
+            ac.hidden = config.continuous_hidden;
+            ac.actor_learning_rate = config.continuous_actor_learning_rate;
+            ac.critic_learning_rate = config.continuous_critic_learning_rate;
+            ac.tau = config.continuous_tau;
+            ac.target_noise = config.continuous_target_noise;
+            ac.noise_clip = config.continuous_noise_clip;
+            ac.policy_delay = config.continuous_policy_delay;
+            ac.seed = config.seed + 100 + static_cast<uint32_t>(actor_critics.size()) * 10;
+            actor_critics.push_back(
+                std::make_unique<ActorCritic>(encoder.OutputSize(), outputs[index].spec->size, ac));
+        }
+        patterns = MakePatternMemory();
         AllocateMemory();
         TakeSnapshot();
         Log(LogLevel::INFO, "Inputs ready: fused size " + std::to_string(encoder.OutputSize()) +
@@ -325,18 +667,26 @@ struct Agent::Impl {
     size_t ModelBytes() const {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
         size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
-        return parameters * 4 * sizeof(float) * copies;
+        size_t bytes = parameters * 4 * sizeof(float) * copies;
+        // Actor-critics: live, target and snapshot copies
+        for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
+        return bytes;
     }
 
     /// Upper bound for one pending step, including its sample (which may
     /// have left the replay buffer): dense fused vectors for the state and
     /// the next state, and one target per head
     size_t PendingEntryBytes() const {
-        size_t fused = encoder.OutputSize();
+        // The fused vectors are stored sparsely: at most MaxNonZero() values
+        size_t fused = encoder.MaxNonZero();
         size_t heads = network ? network->HeadCount() : 0;
-        size_t entry = sizeof(Pending) + 256 + (fused + config.pattern_dimension + observed_size) * sizeof(float);
+        size_t entry = sizeof(Pending) + 256 + (config.pattern_dimension + observed_size) * sizeof(float);
+        size_t continuous = 0;
+        for (size_t index : continuous_outputs) {
+            continuous += sizeof(ContinuousTarget) + 64 + 3 * outputs[index].spec->size * sizeof(float);
+        }
         size_t sample = sizeof(Sample) + 32 + 2 * fused * (sizeof(uint32_t) + sizeof(float)) +
-                        heads * sizeof(HeadTarget) + (observed_size + 16) * sizeof(float);
+                        heads * sizeof(HeadTarget) + (observed_size + 16) * sizeof(float) + continuous;
         return entry + sample;
     }
 
@@ -349,7 +699,8 @@ struct Agent::Impl {
             if (sample && !sample->in_replay && counted.insert(sample.get()).second) bytes += sample->MemoryBytes();
         };
         for (const auto& entry : pending) {
-            bytes += sizeof(Pending) + 256 + (entry.fused.capacity() + entry.point.capacity() + entry.observed.capacity()) * sizeof(float);
+            bytes += sizeof(Pending) + 256 + (entry.point.size() + entry.observed.size()) * sizeof(float);
+            for (const auto& [index, action] : entry.continuous_actions) bytes += 64 + action.size() * sizeof(float);
             add_sample(entry.sample);
         }
         for (const auto& sample : newest) add_sample(sample);
@@ -437,6 +788,13 @@ struct Agent::Impl {
 
     // ------------------------------------------------------------ pending
 
+    /// The step's fused vector as a one-row matrix (from its sample)
+    nn::Matrix FusedRow(const Pending& entry) const {
+        nn::Matrix row(1, encoder.OutputSize());
+        entry.sample->Fill(row.Data(), row.Cols());
+        return row;
+    }
+
     Pending& FindPending(StepId step) const {
         if (step == 0 || step > steps) {
             throw std::out_of_range("Unknown step " + std::to_string(step));
@@ -459,12 +817,17 @@ struct Agent::Impl {
     // -------------------------------------------------------------- safety
 
     bool ModelsFinite() {
+        for (auto& ac : actor_critics) {
+            if (!ac->AllFinite()) return false;
+        }
         return (!network || network->AllFinite()) && (!autoencoder || autoencoder->AllFinite());
     }
 
     void TakeSnapshot() {
         if (network) snapshot_network = std::make_unique<AgentNetwork>(*network);
         if (autoencoder) snapshot_autoencoder = std::make_unique<AnomalyAutoencoder>(*autoencoder);
+        snapshot_actor_critics.clear();
+        for (const auto& ac : actor_critics) snapshot_actor_critics.push_back(std::make_unique<ActorCritic>(*ac));
         last_snapshot = steps;
     }
 
@@ -474,6 +837,9 @@ struct Agent::Impl {
             if (target_network) target_network = std::make_unique<AgentNetwork>(*snapshot_network);
         }
         if (snapshot_autoencoder) autoencoder = std::make_unique<AnomalyAutoencoder>(*snapshot_autoencoder);
+        for (size_t i = 0; i < snapshot_actor_critics.size() && i < actor_critics.size(); ++i) {
+            actor_critics[i] = std::make_unique<ActorCritic>(*snapshot_actor_critics[i]);
+        }
         std::fill(head_loss.begin(), head_loss.end(), kNaN);
         ApplyLearningRate();
         rollbacks++;
@@ -610,6 +976,11 @@ struct Agent::Impl {
                     return std::all_of(sample.targets.begin(), sample.targets.end(),
                                        [](const HeadTarget& t) { return t.Empty(); });
                 });
+            // The same for the pattern side: its stored labels and target
+            // means follow the old concept, and they adapt to new ones only
+            // as fast as each pattern receives new feedback
+            if (out.spec->type == OutputType::CLASS) patterns->ForgetLabels(static_cast<size_t>(out.class_slot));
+            else patterns->ForgetValues(static_cast<size_t>(out.value_slot));
         }
         // Restart the learning-rate schedule (the loss rose because the data
         // changed, not because training stalled) and raise the rate
@@ -656,7 +1027,7 @@ struct Agent::Impl {
             network->Head(static_cast<size_t>(out.head)).size == 0) {
             return std::nullopt;
         }
-        auto probabilities = Softmax(network->Infer(Row(entry.fused), out.head));
+        auto probabilities = Softmax(network->Infer(FusedRow(entry), out.head));
         probabilities.resize(out.classes.size(), 0.0f);
         return probabilities;
     }
@@ -675,14 +1046,14 @@ struct Agent::Impl {
 
     std::optional<std::vector<float>> NeuralValue(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(Row(entry.fused), out.head).Row(0);
+        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], out.target_stats[i]);
         return z;
     }
 
     std::optional<std::vector<float>> NeuralNext(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(Row(entry.fused), out.head).Row(0);
+        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], ObservedStats(i));
         return z;
     }
@@ -699,7 +1070,7 @@ struct Agent::Impl {
     /// Q-values once the head is past the cold start
     std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples < config.cold_start_samples) return std::nullopt;
-        return network->Infer(Row(entry.fused), static_cast<size_t>(out.head)).Row(0);
+        return network->Infer(FusedRow(entry), static_cast<size_t>(out.head)).Row(0);
     }
 
     /// Highest Q-value; ties (and the cold start) decided by association
@@ -755,14 +1126,76 @@ struct Agent::Impl {
         return out.classes[action];
     }
 
+    // ------------------------------------------------- continuous actions
+
+    /// Bound of dimension i of a CONTINUOUS_ACTION output ([-1, 1] by default)
+    static float Low(const OutputSpec& spec, size_t i) { return spec.low.empty() ? -1.0f : spec.low[i]; }
+    static float High(const OutputSpec& spec, size_t i) { return spec.high.empty() ? 1.0f : spec.high[i]; }
+
+    /// [-1, 1] -> the output's bounds
+    static std::vector<float> ToBounds(const OutputSpec& spec, const float* normalized) {
+        std::vector<float> action(spec.size);
+        for (size_t i = 0; i < spec.size; ++i) {
+            action[i] = Low(spec, i) + (normalized[i] + 1.0f) * 0.5f * (High(spec, i) - Low(spec, i));
+        }
+        return action;
+    }
+
+    /// Exploration noise std now (1 during the uniform random start)
+    float ContinuousExploration(const OutputState& out) const {
+        return out.acts < config.continuous_random_steps ? 1.0f : config.continuous_exploration_noise;
+    }
+
+    std::vector<float> ActContinuousLocked(StepId step, size_t index, bool explore) {
+        Pending& entry = FindPending(step);
+        OutputState& out = outputs[index];
+        auto existing = entry.continuous_actions.find(index);
+        if (existing != entry.continuous_actions.end()) return existing->second;
+
+        const size_t n = out.spec->size;
+        std::vector<float> normalized(n);
+        std::uniform_real_distribution<float> uniform(-1.0f, 1.0f);
+        bool random = !entry.encoded || (explore && out.acts < config.continuous_random_steps);
+        if (explore) out.acts++;
+        if (random) {
+            for (auto& a : normalized) a = uniform(rng);
+        } else {
+            const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
+            nn::Matrix greedy = ac.Act(FusedRow(entry));
+            std::normal_distribution<float> noise(0.0f, config.continuous_exploration_noise);
+            for (size_t i = 0; i < n; ++i) {
+                float a = greedy(0, i);
+                if (explore && config.continuous_exploration_noise > 0.0f) a += noise(rng);
+                normalized[i] = std::clamp(a, -1.0f, 1.0f);
+            }
+        }
+        std::vector<float> action = ToBounds(*out.spec, normalized.data());
+        entry.continuous_actions[index] = action;
+        if (entry.encoded) {
+            entry.sample->continuous[static_cast<size_t>(out.continuous_slot)].action = std::move(normalized);
+            last_acted_step = step;
+        }
+        return action;
+    }
+
+    static bool HasActions(const Pending& entry) {
+        return !entry.actions.empty() || !entry.continuous_actions.empty();
+    }
+
     /// A transition becomes trainable once its next state or its end is known
     void CompleteTransition(Pending& entry) {
-        if (entry.actions.empty() || !entry.encoded) return;
+        if (!HasActions(entry) || !entry.encoded) return;
         if (!entry.transition_complete) {
             entry.transition_complete = true;
             for (const auto& [index, action] : entry.actions) outputs[index].samples++;
+            for (const auto& [index, action] : entry.continuous_actions) outputs[index].samples++;
         }
         MakeTrainable(entry.sample);
+    }
+
+    void LearnContinuousReward(Pending& entry, OutputState& out, float reward) {
+        entry.sample->continuous[static_cast<size_t>(out.continuous_slot)].reward += reward;
+        if (entry.transition_complete) MakeTrainable(entry.sample);
     }
 
     void LearnReward(Pending& entry, OutputState& out, size_t index, float reward) {
@@ -832,6 +1265,17 @@ struct Agent::Impl {
                 prediction.confidence = std::min(1.0f, static_cast<float>(pattern_baseline.size()) /
                                                            static_cast<float>(config.anomaly_baseline));
                 break;
+            case OutputType::CONTINUOUS_ACTION: {
+                const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
+                nn::Matrix state = FusedRow(entry);
+                nn::Matrix greedy = ac.Act(state);
+                prediction.available = true;
+                prediction.values = ToBounds(*out.spec, greedy.Data());
+                prediction.score = ac.Value(state, greedy)[0];
+                prediction.confidence = 1.0f - std::min(1.0f, ContinuousExploration(out));
+                prediction.neural_weight = ac.Updates() > 0 ? 1.0f : 0.0f;
+                break;
+            }
             case OutputType::ACTION: {
                 size_t greedy = GreedyAction(entry, out, nullptr);
                 float epsilon = Exploration(out);
@@ -961,6 +1405,11 @@ struct Agent::Impl {
             throw std::logic_error("Feedback '" + name + "' for step " + std::to_string(step) +
                                    ": no action of output '" + out.spec->name + "' was chosen for it (call Act first)");
         }
+        if (out.spec->type == OutputType::CONTINUOUS_ACTION && entry.continuous_actions.count(fb->second.output) == 0) {
+            throw std::logic_error("Feedback '" + name + "' for step " + std::to_string(step) +
+                                   ": no action of output '" + out.spec->name +
+                                   "' was chosen for it (call ActContinuous first)");
+        }
 
         if (!entry.encoded) {
             ignored_feedback++;
@@ -970,6 +1419,10 @@ struct Agent::Impl {
 
         if (out.spec->type == OutputType::ACTION) {
             LearnReward(entry, out, fb->second.output, type == FeedbackType::OUTCOME ? (correct ? 1.0f : -1.0f) : reward);
+            return;
+        }
+        if (out.spec->type == OutputType::CONTINUOUS_ACTION) {
+            LearnContinuousReward(entry, out, type == FeedbackType::OUTCOME ? (correct ? 1.0f : -1.0f) : reward);
             return;
         }
 
@@ -1034,19 +1487,21 @@ struct Agent::Impl {
         entry.step = step;
         if (fused && patterns) {
             entry.encoded = true;
-            entry.fused = std::move(*fused);
             entry.observed = Observed(observation);
-            entry.point = patterns->Project(entry.fused);
+            entry.point = patterns->Project(*fused);
 
             auto placement = patterns->Insert(entry.point, step, entry.observed);
             entry.pattern = placement.id;
-            // Distance to the nearest pattern before this state was stored
-            if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
 
+            // The fused vector is kept once, sparsely, in the sample
             entry.sample = std::make_shared<Sample>();
             entry.sample->step = step;
-            entry.sample->SetFused(entry.fused);
+            entry.sample->SetFused(*fused);
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
+            entry.sample->continuous.resize(actor_critics.size());
+
+            // Distance to the nearest pattern before this state was stored
+            if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
 
             if (has_anomaly) {
                 entry.sample->reconstruct = true;
@@ -1059,7 +1514,7 @@ struct Agent::Impl {
                 if (previous && previous->encoded) {
                     patterns->RecordTransition(previous->pattern, entry.pattern);
                     if (next_output >= 0) LearnNext(*previous, entry.observed);
-                    if (!previous->actions.empty()) {
+                    if (HasActions(*previous)) {
                         previous->sample->SetNext(*entry.sample);
                         previous->sample->next_sample = entry.sample;
                         CompleteTransition(*previous);
@@ -1101,7 +1556,7 @@ struct Agent::Impl {
         float pattern_percentile = std::isfinite(distance) ? Percentile(pattern_baseline, distance) : 0.5f;
         float neural_percentile = 0.5f;
         float weight = 0.0f;
-        float error = autoencoder->Errors(Row(entry.fused))[0];
+        float error = autoencoder->Errors(FusedRow(entry))[0];
         if (anomaly_samples >= config.cold_start_samples) {
             neural_percentile = Percentile(neural_baseline, error);
             weight = 0.5f;
@@ -1206,8 +1661,39 @@ struct Agent::Impl {
         }
     }
 
+    /// One TD3 update for a CONTINUOUS_ACTION output from the batch's
+    /// complete transitions; returns the critic loss (NaN if none)
+    float TrainContinuous(size_t slot, const std::vector<SamplePtr>& batch) {
+        const size_t width = encoder.OutputSize();
+        const size_t n = outputs[continuous_outputs[slot]].spec->size;
+        std::vector<const Sample*> rows;
+        for (const auto& sample : batch) {
+            if (!sample->continuous[slot].action.empty() && (sample->has_next || sample->terminal)) {
+                rows.push_back(sample.get());
+            }
+        }
+        if (rows.empty()) return kNaN;
+        ActorCritic::Batch b{nn::Matrix(rows.size(), width), nn::Matrix(rows.size(), n),
+                             std::vector<float>(rows.size()), nn::Matrix(rows.size(), width),
+                             std::vector<float>(rows.size())};
+        for (size_t r = 0; r < rows.size(); ++r) {
+            const Sample& sample = *rows[r];
+            sample.Fill(b.states.Data() + r * width, width);
+            std::copy(sample.continuous[slot].action.begin(), sample.continuous[slot].action.end(),
+                      b.actions.Data() + r * n);
+            b.rewards[r] = sample.continuous[slot].reward;
+            if (sample.terminal) {
+                b.discounts[r] = 0.0f;
+            } else {
+                sample.FillNext(b.next_states.Data() + r * width, width);
+                b.discounts[r] = config.discount;
+            }
+        }
+        return actor_critics[slot]->Train(b, rng).critic;
+    }
+
     void Train() {
-        if (replay.Size() == 0 || (!network && !autoencoder)) return;
+        if (replay.Size() == 0 || (!network && !autoencoder && actor_critics.empty())) return;
 
         // New samples: not yet trained ones, and while recovering from a
         // drift also random recent ones, up to the share; the rest replay
@@ -1295,6 +1781,17 @@ struct Agent::Impl {
             }
         }
 
+        for (size_t slot = 0; slot < actor_critics.size(); ++slot) {
+            // Q-learning targets move with the critics, so the loss is not
+            // compared with divergence_loss (rewards set its scale); only
+            // non-finite values roll back
+            // The first update uses this batch; each further one draws its own
+            for (size_t update = 0; update < config.continuous_updates_per_step; ++update) {
+                float loss = TrainContinuous(slot, update == 0 ? batch : replay.Draw(config.batch_size));
+                diverged = diverged || std::isinf(loss);
+            }
+        }
+
         training_steps++;
         if (diverged || !ModelsFinite()) {
             Rollback();
@@ -1322,6 +1819,245 @@ struct Agent::Impl {
             plateau_sum = 0.0;
             plateau_count = 0;
         }
+    }
+
+    // ---------------------------------------------------------- checkpoint
+
+    void SaveState(std::ostream& out) const {
+        encoder.SaveState(out);
+
+        // Outputs
+        for (const auto& out_state : outputs) {
+            WriteStrings(out, out_state.classes);
+            io::WriteSize(out, out_state.action_ids.size());
+            for (PatternID id : out_state.action_ids) io::Write<uint64_t>(out, id.value());
+            io::Write<uint64_t>(out, out_state.acts);
+            io::WriteSize(out, out_state.target_stats.size());
+            for (const auto& stats : out_state.target_stats) stats.Save(out);
+            io::Write<uint64_t>(out, out_state.samples);
+            SaveQuality(out, out_state.neural);
+            SaveQuality(out, out_state.pattern_short);
+            SaveQuality(out, out_state.pattern_long);
+            out_state.drift.Save(out);
+            io::Write<uint8_t>(out, out_state.recovering ? 1 : 0);
+            io::Write<uint64_t>(out, out_state.recovery_samples);
+            io::Write<double>(out, out_state.drift_baseline);
+            SaveQuality(out, out_state.recovery_loss);
+            io::Write<uint32_t>(out, out_state.drift_events);
+        }
+
+        // Models
+        io::Write<uint8_t>(out, patterns ? 1 : 0);
+        if (patterns) {
+            for (const AgentNetwork* n : {network.get(), target_network.get(), snapshot_network.get()}) {
+                io::Write<uint8_t>(out, n ? 1 : 0);
+                if (n) n->Serialize(out);
+            }
+            for (const AnomalyAutoencoder* a : {autoencoder.get(), snapshot_autoencoder.get()}) {
+                io::Write<uint8_t>(out, a ? 1 : 0);
+                if (a) a->Serialize(out);
+            }
+            for (const auto* list : {&actor_critics, &snapshot_actor_critics}) {
+                io::WriteSize(out, list->size());
+                for (const auto& ac : *list) ac->Serialize(out);
+            }
+            patterns->SaveState(out);
+        }
+
+        // Samples, each once; everything else refers to them by number
+        std::map<const Sample*, uint64_t> ids;
+        std::vector<const Sample*> ordered;
+        auto add = [&](const Sample* sample) {
+            if (sample && ids.emplace(sample, ordered.size() + 1).second) ordered.push_back(sample);
+        };
+        replay.ForEach([&](const SamplePtr& sample) { add(sample.get()); });
+        for (const auto& entry : pending) add(entry.sample.get());
+        for (const auto& sample : newest) add(sample.get());
+        auto id_of = [&](const Sample* sample) -> uint64_t {
+            auto it = ids.find(sample);
+            return it == ids.end() ? 0 : it->second;
+        };
+        io::WriteSize(out, ordered.size());
+        for (const Sample* sample : ordered) sample->Save(out);
+        for (const Sample* sample : ordered) io::Write<uint64_t>(out, id_of(sample->next_sample.lock().get()));
+        replay.SaveState(out, id_of);
+        io::WriteSize(out, newest.size());
+        for (const auto& sample : newest) io::Write<uint64_t>(out, id_of(sample.get()));
+        io::WriteSize(out, recent.size());
+        for (const auto& sample : recent) io::Write<uint64_t>(out, id_of(sample.lock().get()));
+
+        // Pending steps
+        io::WriteSize(out, pending.size());
+        for (const auto& entry : pending) {
+            io::Write<uint64_t>(out, entry.step);
+            io::Write<uint8_t>(out, entry.encoded ? 1 : 0);
+            WriteVector(out, entry.point);
+            WriteVector(out, entry.observed);
+            io::Write<uint64_t>(out, entry.pattern.value());
+            io::Write<uint64_t>(out, id_of(entry.sample.get()));
+            SaveIndexMap(out, entry.predicted);
+            SaveIndexMap(out, entry.actions);
+            io::WriteSize(out, entry.continuous_actions.size());
+            for (const auto& [index, action] : entry.continuous_actions) {
+                io::WriteSize(out, index);
+                WriteVector(out, action);
+            }
+            io::Write<uint8_t>(out, entry.transition_complete ? 1 : 0);
+            io::Write<float>(out, entry.anomaly);
+            io::Write<float>(out, entry.anomaly_neural_weight);
+        }
+
+        // Counters, schedules, random state
+        WriteVector(out, head_loss);
+        schedule.SaveState(out);
+        io::Write<float>(out, learning_rate);
+        io::Write<double>(out, plateau_sum);
+        io::WriteSize(out, plateau_count);
+        io::WriteSize(out, plateau_checks);
+        SaveOptional(out, previous_step);
+        SaveOptional(out, last_acted_step);
+        WriteVector(out, std::vector<float>(pattern_baseline.begin(), pattern_baseline.end()));
+        WriteVector(out, std::vector<float>(neural_baseline.begin(), neural_baseline.end()));
+        for (uint64_t v : {anomaly_samples, steps, feedback_count, ignored_feedback, training_steps, episodes,
+                           drift_events, last_snapshot, rollbacks, widenings}) {
+            io::Write<uint64_t>(out, v);
+        }
+        io::WriteSize(out, since_training);
+        io::WriteSize(out, recovering_outputs);
+        io::Write<uint8_t>(out, growth_blocked ? 1 : 0);
+        io::Write<float>(out, gap_at_widening);
+        io::WriteSize(out, metrics_every);
+        SaveRandom(out, rng);
+    }
+
+    void LoadState(std::istream& in) {
+        encoder.LoadState(in);
+
+        for (auto& out_state : outputs) {
+            out_state.classes = ReadStrings(in);
+            out_state.class_index.clear();
+            for (size_t c = 0; c < out_state.classes.size(); ++c) out_state.class_index[out_state.classes[c]] = c;
+            out_state.action_ids.resize(io::ReadSize(in, 1u << 20));
+            for (auto& id : out_state.action_ids) id = PatternID(io::Read<uint64_t>(in));
+            out_state.acts = io::Read<uint64_t>(in);
+            out_state.target_stats.resize(io::ReadSize(in, 1u << 20));
+            for (auto& stats : out_state.target_stats) stats.Load(in);
+            out_state.samples = io::Read<uint64_t>(in);
+            out_state.neural = LoadQuality(in);
+            out_state.pattern_short = LoadQuality(in);
+            out_state.pattern_long = LoadQuality(in);
+            out_state.drift.Load(in);
+            out_state.recovering = io::Read<uint8_t>(in) != 0;
+            out_state.recovery_samples = io::Read<uint64_t>(in);
+            out_state.drift_baseline = io::Read<double>(in);
+            out_state.recovery_loss = LoadQuality(in);
+            out_state.drift_events = io::Read<uint32_t>(in);
+        }
+
+        PatternID::ValueType max_id = 0;
+        for (const auto& out_state : outputs) {
+            for (PatternID id : out_state.action_ids) max_id = std::max(max_id, id.value());
+        }
+        if (io::Read<uint8_t>(in)) {
+            if (!encoder.Ready()) throw std::runtime_error("Agent checkpoint: models without known input sizes");
+            auto heads = PrepareLayout();
+            for (auto* n : {&network, &target_network, &snapshot_network}) {
+                *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
+            }
+            for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
+                *a = io::Read<uint8_t>(in) ? AnomalyAutoencoder::Deserialize(in) : nullptr;
+            }
+            for (auto* list : {&actor_critics, &snapshot_actor_critics}) {
+                list->resize(io::ReadSize(in, 1u << 16));
+                for (auto& ac : *list) ac = ActorCritic::Deserialize(in);
+            }
+            if (actor_critics.size() != continuous_outputs.size() ||
+                snapshot_actor_critics.size() != continuous_outputs.size()) {
+                throw std::runtime_error("Agent checkpoint: actor-critics do not match the spec");
+            }
+            for (size_t slot = 0; slot < actor_critics.size(); ++slot) {
+                if (actor_critics[slot]->StateSize() != encoder.OutputSize() ||
+                    actor_critics[slot]->ActionSize() != outputs[continuous_outputs[slot]].spec->size) {
+                    throw std::runtime_error("Agent checkpoint: actor-critic sizes do not match the spec");
+                }
+            }
+            if (network && network->HeadCount() != heads.size()) {
+                throw std::runtime_error("Agent checkpoint: network heads do not match the spec");
+            }
+            patterns = MakePatternMemory();
+            patterns->LoadState(in);
+            max_id = std::max(max_id, patterns->MaxPatternId());
+        }
+        // New pattern IDs must not collide with restored ones
+        PatternID::ReserveThrough(max_id);
+
+        std::vector<SamplePtr> samples(io::ReadSize(in, 1u << 30));
+        for (auto& sample : samples) sample = Sample::Load(in);
+        auto lookup = [&](uint64_t id) -> SamplePtr {
+            if (id == 0) return nullptr;
+            if (id > samples.size()) throw std::runtime_error("Agent checkpoint: bad sample reference");
+            return samples[id - 1];
+        };
+        for (auto& sample : samples) {
+            if (auto next = lookup(io::Read<uint64_t>(in))) sample->next_sample = next;
+        }
+        replay.LoadState(in, [&](uint64_t id) {
+            auto sample = lookup(id);
+            if (!sample) throw std::runtime_error("Agent checkpoint: bad replay entry");
+            return sample;
+        });
+        newest.clear();
+        size_t count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) newest.push_back(lookup(io::Read<uint64_t>(in)));
+        recent.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) recent.push_back(lookup(io::Read<uint64_t>(in)));
+
+        pending.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            Pending entry;
+            entry.step = io::Read<uint64_t>(in);
+            entry.encoded = io::Read<uint8_t>(in) != 0;
+            entry.point = ReadVector<float>(in);
+            entry.observed = ReadVector<float>(in);
+            entry.pattern = PatternID(io::Read<uint64_t>(in));
+            entry.sample = lookup(io::Read<uint64_t>(in));
+            entry.predicted = LoadIndexMap(in);
+            entry.actions = LoadIndexMap(in);
+            size_t continuous_count = io::ReadSize(in, 1u << 16);
+            for (size_t c = 0; c < continuous_count; ++c) {
+                size_t index = io::ReadSize(in, 1u << 16);
+                entry.continuous_actions[index] = ReadVector<float>(in);
+            }
+            entry.transition_complete = io::Read<uint8_t>(in) != 0;
+            entry.anomaly = io::Read<float>(in);
+            entry.anomaly_neural_weight = io::Read<float>(in);
+            pending.push_back(std::move(entry));
+        }
+
+        head_loss = ReadVector<float>(in);
+        schedule.LoadState(in);
+        learning_rate = io::Read<float>(in);
+        plateau_sum = io::Read<double>(in);
+        plateau_count = io::ReadSize(in);
+        plateau_checks = io::ReadSize(in);
+        previous_step = LoadOptional(in);
+        last_acted_step = LoadOptional(in);
+        auto baseline = ReadVector<float>(in);
+        pattern_baseline.assign(baseline.begin(), baseline.end());
+        baseline = ReadVector<float>(in);
+        neural_baseline.assign(baseline.begin(), baseline.end());
+        for (uint64_t* v : {&anomaly_samples, &steps, &feedback_count, &ignored_feedback, &training_steps, &episodes,
+                            &drift_events, &last_snapshot, &rollbacks, &widenings}) {
+            *v = io::Read<uint64_t>(in);
+        }
+        since_training = io::ReadSize(in);
+        recovering_outputs = io::ReadSize(in);
+        growth_blocked = io::Read<uint8_t>(in) != 0;
+        gap_at_widening = io::Read<float>(in);
+        metrics_every = io::ReadSize(in);
+        LoadRandom(in, rng);
     }
 
     AgentStats StatsLocked() const {
@@ -1362,6 +2098,11 @@ struct Agent::Impl {
             } else if (out.spec->type == OutputType::ACTION) {
                 o.neural_weight = out.samples >= m.config.cold_start_samples ? 1.0f : 0.0f;
                 o.exploration = m.Exploration(out);
+            } else if (out.spec->type == OutputType::CONTINUOUS_ACTION) {
+                bool trained = !m.actor_critics.empty() &&
+                               m.actor_critics[static_cast<size_t>(out.continuous_slot)]->Updates() > 0;
+                o.neural_weight = trained ? 1.0f : 0.0f;
+                o.exploration = m.ContinuousExploration(out);
             } else if (m.network && out.head >= 0) {
                 o.neural_weight = m.BlendWeight(out, out.samples > 0,
                                                 out.Pattern(out.spec->type == OutputType::CLASS).Measured(),
@@ -1383,6 +2124,9 @@ struct Agent::Impl {
     std::vector<size_t> value_sizes;
     int next_output{-1};
     bool has_anomaly{false};
+    std::vector<size_t> continuous_outputs;  // output index of each CONTINUOUS_ACTION output
+    std::vector<std::unique_ptr<ActorCritic>> actor_critics;           // one per CONTINUOUS_ACTION output
+    std::vector<std::unique_ptr<ActorCritic>> snapshot_actor_critics;  // last healthy copies
 
     std::vector<size_t> observed_channels;
     std::vector<size_t> observed_offsets;
@@ -1459,8 +2203,9 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         }
     }
     CheckConfig(config);
-    bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(),
-                                   [](const OutputSpec& output) { return output.type == OutputType::ACTION; });
+    bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(), [](const OutputSpec& output) {
+        return output.type == OutputType::ACTION || output.type == OutputType::CONTINUOUS_ACTION;
+    });
     if (has_actions) {
         config.train_every = config.action_train_every;
         config.learning_rate = config.action_learning_rate;
@@ -1505,6 +2250,7 @@ bool AgentTestAccess::InjectNaN(Agent& agent) {
     std::vector<nn::Parameter> parameters;
     if (m.network) parameters = m.network->AllParameters();
     else if (m.autoencoder) parameters = m.autoencoder->Parameters();
+    else if (!m.actor_critics.empty()) parameters = m.actor_critics.front()->ActorParameters();
     if (parameters.empty()) return false;
     parameters.front().value->Data()[0] = std::numeric_limits<float>::quiet_NaN();
     return true;
@@ -1529,10 +2275,26 @@ std::string Agent::Act(StepId step, const std::string& action_output, bool explo
     std::lock_guard<std::mutex> lock(impl_->mutex);
     for (size_t i = 0; i < impl_->outputs.size(); ++i) {
         if (impl_->outputs[i].spec->name != action_output) continue;
+        if (impl_->outputs[i].spec->type == OutputType::CONTINUOUS_ACTION) {
+            throw std::invalid_argument("Output '" + action_output +
+                                        "' is a CONTINUOUS_ACTION output; use ActContinuous");
+        }
         if (impl_->outputs[i].spec->type != OutputType::ACTION) {
             throw std::invalid_argument("Output '" + action_output + "' is not an ACTION output");
         }
         return impl_->ActLocked(step, i, explore);
+    }
+    throw std::invalid_argument("Unknown output '" + action_output + "'");
+}
+
+std::vector<float> Agent::ActContinuous(StepId step, const std::string& action_output, bool explore) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for (size_t i = 0; i < impl_->outputs.size(); ++i) {
+        if (impl_->outputs[i].spec->name != action_output) continue;
+        if (impl_->outputs[i].spec->type != OutputType::CONTINUOUS_ACTION) {
+            throw std::invalid_argument("Output '" + action_output + "' is not a CONTINUOUS_ACTION output");
+        }
+        return impl_->ActContinuousLocked(step, i, explore);
     }
     throw std::invalid_argument("Unknown output '" + action_output + "'");
 }
@@ -1556,6 +2318,66 @@ void Agent::EndEpisode(bool terminal) {
 AgentStats Agent::Stats() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->StatsLocked();
+}
+
+// ============================================================================
+// Checkpoints
+// ============================================================================
+
+void Agent::Save(std::ostream& out) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    out.write(kCheckpointMagic, sizeof(kCheckpointMagic));
+    io::Write<uint32_t>(out, kCheckpointVersion);
+    SaveSpec(out, impl_->spec);
+    SaveConfig(out, impl_->config);
+    impl_->SaveState(out);
+    if (!out) throw std::runtime_error("Agent::Save: write failed");
+}
+
+bool Agent::Save(const std::string& path) const {
+    // Write to a temporary file, then replace: a failed save leaves any
+    // earlier checkpoint intact
+    std::string temporary = path + ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        try {
+            Save(file);
+        } catch (const std::exception&) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+        file.flush();
+        if (!file) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+    }
+    return std::rename(temporary.c_str(), path.c_str()) == 0;
+}
+
+Agent Agent::Load(std::istream& in) {
+    char magic[sizeof(kCheckpointMagic)];
+    in.read(magic, sizeof(magic));
+    if (!in || !std::equal(magic, magic + sizeof(magic), kCheckpointMagic)) {
+        throw std::runtime_error("Agent::Load: not an agent checkpoint");
+    }
+    uint32_t version = io::Read<uint32_t>(in);
+    if (version != kCheckpointVersion) {
+        throw std::runtime_error("Agent::Load: checkpoint version " + std::to_string(version) +
+                                 " is not supported (expected " + std::to_string(kCheckpointVersion) + ")");
+    }
+    EnvironmentSpec spec = LoadSpec(in);
+    AgentConfig config = LoadConfig(in);
+    Agent agent(std::move(spec), config);
+    agent.impl_->LoadState(in);
+    return agent;
+}
+
+Agent Agent::Load(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Agent::Load: cannot open " + path);
+    return Load(file);
 }
 
 const EnvironmentSpec& Agent::Spec() const { return impl_->spec; }
