@@ -712,7 +712,8 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
   `continuous_critic_learning_rate`, `continuous_random_steps`,
   `continuous_exploration_noise`, `continuous_target_noise`,
   `continuous_noise_clip`, `continuous_policy_delay`, `continuous_tau`,
-  `continuous_updates_per_step`;
+  `continuous_updates_per_step`, `continuous_saturation_penalty`,
+  `continuous_saturation_threshold` (see "S7 seed 4 change" below);
   `discount`, `batch_size` and the action settings (`action_train_every`:
   training every observation) are shared with discrete actions.
 - **Safety and memory.** The actor-critics are in the snapshots and the
@@ -723,8 +724,9 @@ Python, seeds 82–84 give −181.1, −186.4, **−473.6** (2 of 3 pass).
 - **Checkpoint.** Version 3: bounds in the spec, the TD3 settings, the
   actor-critics with their optimizer state and update counters, the actions
   in samples and pending steps. Version 4 adds
-  `continuous_updates_per_step` to the configuration; earlier versions are
-  rejected.
+  `continuous_updates_per_step` to the configuration; version 6 adds the
+  saturation settings to the configuration and the actor-critics; earlier
+  versions are rejected.
 - **APIs.** C: `dpan_agent_act_continuous(agent, step, output, explore,
   values, capacity, count)`; it checks `capacity` before choosing. Python:
   `agent.act_continuous(step, output, explore=True)` returns a list.
@@ -932,4 +934,36 @@ arrives the pattern side does not vote, and the network predicts alone.
 | Reference environment A (accuracy after the drift) | 0.983 | 0.9835 (others unchanged; they detect no drift) |
 
 All 1,999 tests pass.
+
+**S7 seed 4 change: a penalty on saturated actor outputs.** At seed 4 the
+actor drove both actions to a bound and S7 ended at 0.50. At the bound the
+tanh output's slope is close to 0, so the critic's gradient no longer reaches
+the actor and it stays there. The actor's loss now has a penalty
+`continuous_saturation_penalty` × (|z| − `continuous_saturation_threshold`)²
+on each pre-tanh output z beyond the threshold (default 2.0, where tanh is
+0.96). Below the threshold the actor is unchanged, so actions can still
+come close to the bounds. On a task whose best action is the bound, the
+actor's z now levels off at about 3.6 (weight 0.001), against 5.5 and
+rising without the penalty (`SaturationPenaltyKeepsTheActorOffTheBound`).
+
+Candidates were checked on S7 and on the pendulum, because they change
+every continuous output:
+
+| Actor change | S7 seeds 1–11 | Pendulum, 24 C++ seeds: runs < −200, stuck episodes, worst, mean | Python seed 81 (the I test) |
+|---|---|---|---|
+| None (before) | 10 of 11 (seed 4: 0.50) | 0, 0, −195.6, −161.4 | −153.6 |
+| Linear output, clipped, inverted gradients | 11 of 11 | 5, 2, −289.5, −176.2 | not run |
+| tanh with a minimum inward slope of 0.1 | 11 of 11 | 3, 3, −288.2, −171.8 | not run |
+| tanh with a minimum inward slope of 0.03 | 11 of 11 | 2, 7, −637.7, −181.6 | not run |
+| Penalty, weight 0.005 | 11 of 11 | 2, 1, −251.9, −164.3 | −154.1 |
+| Penalty, weight 0.003 | 11 of 11 | 0, 0, −196.0, −158.4 | −252.8 (fails; seeds 82–104: 0 of 23 fail) |
+| Penalty, weight 0.002 | 11 of 11 | 1, 0, −217.0, −160.7 | −153.2 |
+| **Penalty, weight 0.001** | **11 of 11 (0.036–0.090; seed 4: 0.046)** | **1, 0, −210.7, −160.5** | **−146.3** |
+
+Larger weights (0.01 to 10, thresholds 1.5 to 3) also fixed seed 4; on the
+pendulum, weight 0.01 had 1 run below −200 (−212.0), 0.1 had 1 (−215.2),
+and 1 (threshold 3) had 3 and 15 stuck episodes. The default is weight 0.001: no
+candidate kept every pendulum run of the 24 above −200 while passing the
+Python I test, and 0.001 has the smallest worst run of those that pass it.
+The environment I test gives −115.7 (C++) and −146.3 (Python).
 

@@ -90,6 +90,11 @@ struct AgentConfig {
     float continuous_noise_clip{0.5f};
     size_t continuous_policy_delay{2};            ///< Critic updates per actor update
     float continuous_tau{0.005f};                 ///< Rate at which target networks follow the live ones
+    /// Actor penalty weight x (|z| - threshold)^2 on each pre-tanh action
+    /// output z beyond the threshold; keeps the actor from sticking at a
+    /// bound, where the tanh gradient vanishes (0 turns it off)
+    float continuous_saturation_penalty{0.001f};
+    float continuous_saturation_threshold{2.0f};
     /// TD3 updates per training step (each further one on its own batch from
     /// the replay buffer). Two learn the pendulum (environment I) more
     /// reliably than one, at twice the cost.

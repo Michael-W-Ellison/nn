@@ -81,6 +81,8 @@ void CheckConfig(const AgentConfig& c) {
     require(c.continuous_policy_delay > 0, "continuous_policy_delay must be > 0");
     require(c.continuous_updates_per_step > 0, "continuous_updates_per_step must be > 0");
     require(c.continuous_tau > 0.0f && c.continuous_tau <= 1.0f, "continuous_tau must be in (0, 1]");
+    require(c.continuous_saturation_penalty >= 0.0f && c.continuous_saturation_threshold >= 0.0f,
+            "continuous saturation settings must be >= 0");
     ValidateEncoderConfig(c.encoder);
 }
 
@@ -142,7 +144,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 5;
+constexpr uint32_t kCheckpointVersion = 6;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -301,6 +303,8 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.continuous_policy_delay);
     io::Write<float>(out, c.continuous_tau);
     io::WriteSize(out, c.continuous_updates_per_step);
+    io::Write<float>(out, c.continuous_saturation_penalty);
+    io::Write<float>(out, c.continuous_saturation_threshold);
 }
 
 AgentConfig LoadConfig(std::istream& in) {
@@ -372,6 +376,8 @@ AgentConfig LoadConfig(std::istream& in) {
     c.continuous_policy_delay = io::ReadSize(in);
     c.continuous_tau = io::Read<float>(in);
     c.continuous_updates_per_step = io::ReadSize(in);
+    c.continuous_saturation_penalty = io::Read<float>(in);
+    c.continuous_saturation_threshold = io::Read<float>(in);
     return c;
 }
 
@@ -630,6 +636,8 @@ struct Agent::Impl {
             ac.target_noise = config.continuous_target_noise;
             ac.noise_clip = config.continuous_noise_clip;
             ac.policy_delay = config.continuous_policy_delay;
+            ac.saturation_penalty = config.continuous_saturation_penalty;
+            ac.saturation_threshold = config.continuous_saturation_threshold;
             ac.seed = config.seed + 100 + static_cast<uint32_t>(actor_critics.size()) * 10;
             actor_critics.push_back(
                 std::make_unique<ActorCritic>(encoder.OutputSize(), outputs[index].spec->size, ac));

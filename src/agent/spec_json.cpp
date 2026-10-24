@@ -200,6 +200,8 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, continuous_policy_delay),
         DPAN_FIELD(AgentConfig, continuous_tau),
         DPAN_FIELD(AgentConfig, continuous_updates_per_step),
+        DPAN_FIELD(AgentConfig, continuous_saturation_penalty),
+        DPAN_FIELD(AgentConfig, continuous_saturation_threshold),
         DPAN_FIELD(AgentConfig, detect_drift),
         DPAN_FIELD(AgentConfig, drift_delta),
         DPAN_FIELD(AgentConfig, drift_threshold),

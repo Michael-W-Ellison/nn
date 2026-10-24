@@ -46,6 +46,9 @@ ActorCritic::ActorCritic(size_t state_size, size_t action_size, const ActorCriti
         throw std::invalid_argument("ActorCritic: state, action and hidden sizes must be > 0");
     }
     if (config.policy_delay == 0) throw std::invalid_argument("ActorCritic: policy_delay must be > 0");
+    if (!(config.saturation_penalty >= 0.0f) || !(config.saturation_threshold >= 0.0f)) {
+        throw std::invalid_argument("ActorCritic: saturation settings must be >= 0");
+    }
     actor_ = Mlp(state_size, config.hidden, action_size, true, config.seed);
     critic1_ = Mlp(state_size + action_size, config.hidden, 1, false, config.seed + 10);
     critic2_ = Mlp(state_size + action_size, config.hidden, 1, false, config.seed + 20);
@@ -141,7 +144,8 @@ ActorCritic::Losses ActorCritic::Train(const Batch& batch, std::mt19937& rng) {
     losses.critic = static_cast<float>(loss / static_cast<double>(2 * n));
     updates_++;
 
-    // Delayed actor update: maximize Q1(s, actor(s)), then move the targets
+    // Delayed actor update: maximize Q1(s, actor(s)) less the saturation
+    // penalty, then move the targets
     if (updates_ % config_.policy_delay == 0) {
         actor_.ZeroGradients();
         nn::Matrix actions = actor_.Forward(batch.states, true);
@@ -150,7 +154,22 @@ ActorCritic::Losses ActorCritic::Train(const Batch& batch, std::mt19937& rng) {
         nn::Matrix grad_joined = critic1_.Backward(grad_q);
         nn::Matrix grad_actions(n, action_size_);
         for (size_t r = 0; r < n; ++r) {
-            for (size_t a = 0; a < action_size_; ++a) grad_actions(r, a) = grad_joined(r, state_size_ + a);
+            for (size_t a = 0; a < action_size_; ++a) {
+                float g = grad_joined(r, state_size_ + a);
+                // The penalty's gradient on z, divided by the tanh slope the
+                // Tanh layer multiplies it by (0 only where tanh rounds to +-1)
+                float t = actions(r, a);
+                float slope = 1.0f - t * t;
+                if (config_.saturation_penalty > 0.0f && slope > 0.0f) {
+                    float z = std::atanh(t);
+                    float excess = std::fabs(z) - config_.saturation_threshold;
+                    if (excess > 0.0f) {
+                        g += 2.0f * config_.saturation_penalty * std::copysign(excess, z) /
+                             (static_cast<float>(n) * slope);
+                    }
+                }
+                grad_actions(r, a) = g;
+            }
         }
         actor_.Backward(grad_actions);
         actor_optimizer_.Step(actor_.Parameters());
@@ -185,6 +204,8 @@ void ActorCritic::Serialize(std::ostream& out) const {
     io::Write<float>(out, config_.target_noise);
     io::Write<float>(out, config_.noise_clip);
     io::WriteSize(out, config_.policy_delay);
+    io::Write<float>(out, config_.saturation_penalty);
+    io::Write<float>(out, config_.saturation_threshold);
     io::Write<uint32_t>(out, config_.seed);
     for (const nn::Sequential* model :
          {&actor_, &actor_target_, &critic1_, &critic1_target_, &critic2_, &critic2_target_}) {
@@ -206,8 +227,11 @@ std::unique_ptr<ActorCritic> ActorCritic::Deserialize(std::istream& in) {
     ac->config_.target_noise = io::Read<float>(in);
     ac->config_.noise_clip = io::Read<float>(in);
     ac->config_.policy_delay = io::ReadSize(in);
+    ac->config_.saturation_penalty = io::Read<float>(in);
+    ac->config_.saturation_threshold = io::Read<float>(in);
     ac->config_.seed = io::Read<uint32_t>(in);
-    if (ac->config_.policy_delay == 0) throw std::runtime_error("ActorCritic: malformed data");
+    if (ac->config_.policy_delay == 0 || !(ac->config_.saturation_penalty >= 0.0f) ||
+        !(ac->config_.saturation_threshold >= 0.0f)) throw std::runtime_error("ActorCritic: malformed data");
     for (nn::Sequential* model : {&ac->actor_, &ac->actor_target_, &ac->critic1_, &ac->critic1_target_,
                                   &ac->critic2_, &ac->critic2_target_}) {
         *model = nn::Sequential::Deserialize(in);
