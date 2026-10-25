@@ -814,7 +814,20 @@ struct Agent::Impl {
         return pending[step - pending.front().step];
     }
 
+    /// Environments with action outputs train every train_every
+    /// observations: each step completes a transition. Otherwise training
+    /// follows new samples, not observations: an observation without
+    /// feedback adds none, so it does not retrain on old samples.
+    bool TrainsPerObservation() const { return has_actions || !continuous_outputs.empty(); }
+
+    void MaybeTrain() {
+        if (untrained_samples < config.train_every) return;
+        untrained_samples -= config.train_every;
+        Train();
+    }
+
     void MakeTrainable(const SamplePtr& sample) {
+        if (!sample->in_replay && !TrainsPerObservation()) untrained_samples++;  // new, not more feedback for a stored sample
         replay.Add(sample);
         newest.push_back(sample);
         while (newest.size() > config.batch_size) newest.pop_front();
@@ -1537,10 +1550,8 @@ struct Agent::Impl {
         pending.push_back(std::move(entry));
         while (pending.size() > config.feedback_timeout) pending.pop_front();
 
-        if (++since_training >= config.train_every) {
-            since_training = 0;
-            Train();
-        }
+        if (TrainsPerObservation()) untrained_samples++;
+        MaybeTrain();
         if (patterns && steps - last_snapshot >= config.snapshot_interval && ModelsFinite()) TakeSnapshot();
         return step;
     }
@@ -1930,7 +1941,7 @@ struct Agent::Impl {
                            drift_events, last_snapshot, rollbacks, widenings}) {
             io::Write<uint64_t>(out, v);
         }
-        io::WriteSize(out, since_training);
+        io::WriteSize(out, untrained_samples);
         io::WriteSize(out, recovering_outputs);
         io::Write<uint8_t>(out, growth_blocked ? 1 : 0);
         io::Write<float>(out, gap_at_widening);
@@ -2060,7 +2071,7 @@ struct Agent::Impl {
                             &drift_events, &last_snapshot, &rollbacks, &widenings}) {
             *v = io::Read<uint64_t>(in);
         }
-        since_training = io::ReadSize(in);
+        untrained_samples = io::ReadSize(in);
         recovering_outputs = io::ReadSize(in);
         growth_blocked = io::Read<uint8_t>(in) != 0;
         gap_at_widening = io::Read<float>(in);
@@ -2180,7 +2191,7 @@ struct Agent::Impl {
     uint64_t feedback_count{0};
     uint64_t ignored_feedback{0};
     uint64_t training_steps{0};
-    size_t since_training{0};
+    size_t untrained_samples{0};  ///< Samples (or, with actions, observations) toward the next training step
 
     Logger logger;
     mutable std::mutex mutex;
@@ -2277,6 +2288,7 @@ Prediction Agent::Predict(StepId step, const std::string& output) const {
 void Agent::Feedback(StepId step, const std::string& feedback, const Value& value) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->FeedbackLocked(step, feedback, value);
+    impl_->MaybeTrain();
 }
 
 std::string Agent::Act(StepId step, const std::string& action_output, bool explore) {

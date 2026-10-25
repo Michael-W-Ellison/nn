@@ -113,11 +113,15 @@ prediction carries a confidence value.
    The buffer holds 50,000 samples by default, drops low-utility samples
    first (memory manager utility scores), keeps classes balanced, and keeps
    recent samples alongside a random sample of older ones.
-3. **Training cadence:** every 8 observations, one mini-batch of 64, half
-   newest samples and half replay. Gradient clipping (norm 5), then Adam
-   with a learning rate that drops when progress plateaus. When the
-   environment has ACTION outputs: every observation, learning rate 2e-4,
+3. **Training cadence:** every 8 new trainable samples (a step's first
+   label, target or outcome, or a self-supervised sample; observations
+   without feedback add none), one mini-batch of 64, half newest samples
+   and half replay. Gradient clipping (norm 5), then Adam with a learning
+   rate that drops when progress plateaus. When the environment has ACTION
+   or CONTINUOUS_ACTION outputs: every observation, learning rate 2e-4,
    trunk at least 64 wide; Q-value losses do not drive the plateau check.
+   (Every 8 observations in all environments until the "training follows
+   new samples" change below.)
 4. **Mixed channels:** losses from all heads with samples are summed, each
    divided by its running average so no head dominates.
 5. **Concept drift:** a Page-Hinkley test on each head's loss. On
@@ -966,4 +970,62 @@ and 1 (threshold 3) had 3 and 15 stuck episodes. The default is weight 0.001: no
 candidate kept every pendulum run of the 24 above −200 while passing the
 Python I test, and 0.001 has the smallest worst run of those that pass it.
 The environment I test gives −115.7 (C++) and −146.3 (Python).
+
+### Real-world datasets
+
+Four public datasets through the Python package, outside the test suite
+(scripts not in the repository). The agent uses the default `AgentConfig`
+(seeds 1–3), streams the training rows in a random order with each label
+right after its prediction, then predicts the test rows without feedback.
+The offline models are scikit-learn models fitted on the same training rows.
+
+| Dataset (input type) | Split | Agent, 1 pass | Agent, 3 passes | Offline models |
+|---|---|---|---|---|
+| Adult census income (6 numeric, 8 categorical) | UCI split, 32,561 / 16,281 | 0.843–0.848 | 0.832–0.837 | logistic regression 0.853, gradient boosting 0.871, always "≤50K" 0.764 |
+| SMS Spam Collection (text) | random 80/20, 4,459 / 1,115 | 0.981–0.985 | 0.979–0.984 | TF-IDF + logistic regression 0.984, naive Bayes 0.984 |
+| UCI handwritten digits (8×8 image) | random 80/20, 1,437 / 360 | 0.981–0.983 | 0.983–0.992 | logistic regression 0.981, 3-nearest neighbours 0.986, SVM 0.994 |
+| Melbourne daily minimum temperature (time series) | forecasts for 1988–1990 | MAE 1.99–2.03 °C | — | yesterday's value 2.01, linear model on the last 16 days 1.80 |
+
+Accuracy unless stated. Results before the change below.
+
+**Adult.** Findings (seed 1 unless stated):
+
+- The network alone reaches 0.843 after one pass, against 0.857 for an
+  offline 64×64 network after one epoch (0.853 after 10, 0.831 after 50).
+  Training every 16 or 32 observations gives 0.855 and 0.857; a learning
+  rate of 1e-3 gives 0.852. Drift detection (no drift events), log-scaling
+  the capital gain and loss values, and the share of newest samples in a
+  batch did not help. The agent trains on each row about 8 times per pass
+  (a batch of 64 every 8 rows), which over-fits this noisy data.
+- Over three passes the network's accuracy on rows it has already seen
+  rises 0.84 → 0.90 → 0.93 while its test accuracy falls 0.843 → 0.827 →
+  0.815: it memorises the training rows. The pattern side alone gives 0.814
+  → 0.818 → 0.826.
+- The blend weight of the network stays at 0.48–0.56 (squared running
+  accuracies of 0.85 and 0.82 are nearly equal), so the weaker pattern side
+  takes half of each prediction: with training every 32 rows the network
+  alone gives 0.857 (seed 1), the blend 0.848–0.852 (seeds 1–3).
+- Training followed observations, so the agent kept training on stored
+  samples while it observed the unlabelled test rows (about 2,000 of 6,105
+  training steps in a one-pass run).
+
+**Change: training follows new samples.** Without action outputs, a
+training step now comes after every `train_every` new trainable samples
+instead of every `train_every` observations; more feedback for a stored
+sample does not count. Environments with ACTION or CONTINUOUS_ACTION outputs
+still train every observation: applied there too, the first step of each
+episode (which completes no transition) no longer trained, and S7 failed at
+seed 3 (0.110 against 0.090; seeds 1–11: 10 of 11 pass).
+
+| Seeds 1–3 | Before | After |
+|---|---|---|
+| Adult, 1 pass | 0.843–0.848 | 0.847–0.849 |
+| Adult, 3 passes | 0.832–0.837 | 0.834–0.838 |
+| SMS, 1 pass | 0.981–0.985 | 0.981–0.986 |
+| Digits, 1 pass | 0.981–0.983 | 0.983–0.989 |
+| S7 seeds 1, 3, 4 | 0.06923, 0.09019, 0.04551 | identical |
+
+During a labelled pass the agent still trains as often as before, so the
+over-training per row and the over-fitting over repeated passes remain;
+the change removes only the training on observations without feedback.
 

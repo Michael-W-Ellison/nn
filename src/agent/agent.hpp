@@ -54,7 +54,7 @@ struct AgentConfig {
     size_t min_trunk_width{32};
     size_t max_trunk_width{512};
     float gradient_clip_norm{5.0f};
-    size_t train_every{8};           ///< Observations between training steps
+    size_t train_every{8};           ///< New trainable samples between training steps (observations with actions)
     size_t batch_size{64};
     float new_sample_share{0.5f};    ///< Share of each batch taken from the newest samples
     size_t replay_capacity{50000};
@@ -247,7 +247,10 @@ public:
     Agent& operator=(const Agent&) = delete;
 
     /// Learn from an observation (channels may be missing) and open a step
-    /// for Predict and Feedback. Trains every train_every observations.
+    /// for Predict and Feedback. Without action outputs, trains once per
+    /// train_every new trainable samples (labels, targets, outcomes,
+    /// self-supervised samples), so observations without feedback do not
+    /// train; with action outputs, every train_every observations.
     /// @throws std::invalid_argument for unknown channels or bad values
     StepId Observe(const Observation& observation);
 

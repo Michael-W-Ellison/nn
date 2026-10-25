@@ -245,6 +245,25 @@ TEST(AgentTest, AnomalyScoresArePercentiles) {
     EXPECT_FLOAT_EQ(0.5f, p.neural_weight);
 }
 
+TEST(AgentTest, TrainsOnNewSamplesOnly) {
+    Agent agent(ClassSpec());
+    std::mt19937 rng(7);
+    for (int i = 0; i < 400; ++i) {
+        StepId step = agent.Observe({{"x", Point(rng, i % 2)}});
+        agent.Feedback(step, "label", static_cast<double>(i % 2));
+    }
+    EXPECT_EQ(50u, agent.Stats().training_steps);  // one per train_every (8) labelled steps
+    // Observations without feedback add no samples, so no training
+    std::vector<StepId> unlabelled;
+    for (int i = 0; i < 400; ++i) unlabelled.push_back(agent.Observe({{"x", Point(rng, i % 2)}}));
+    EXPECT_EQ(50u, agent.Stats().training_steps);
+    // Late feedback counts when it arrives; more feedback for a stored sample does not
+    for (int i = 0; i < 16; ++i) agent.Feedback(unlabelled[unlabelled.size() - 1 - i], "label", static_cast<double>(i % 2));
+    EXPECT_EQ(52u, agent.Stats().training_steps);
+    for (int i = 0; i < 16; ++i) agent.Feedback(unlabelled[unlabelled.size() - 1 - i], "label", static_cast<double>(i % 2));
+    EXPECT_EQ(52u, agent.Stats().training_steps);
+}
+
 TEST(AgentTest, StatsDescribeTheAgent) {
     Agent agent(ClassSpec());
     std::mt19937 rng(6);
@@ -386,6 +405,22 @@ TEST(AgentActionTest, ActionEnvironmentsUseActionSettings) {
     Agent without(ClassSpec());
     EXPECT_EQ(8u, without.Config().train_every);
     EXPECT_FLOAT_EQ(3e-3f, without.Config().learning_rate);
+}
+
+TEST(AgentActionTest, ActionEnvironmentsTrainEveryObservation) {
+    // Each step completes a transition, so training follows observations
+    // (train_every 1), including the first step of an episode
+    Agent agent(ActionSpec());
+    for (int i = 0; i < 300; ++i) {
+        StepId step = agent.Observe({{"state", static_cast<double>(i % 3)}});
+        agent.Act(step, "move");
+        agent.Feedback(step, "reward", 1.0);
+        if (i % 3 == 2) agent.EndEpisode(false);
+    }
+    uint64_t trained = agent.Stats().training_steps;
+    EXPECT_GE(trained, 290u);
+    for (int i = 0; i < 20; ++i) agent.Observe({{"state", 0.0}});
+    EXPECT_EQ(trained + 20, agent.Stats().training_steps);
 }
 
 TEST(AgentActionTest, ExplorationFallsAndActIsRemembered) {
