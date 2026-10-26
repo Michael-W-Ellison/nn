@@ -112,6 +112,9 @@ public:
                                   const std::vector<std::vector<const HeadTarget*>>& targets,
                                   const std::vector<float>& loss_scale, float clip_norm);
 
+    /// Mean loss per head over its targets, as TrainBatch computes it, without training
+    std::vector<float> Losses(const nn::Matrix& inputs, const std::vector<std::vector<const HeadTarget*>>& targets) const;
+
     float LearningRate() const { return learning_rate_; }
     void SetLearningRate(float learning_rate);
 

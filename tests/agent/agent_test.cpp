@@ -246,7 +246,9 @@ TEST(AgentTest, AnomalyScoresArePercentiles) {
 }
 
 TEST(AgentTest, TrainsOnNewSamplesOnly) {
-    Agent agent(ClassSpec());
+    AgentConfig config;
+    config.holdout_every = 0;  // every sample is trained on (held-out samples: below)
+    Agent agent(ClassSpec(), config);
     std::mt19937 rng(7);
     for (int i = 0; i < 400; ++i) {
         StepId step = agent.Observe({{"x", Point(rng, i % 2)}});
@@ -264,6 +266,70 @@ TEST(AgentTest, TrainsOnNewSamplesOnly) {
     EXPECT_EQ(52u, agent.Stats().training_steps);
 }
 
+TEST(AgentTest, HeldOutSamplesAreNotTrainedOn) {
+    AgentConfig config;
+    config.holdout_every = 1;  // every sample
+    config.holdout_capacity = 100;
+    Agent agent(ClassSpec(), config);
+    std::mt19937 rng(8);
+    for (int i = 0; i < 300; ++i) {
+        StepId step = agent.Observe({{"x", Point(rng, i % 2)}});
+        agent.Feedback(step, "label", static_cast<double>(i % 2));
+    }
+    AgentStats stats = agent.Stats();
+    EXPECT_EQ(0u, stats.replay_size);
+    EXPECT_EQ(100u, stats.held_out_samples);  // the newest holdout_capacity
+    EXPECT_EQ(0u, stats.training_steps);
+    EXPECT_GT(stats.outputs[0].pattern_quality, 0.9f);  // the pattern memory still learns from them
+}
+
+TEST(AgentTest, RepeatedObservationsAreHeldOutAlwaysOrNever) {
+    // The choice follows the raw observation, so a repeat of a held-out
+    // observation cannot be trained on (repeated passes over a data set)
+    std::mt19937 rng(9);
+    std::vector<std::vector<float>> rows;
+    for (int i = 0; i < 60; ++i) rows.push_back(Point(rng, i % 2));
+    AgentConfig config;
+    config.holdout_every = 5;
+    Agent agent(ClassSpec(), config);
+    size_t first_pass = 0;
+    for (size_t pass = 1; pass <= 3; ++pass) {
+        for (int i = 0; i < 60; ++i) {
+            StepId step = agent.Observe({{"x", rows[i]}});
+            agent.Feedback(step, "label", static_cast<double>(i % 2));
+        }
+        AgentStats stats = agent.Stats();
+        if (pass == 1) first_pass = stats.held_out_samples;
+        // Each pass holds out the same observations again
+        EXPECT_EQ(pass * first_pass, stats.held_out_samples) << pass;
+        EXPECT_EQ(60u * pass, stats.replay_size + stats.held_out_samples);
+    }
+    EXPECT_GT(first_pass, 3u);
+    EXPECT_LT(first_pass, 25u);
+}
+
+TEST(AgentTest, TrainingSlowsWhenHeldOutLossRises) {
+    // Random labels: the network can only memorize its samples, so its loss
+    // on held-out samples rises and training slows
+    AgentConfig config;
+    config.holdout_every = 4;
+    config.holdout_check_interval = 20;
+    Agent agent(ClassSpec(), config);
+    std::mt19937 rng(10);
+    std::normal_distribution<float> x(0.0f, 1.0f);
+    std::bernoulli_distribution label(0.5);
+    size_t slowest = 1;
+    for (int i = 0; i < 20000; ++i) {
+        StepId step = agent.Observe({{"x", std::vector<float>{x(rng), x(rng)}}});
+        agent.Feedback(step, "label", label(rng) ? 1.0 : 0.0);
+        slowest = std::max(slowest, agent.Stats().training_slowdown);
+    }
+    EXPECT_GT(slowest, 1u);
+    EXPECT_LE(slowest, AgentConfig{}.max_training_slowdown);
+    AgentStats stats = agent.Stats();
+    EXPECT_LT(stats.training_steps, stats.replay_size / 8);
+}
+
 TEST(AgentTest, StatsDescribeTheAgent) {
     Agent agent(ClassSpec());
     std::mt19937 rng(6);
@@ -274,8 +340,13 @@ TEST(AgentTest, StatsDescribeTheAgent) {
     AgentStats stats = agent.Stats();
     EXPECT_EQ(400u, stats.steps);
     EXPECT_EQ(400u, stats.feedback);
-    EXPECT_EQ(50u, stats.training_steps);
-    EXPECT_EQ(400u, stats.replay_size);
+    // About one sample in holdout_every (20) is held out; one training step
+    // per train_every (8) of the others
+    EXPECT_EQ(400u, stats.replay_size + stats.held_out_samples);
+    EXPECT_GT(stats.held_out_samples, 5u);
+    EXPECT_LT(stats.held_out_samples, 40u);
+    EXPECT_EQ(stats.replay_size / 8, stats.training_steps);
+    EXPECT_EQ(1u, stats.training_slowdown);
     EXPECT_GT(stats.patterns, 0u);
     EXPECT_EQ(3u, stats.fused_size);
     EXPECT_EQ(32u, stats.trunk_width);

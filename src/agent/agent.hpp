@@ -156,6 +156,20 @@ struct AgentConfig {
 
     /// Limit for CLASS outputs whose classes are learned from labels
     size_t max_classes{1000};
+
+    // Held-out samples (environments without action outputs): one in
+    // holdout_every new trainable samples, chosen by a hash of the raw
+    // observation (so a repeated observation is always held out or never),
+    // is kept out of training. Every holdout_check_interval training steps
+    // the network's loss on the newest holdout_capacity of them is compared
+    // with the last check: if it rose, training slows to half as often (up
+    // to every max_training_slowdown x train_every samples); if it fell,
+    // twice as often again. A drift clears them. 0 turns this off.
+    size_t holdout_every{20};
+    size_t holdout_capacity{500};
+    size_t holdout_check_interval{100};
+    size_t holdout_min_samples{50};      ///< Held-out samples needed before a check counts
+    size_t max_training_slowdown{8};
 };
 
 struct Prediction {
@@ -216,6 +230,8 @@ struct AgentStats {
     uint64_t training_steps{0};
     size_t pending_steps{0};
     size_t replay_size{0};
+    size_t held_out_samples{0};    ///< Samples kept out of training to check the training rate
+    size_t training_slowdown{1};   ///< Training every training_slowdown x train_every new samples
     size_t patterns{0};
     uint64_t patterns_pruned{0};
     uint64_t drift_events{0};

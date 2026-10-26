@@ -56,6 +56,10 @@ void CheckConfig(const AgentConfig& c) {
     require(c.quality_rate > 0.0f && c.quality_rate <= 1.0f, "quality_rate must be in (0, 1]");
     require(c.anomaly_baseline > 0, "anomaly_baseline must be > 0");
     require(c.max_classes > 0, "max_classes must be > 0");
+    require(c.holdout_every == 0 || (c.holdout_capacity > 0 && c.holdout_check_interval > 0 &&
+                                     c.holdout_min_samples <= c.holdout_capacity && c.max_training_slowdown > 0),
+            "holdout_capacity, holdout_check_interval and max_training_slowdown must be > 0, and "
+            "holdout_min_samples <= holdout_capacity");
     require(c.memory_budget_bytes > 0, "memory_budget_bytes must be > 0");
     require(c.snapshot_interval > 0 && c.divergence_loss > 0.0f, "snapshot_interval and divergence_loss must be > 0");
     require(c.capacity_growth > 1.0f, "capacity_growth must be > 1");
@@ -144,7 +148,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 6;
+constexpr uint32_t kCheckpointVersion = 7;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -282,6 +286,10 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.quality_rate);
     io::WriteSize(out, c.anomaly_baseline);
     io::WriteSize(out, c.max_classes);
+    for (size_t v : {c.holdout_every, c.holdout_capacity, c.holdout_check_interval, c.holdout_min_samples,
+                     c.max_training_slowdown}) {
+        io::WriteSize(out, v);
+    }
     io::Write<float>(out, c.encoder.clip_sigma);
     io::Write<uint64_t>(out, c.encoder.statistics_limit);
     io::WriteSize(out, c.encoder.category_buckets);
@@ -355,6 +363,10 @@ AgentConfig LoadConfig(std::istream& in) {
     c.quality_rate = io::Read<float>(in);
     c.anomaly_baseline = io::ReadSize(in);
     c.max_classes = io::ReadSize(in);
+    for (size_t* v : {&c.holdout_every, &c.holdout_capacity, &c.holdout_check_interval, &c.holdout_min_samples,
+                      &c.max_training_slowdown}) {
+        *v = io::ReadSize(in);
+    }
     c.encoder.clip_sigma = io::Read<float>(in);
     c.encoder.statistics_limit = io::Read<uint64_t>(in);
     c.encoder.category_buckets = io::ReadSize(in);
@@ -712,6 +724,7 @@ struct Agent::Impl {
             add_sample(entry.sample);
         }
         for (const auto& sample : newest) add_sample(sample);
+        for (const auto& sample : held_out) add_sample(sample);
         return bytes;
     }
 
@@ -821,12 +834,21 @@ struct Agent::Impl {
     bool TrainsPerObservation() const { return has_actions || !continuous_outputs.empty(); }
 
     void MaybeTrain() {
-        if (untrained_samples < config.train_every) return;
-        untrained_samples -= config.train_every;
+        const size_t interval = config.train_every * training_slowdown;
+        if (untrained_samples < interval) return;
+        untrained_samples -= interval;
         Train();
+        CheckHeldOut();
     }
 
     void MakeTrainable(const SamplePtr& sample) {
+        if (sample->held_out) return;  // never trained on
+        if (!sample->in_replay && HoldsOut() && sample->key % config.holdout_every == 0) {
+            sample->held_out = true;
+            held_out.push_back(sample);
+            while (held_out.size() > config.holdout_capacity) held_out.pop_front();
+            return;
+        }
         if (!sample->in_replay && !TrainsPerObservation()) untrained_samples++;  // new, not more feedback for a stored sample
         replay.Add(sample);
         newest.push_back(sample);
@@ -982,6 +1004,11 @@ struct Agent::Impl {
         }
         // Re-estimate the blend from scratch
         out.neural = out.pattern_short = out.pattern_long = Quality();
+        // The held-out samples follow the old concept too; train at the full
+        // rate while the new one is learned
+        held_out.clear();
+        held_out_loss.clear();
+        training_slowdown = 1;
         // Labels and targets from before the drift describe the old concept:
         // drop them from replay (samples observed up to the warm-up length
         // before detection may already follow the new one and are kept)
@@ -1517,6 +1544,7 @@ struct Agent::Impl {
             // The fused vector is kept once, sparsely, in the sample
             entry.sample = std::make_shared<Sample>();
             entry.sample->step = step;
+            entry.sample->key = ObservationKey(observation);
             entry.sample->SetFused(*fused);
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
             entry.sample->continuous.resize(actor_critics.size());
@@ -1711,6 +1739,110 @@ struct Agent::Impl {
         return actor_critics[slot]->Train(b, rng).critic;
     }
 
+    /// Targets of the CLASS, VALUE and NEXT_OBSERVATION heads in network
+    /// units (regression targets standardized)
+    void SupervisedTargets(const std::vector<SamplePtr>& batch, std::vector<std::vector<HeadTarget>>& owned,
+                           std::vector<std::vector<const HeadTarget*>>& targets) const {
+        for (const auto& out : outputs) {
+            if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
+            auto h = static_cast<size_t>(out.head);
+            for (size_t r = 0; r < batch.size(); ++r) {
+                const HeadTarget& stored = batch[r]->targets[h];
+                if (stored.Empty()) continue;
+                HeadTarget& t = owned[h][r];
+                t.label = stored.label;
+                t.negative = stored.negative;
+                if (!stored.values.empty()) {
+                    t.values.resize(stored.values.size());
+                    for (size_t i = 0; i < stored.values.size(); ++i) {
+                        t.values[i] = out.spec->type == OutputType::VALUE ? ToZ(stored.values[i], out.target_stats[i])
+                                                                           : ToZ(stored.values[i], ObservedStats(i));
+                    }
+                }
+                targets[h][r] = &t;
+            }
+        }
+    }
+
+    // ---------------------------------------------------- held-out samples
+
+    /// FNV-1a hash of the raw observation: the same observation always gets
+    /// the same key (the fused vector changes as normalization adapts)
+    static uint64_t ObservationKey(const Observation& observation) {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const void* data, size_t bytes) {
+            const auto* p = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < bytes; ++i) {
+                h ^= p[i];
+                h *= 1099511628211ull;
+            }
+        };
+        auto mix_size = [&](size_t n) {
+            uint64_t v = n;
+            mix(&v, sizeof v);
+        };
+        for (const auto& [name, value] : observation) {
+            mix(name.data(), name.size());
+            mix_size(value.index());
+            if (const double* d = std::get_if<double>(&value)) {
+                mix(d, sizeof *d);
+            } else if (const auto* v = std::get_if<std::vector<float>>(&value)) {
+                mix(v->data(), v->size() * sizeof(float));
+            } else if (const auto* s = std::get_if<std::string>(&value)) {
+                mix(s->data(), s->size());
+            } else if (const auto* image = std::get_if<Image>(&value)) {
+                mix_size(image->width);
+                mix_size(image->height);
+                mix(image->pixels.data(), image->pixels.size() * sizeof(float));
+            }
+        }
+        return h;
+    }
+
+    /// Whether samples are held out to check the training rate (networks of
+    /// environments without action outputs)
+    bool HoldsOut() const { return config.holdout_every > 0 && network && !TrainsPerObservation(); }
+
+    /// Mean loss of each network head over the held-out samples (NaN without any)
+    std::vector<float> HeldOutLoss() const {
+        const size_t heads = network->HeadCount(), width = encoder.OutputSize();
+        std::vector<SamplePtr> batch(held_out.begin(), held_out.end());
+        nn::Matrix inputs(batch.size(), width);
+        for (size_t r = 0; r < batch.size(); ++r) batch[r]->Fill(inputs.Data() + r * width, width);
+        std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(batch.size()));
+        std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(batch.size()));
+        SupervisedTargets(batch, owned, targets);
+        return network->Losses(inputs, targets);
+    }
+
+    /// Every holdout_check_interval training steps: if the held-out loss
+    /// rose since the last check (mean relative change over the heads), the
+    /// network is fitting its samples more than it generalizes, so training
+    /// slows (twice the interval, up to max_training_slowdown); if it fell,
+    /// training speeds up again (down to every train_every samples)
+    void CheckHeldOut() {
+        if (!HoldsOut() || ++since_held_out_check < config.holdout_check_interval) return;
+        since_held_out_check = 0;
+        if (held_out.size() < config.holdout_min_samples) return;
+        auto loss = HeldOutLoss();
+        double change = 0.0;
+        size_t counted = 0;
+        for (size_t h = 0; h < loss.size() && h < held_out_loss.size(); ++h) {
+            if (std::isfinite(loss[h]) && std::isfinite(held_out_loss[h]) && held_out_loss[h] > 0.0f) {
+                change += (loss[h] - held_out_loss[h]) / held_out_loss[h];
+                ++counted;
+            }
+        }
+        if (counted > 0) {
+            if (change > 0.0) {
+                training_slowdown = std::min(training_slowdown * 2, config.max_training_slowdown);
+            } else if (change < 0.0) {
+                training_slowdown = std::max(training_slowdown / 2, size_t{1});
+            }
+        }
+        held_out_loss = loss;
+    }
+
     void Train() {
         if (replay.Size() == 0 || (!network && !autoencoder && actor_critics.empty())) return;
 
@@ -1745,25 +1877,7 @@ struct Agent::Impl {
             for (size_t r = 0; r < batch.size(); ++r) {
                 batch[r]->Fill(inputs.Data() + r * width, width);
             }
-            for (const auto& out : outputs) {
-                if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
-                auto h = static_cast<size_t>(out.head);
-                for (size_t r = 0; r < batch.size(); ++r) {
-                    const HeadTarget& stored = batch[r]->targets[h];
-                    if (stored.Empty()) continue;
-                    HeadTarget& t = owned[h][r];
-                    t.label = stored.label;
-                    t.negative = stored.negative;
-                    if (!stored.values.empty()) {
-                        t.values.resize(stored.values.size());
-                        for (size_t i = 0; i < stored.values.size(); ++i) {
-                            t.values[i] = out.spec->type == OutputType::VALUE ? ToZ(stored.values[i], out.target_stats[i])
-                                                                               : ToZ(stored.values[i], ObservedStats(i));
-                        }
-                    }
-                    targets[h][r] = &t;
-                }
-            }
+            SupervisedTargets(batch, owned, targets);
             for (const auto& out : outputs) {
                 if (out.spec->type == OutputType::ACTION) QTargets(out, batch, owned, targets);
             }
@@ -1892,6 +2006,7 @@ struct Agent::Impl {
         replay.ForEach([&](const SamplePtr& sample) { add(sample.get()); });
         for (const auto& entry : pending) add(entry.sample.get());
         for (const auto& sample : newest) add(sample.get());
+        for (const auto& sample : held_out) add(sample.get());
         auto id_of = [&](const Sample* sample) -> uint64_t {
             auto it = ids.find(sample);
             return it == ids.end() ? 0 : it->second;
@@ -1904,6 +2019,11 @@ struct Agent::Impl {
         for (const auto& sample : newest) io::Write<uint64_t>(out, id_of(sample.get()));
         io::WriteSize(out, recent.size());
         for (const auto& sample : recent) io::Write<uint64_t>(out, id_of(sample.lock().get()));
+        io::WriteSize(out, held_out.size());
+        for (const auto& sample : held_out) io::Write<uint64_t>(out, id_of(sample.get()));
+        WriteVector(out, held_out_loss);
+        io::WriteSize(out, training_slowdown);
+        io::WriteSize(out, since_held_out_check);
 
         // Pending steps
         io::WriteSize(out, pending.size());
@@ -2031,6 +2151,17 @@ struct Agent::Impl {
         recent.clear();
         count = io::ReadSize(in, 1u << 30);
         for (size_t i = 0; i < count; ++i) recent.push_back(lookup(io::Read<uint64_t>(in)));
+        held_out.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            auto sample = lookup(io::Read<uint64_t>(in));
+            if (!sample || !sample->held_out) throw std::runtime_error("Agent checkpoint: bad held-out entry");
+            held_out.push_back(std::move(sample));
+        }
+        held_out_loss = ReadVector<float>(in);
+        training_slowdown = io::ReadSize(in);
+        since_held_out_check = io::ReadSize(in);
+        if (training_slowdown == 0) throw std::runtime_error("Agent checkpoint: bad training slowdown");
 
         pending.clear();
         count = io::ReadSize(in, 1u << 30);
@@ -2089,6 +2220,8 @@ struct Agent::Impl {
         stats.training_steps = m.training_steps;
         stats.pending_steps = m.pending.size();
         stats.replay_size = m.replay.Size();
+        stats.held_out_samples = m.held_out.size();
+        stats.training_slowdown = m.training_slowdown;
         stats.patterns = m.patterns ? m.patterns->Size() : 0;
         stats.associations = m.patterns ? m.patterns->Associations().GetAssociationCount() : 0;
         stats.patterns_pruned = m.patterns ? m.patterns->Pruned() : 0;
@@ -2191,6 +2324,10 @@ struct Agent::Impl {
     uint64_t feedback_count{0};
     uint64_t ignored_feedback{0};
     uint64_t training_steps{0};
+    std::deque<SamplePtr> held_out;     ///< Newest held-out samples (never trained on)
+    std::vector<float> held_out_loss;   ///< Per head, at the last check
+    size_t training_slowdown{1};        ///< Training interval in units of train_every
+    size_t since_held_out_check{0};
     size_t untrained_samples{0};  ///< Samples (or, with actions, observations) toward the next training step
 
     Logger logger;

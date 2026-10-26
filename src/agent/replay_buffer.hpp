@@ -57,6 +57,11 @@ struct Sample {
     /// Class used for balancing (-1 = none)
     int balance_class{-1};
 
+    /// Hash of the raw observation; decides whether the sample is held out
+    uint64_t key{0};
+    /// Held out to check the training rate: never trained on
+    bool held_out{false};
+
     bool in_replay{false};
     size_t stored_bytes{0};  // MemoryBytes() when the buffer last measured it
 

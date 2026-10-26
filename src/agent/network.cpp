@@ -222,6 +222,45 @@ Matrix AgentNetwork::TrunkInfer(const Matrix& embedded) const {
     return hidden;
 }
 
+std::vector<float> AgentNetwork::Losses(const Matrix& inputs,
+                                        const std::vector<std::vector<const HeadTarget*>>& targets) const {
+    std::vector<float> losses(heads_.size(), std::numeric_limits<float>::quiet_NaN());
+    Matrix hidden = TrunkInfer(Embed(inputs, false));
+    for (size_t h = 0; h < heads_.size() && h < targets.size(); ++h) {
+        if (!heads_[h] || targets[h].size() != inputs.Rows() || head_specs_[h].kind == HeadKind::Q_VALUES) continue;
+        Matrix output = heads_[h]->Infer(hidden);
+        double loss = 0.0;
+        size_t terms = 0;
+        if (head_specs_[h].kind == HeadKind::CLASSIFIER) {
+            Matrix probabilities = nn::Softmax::Compute(output);
+            for (size_t r = 0; r < output.Rows(); ++r) {
+                const HeadTarget* t = targets[h][r];
+                if (!t || t->Empty()) continue;
+                ++terms;
+                if (t->label >= 0 && static_cast<size_t>(t->label) < output.Cols()) {
+                    loss -= std::log(std::max(probabilities(r, static_cast<size_t>(t->label)), 1e-7f));
+                }
+                if (t->negative >= 0 && static_cast<size_t>(t->negative) < output.Cols()) {
+                    loss -= std::log(std::max(1.0f - probabilities(r, static_cast<size_t>(t->negative)), 1e-4f));
+                }
+            }
+        } else {
+            for (size_t r = 0; r < output.Rows(); ++r) {
+                const HeadTarget* t = targets[h][r];
+                if (!t || t->values.size() != output.Cols()) continue;
+                for (size_t j = 0; j < output.Cols(); ++j) {
+                    if (std::isnan(t->values[j])) continue;
+                    double diff = output(r, j) - t->values[j];
+                    loss += diff * diff;
+                    ++terms;
+                }
+            }
+        }
+        if (terms > 0) losses[h] = static_cast<float>(loss / static_cast<double>(terms));
+    }
+    return losses;
+}
+
 Matrix AgentNetwork::Infer(const Matrix& inputs, size_t head) const {
     if (!heads_.at(head)) {
         return Matrix(inputs.Rows(), 0);

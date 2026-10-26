@@ -121,7 +121,11 @@ prediction carries a confidence value.
    or CONTINUOUS_ACTION outputs: every observation, learning rate 2e-4,
    trunk at least 64 wide; Q-value losses do not drive the plateau check.
    (Every 8 observations in all environments until the "training follows
-   new samples" change below.)
+   new samples" change below.) Without action outputs, one sample in 20
+   (by a hash of the raw observation) is held out of training, and the
+   training interval doubles (up to 8×) when the network's loss on the
+   held-out samples rises between checks and halves when it falls (see
+   "Change: held-out check of the training rate" below).
 4. **Mixed channels:** losses from all heads with samples are summed, each
    divided by its running average so no head dominates.
 5. **Concept drift:** a Page-Hinkley test on each head's loss. On
@@ -1028,4 +1032,50 @@ seed 3 (0.110 against 0.090; seeds 1–11: 10 of 11 pass).
 During a labelled pass the agent still trains as often as before, so the
 over-training per row and the over-fitting over repeated passes remain;
 the change removes only the training on observations without feedback.
+
+**Change: held-out check of the training rate.** Training less often
+helped Adult but hurt the less noisy tasks (`train_every`, seeds 1–3):
+
+| | 8 | 16 | 32 |
+|---|---|---|---|
+| Adult, 1 pass / 3 passes | 0.847–0.849 / 0.834–0.838 | 0.846–0.851 / 0.837–0.842 | 0.847–0.848 / 0.845–0.850 |
+| B: error / offline (≤ 1.2), C++ / Python | 1.148 / 1.111 | 1.198 / 1.236 (fails) | 1.260 / 1.234 (both fail) |
+| G (≥ 0.95) | 0.975 | 0.963 | 0.942 (fails) |
+| S2, lowest R² (≥ 0.7) | 0.776–0.789 | 0.772–0.781 | 0.676–0.683 (fails) |
+
+The loss on reused against first-use samples within a batch did not tell
+the tasks apart (its ratio was 0.41–0.49 for G, 0.77–0.78 for Adult's first
+pass, and near 1 on Adult's repeated passes, where its first-use samples are
+repeats). The training rate now follows held-out samples instead: without
+action outputs, a sample whose raw observation hashes to 0 modulo
+`holdout_every` (20) is kept out of training (the pattern memory still
+learns from it), so a repeated observation is held out every time. Every
+`holdout_check_interval` (100) training steps, the network's mean loss on
+the newest `holdout_capacity` (500) held-out samples is compared with the
+last check (once there are `holdout_min_samples`, 50): if it rose (mean
+relative change over the heads > 0), training happens half as often (up to
+every `max_training_slowdown` (8) × `train_every` samples); if it fell,
+twice as often. A drift clears the held-out samples and restores the full
+rate. `AgentStats::held_out_samples` and `training_slowdown` report them.
+Checkpoint version 7 adds the held-out samples, each sample's observation
+hash and held-out mark, and the controller state.
+
+| Seeds 1–3 | Before | After |
+|---|---|---|
+| Adult, 1 pass | 0.847–0.849 | 0.844–0.850 |
+| Adult, 3 passes | 0.834–0.838 | 0.845–0.847 |
+| B: C++ / Python (≤ 1.2) | 1.148 / 1.111 | 1.170 / 1.144 |
+| G (≥ 0.95) | 0.975 | 0.971 |
+| C: error / last value, C++ / Python | 0.110 / 0.122 | 0.118 / 0.120 |
+| S2, lowest R² | 0.776–0.803 | 0.774–0.807 |
+| S4, MSE 1,000–2,000 steps after the change | 0.0131–0.0140 | 0.0136–0.0145 |
+| SMS, 1 pass / 3 passes | 0.981–0.986 / 0.980–0.984 | 0.983–0.985 / 0.979–0.987 |
+| Digits, 1 pass / 3 passes | 0.983–0.989 / 0.981–0.989 | 0.981–0.992 / 0.986–0.994 |
+| Temperatures, MAE | 1.95–2.04 | 2.00–2.03 |
+
+The check prevents most of the over-fitting over repeated passes; a single
+pass is unchanged. The tasks that need much training lose a little,
+mostly because the held-out twentieth is never trained on. A tolerance of
+1% on the change gave the same results except on Adult (3 passes
+0.843–0.847).
 

@@ -224,6 +224,11 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, quality_rate),
         DPAN_FIELD(AgentConfig, anomaly_baseline),
         DPAN_FIELD(AgentConfig, max_classes),
+        DPAN_FIELD(AgentConfig, holdout_every),
+        DPAN_FIELD(AgentConfig, holdout_capacity),
+        DPAN_FIELD(AgentConfig, holdout_check_interval),
+        DPAN_FIELD(AgentConfig, holdout_min_samples),
+        DPAN_FIELD(AgentConfig, max_training_slowdown),
     };
     return fields;
 }
@@ -474,6 +479,8 @@ std::string StatsToJson(const AgentStats& s) {
     root.Set("training_steps", s.training_steps);
     root.Set("pending_steps", s.pending_steps);
     root.Set("replay_size", s.replay_size);
+    root.Set("held_out_samples", s.held_out_samples);
+    root.Set("training_slowdown", s.training_slowdown);
     root.Set("patterns", s.patterns);
     root.Set("patterns_pruned", s.patterns_pruned);
     root.Set("drift_events", s.drift_events);
