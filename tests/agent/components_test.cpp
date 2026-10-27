@@ -13,6 +13,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <sstream>
 
 namespace dpan {
 namespace agent {
@@ -320,6 +321,87 @@ TEST(AgentNetworkTest, WideningKeepsOutputsAndStillTrains) {
     EXPECT_TRUE(network.AllFinite());
     network.AllParameters().front().value->Data()[0] = std::nanf("");
     EXPECT_FALSE(network.AllFinite());
+}
+
+TEST(AgentNetworkTest, MemoryLearnsADelayedCue) {
+    // The sign of input 0 at the first step decides the class at the last;
+    // the other steps show noise only
+    std::vector<ChannelLayout> layout = {{"x", InputType::NUMERIC, 0, 2, 0}};
+    AgentNetwork network(layout, {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 7, 32, 512, 16);
+    EXPECT_EQ(16u, network.MemoryUnits());
+    std::mt19937 rng(14);
+    std::normal_distribution<float> noise(0.0f, 1.0f);
+    const size_t steps = 8, rows = 16;
+    auto episode = [&](std::vector<Matrix>& inputs, std::vector<int>& labels) {
+        inputs.assign(steps, Matrix(rows, 2));
+        labels.assign(rows, 0);
+        for (size_t r = 0; r < rows; ++r) {
+            labels[r] = noise(rng) > 0.0f ? 1 : 0;
+            inputs[0](r, 0) = labels[r] ? 1.0f : -1.0f;
+            for (size_t t = 1; t < steps; ++t) inputs[t](r, 1) = noise(rng);
+        }
+    };
+    std::vector<HeadTarget> label_targets(2);
+    label_targets[0].label = 0;
+    label_targets[1].label = 1;
+    for (int iteration = 0; iteration < 300; ++iteration) {
+        SequenceBatch batch;
+        std::vector<int> labels;
+        episode(batch.inputs, labels);
+        batch.initial = Matrix(rows, 16);
+        std::vector<const HeadTarget*> targets(steps * rows, nullptr);
+        for (size_t r = 0; r < rows; ++r) targets[(steps - 1) * rows + r] = &label_targets[labels[r]];
+        network.TrainSequences(batch, {targets}, {1.0f}, 5.0f);
+    }
+    // Online: advance the state step by step, then read the head
+    std::vector<Matrix> inputs;
+    std::vector<int> labels;
+    episode(inputs, labels);
+    Matrix state(rows, 16);
+    for (size_t t = 0; t < steps; ++t) state = network.Step(inputs[t], state);
+    Matrix logits = network.Infer(inputs.back(), 0, &state);
+    int correct = 0;
+    for (size_t r = 0; r < rows; ++r) correct += (logits(r, 1) > logits(r, 0) ? 1 : 0) == labels[r];
+    EXPECT_GE(correct, 15);
+    EXPECT_THROW(network.TrainBatch(inputs[0], {std::vector<const HeadTarget*>(rows, nullptr)}, {1.0f}, 5.0f),
+                 std::logic_error);
+}
+
+TEST(AgentNetworkTest, MemoryNetworkWidensCopiesAndSerializes) {
+    AgentNetwork network(Layout(), {{"c", HeadKind::CLASSIFIER, 3}, {"v", HeadKind::REGRESSOR, 2}}, 1e-2f, 8, 32,
+                         512, 6);
+    std::mt19937 rng(15);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    Matrix x(5, 12), state(5, 6);
+    for (size_t i = 0; i < x.Size(); ++i) x.Data()[i] = normal(rng);
+    for (size_t i = 0; i < state.Size(); ++i) state.Data()[i] = 0.5f * normal(rng);
+    Matrix next = network.Step(x, state);
+    Matrix before0 = network.Infer(x, 0, &next), before1 = network.Infer(x, 1, &next);
+
+    std::stringstream buffer;
+    network.Serialize(buffer);
+    auto loaded = AgentNetwork::Deserialize(buffer);
+    AgentNetwork copy(network);
+    EXPECT_EQ(next.Values(), loaded->Step(x, state).Values());
+    EXPECT_EQ(before0.Values(), loaded->Infer(x, 0, &next).Values());
+    EXPECT_EQ(before1.Values(), copy.Infer(x, 1, &next).Values());
+    EXPECT_EQ(network.ParameterCount(), loaded->ParameterCount());
+
+    network.Widen(48);
+    Matrix wide_next = network.Step(x, state);
+    for (size_t i = 0; i < next.Size(); ++i) EXPECT_NEAR(next.Data()[i], wide_next.Data()[i], 1e-4f);
+    Matrix after0 = network.Infer(x, 0, &next), after1 = network.Infer(x, 1, &next);
+    for (size_t i = 0; i < before0.Size(); ++i) EXPECT_NEAR(before0.Data()[i], after0.Data()[i], 1e-4f);
+    for (size_t i = 0; i < before1.Size(); ++i) EXPECT_NEAR(before1.Data()[i], after1.Data()[i], 1e-4f);
+
+    AgentNetwork classes(Layout(), {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 9, 32, 512, 6);
+    Matrix two = classes.Infer(x, 0, &next);
+    classes.GrowClasses(0, 4);
+    Matrix four = classes.Infer(x, 0, &next);
+    for (size_t r = 0; r < 5; ++r) {
+        for (size_t c = 0; c < 2; ++c) EXPECT_FLOAT_EQ(two(r, c), four(r, c));
+    }
+    EXPECT_THROW(network.Infer(x, 0, &x), std::invalid_argument);  // wrong state size
 }
 
 TEST(ReplayBufferTest, StaysWithinByteBudget) {

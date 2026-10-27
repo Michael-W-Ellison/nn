@@ -24,6 +24,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace dpan {
@@ -62,6 +63,12 @@ void CheckConfig(const AgentConfig& c) {
                                      c.holdout_min_samples <= c.holdout_capacity && c.max_training_slowdown > 0),
             "holdout_capacity, holdout_check_interval and max_training_slowdown must be > 0, and "
             "holdout_min_samples <= holdout_capacity");
+    require(c.memory_units == 0 ||
+                (c.memory_window > 0 && c.memory_batch > 0 && c.memory_history >= c.memory_window &&
+                 c.action_memory_window > 0 && c.action_memory_batch > 0 && c.memory_history >= c.action_memory_window &&
+                 c.memory_burn_in < std::min(c.memory_window, c.action_memory_window)),
+            "with memory_units > 0, the memory windows and batches must be > 0, memory_history at least each window, "
+            "and memory_burn_in shorter than each window");
     require(c.memory_budget_bytes > 0, "memory_budget_bytes must be > 0");
     require(c.snapshot_interval > 0 && c.divergence_loss > 0.0f, "snapshot_interval and divergence_loss must be > 0");
     require(c.capacity_growth > 1.0f, "capacity_growth must be > 1");
@@ -157,7 +164,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 8;
+constexpr uint32_t kCheckpointVersion = 9;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -297,7 +304,8 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.anomaly_baseline);
     io::WriteSize(out, c.max_classes);
     for (size_t v : {c.holdout_every, c.holdout_capacity, c.holdout_check_interval, c.holdout_min_samples,
-                     c.max_training_slowdown}) {
+                     c.max_training_slowdown, c.memory_units, c.memory_window, c.memory_batch, c.memory_history,
+                     c.memory_burn_in, c.action_memory_window, c.action_memory_batch}) {
         io::WriteSize(out, v);
     }
     io::Write<float>(out, c.encoder.clip_sigma);
@@ -375,7 +383,8 @@ AgentConfig LoadConfig(std::istream& in) {
     c.anomaly_baseline = io::ReadSize(in);
     c.max_classes = io::ReadSize(in);
     for (size_t* v : {&c.holdout_every, &c.holdout_capacity, &c.holdout_check_interval, &c.holdout_min_samples,
-                      &c.max_training_slowdown}) {
+                      &c.max_training_slowdown, &c.memory_units, &c.memory_window, &c.memory_batch,
+                      &c.memory_history, &c.memory_burn_in, &c.action_memory_window, &c.action_memory_batch}) {
         *v = io::ReadSize(in);
     }
     c.encoder.clip_sigma = io::Read<float>(in);
@@ -648,7 +657,9 @@ struct Agent::Impl {
         auto heads = PrepareLayout();
         if (!heads.empty()) {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
-                                                     config.min_trunk_width, config.max_trunk_width);
+                                                     config.min_trunk_width, config.max_trunk_width,
+                                                     config.memory_units,
+                                                     static_cast<float>(config.memory_window));
             head_loss.assign(heads.size(), kNaN);
             if (has_actions) target_network = std::make_unique<AgentNetwork>(*network);
         }
@@ -743,6 +754,7 @@ struct Agent::Impl {
         }
         for (const auto& sample : newest) add_sample(sample);
         for (const auto& sample : held_out) add_sample(sample);
+        for (const auto& sample : history) add_sample(sample);
         return bytes;
     }
 
@@ -1095,6 +1107,22 @@ struct Agent::Impl {
         return n + p > 0.0 ? static_cast<float>(n / (n + p)) : 0.5f;
     }
 
+    bool HasMemory() const { return network && network->MemoryUnits() > 0; }
+
+    /// The network's state after this sample's step (0 if it has none)
+    nn::Matrix MemoryRow(const Sample* sample) const {
+        const size_t m = network->MemoryUnits();
+        if (sample && sample->memory_after.size() == m) return nn::Matrix::RowVector(sample->memory_after);
+        return nn::Matrix(1, m);
+    }
+
+    /// One head's outputs for a pending step (with its memory state)
+    nn::Matrix HeadOutputs(const Pending& entry, size_t head) const {
+        if (!HasMemory()) return network->Infer(FusedRow(entry), head);
+        nn::Matrix memory = MemoryRow(entry.sample.get());
+        return network->Infer(FusedRow(entry), head, &memory);
+    }
+
     std::optional<std::vector<float>> NeuralClass(const Pending& entry, const OutputState& out) const {
         // An output trained only by outcomes must predict before it has
         // learned anything, so its outcomes have a prediction to refer to
@@ -1102,7 +1130,7 @@ struct Agent::Impl {
             network->Head(static_cast<size_t>(out.head)).size == 0) {
             return std::nullopt;
         }
-        auto probabilities = Softmax(network->Infer(FusedRow(entry), out.head));
+        auto probabilities = Softmax(HeadOutputs(entry, static_cast<size_t>(out.head)));
         probabilities.resize(out.classes.size(), 0.0f);
         return probabilities;
     }
@@ -1121,14 +1149,14 @@ struct Agent::Impl {
 
     std::optional<std::vector<float>> NeuralValue(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
+        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], out.target_stats[i]);
         return z;
     }
 
     std::optional<std::vector<float>> NeuralNext(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
+        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], ObservedStats(i));
         return z;
     }
@@ -1145,7 +1173,7 @@ struct Agent::Impl {
     /// Q-values once the head is past the cold start
     std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples < config.cold_start_samples) return std::nullopt;
-        return network->Infer(FusedRow(entry), static_cast<size_t>(out.head)).Row(0);
+        return HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
     }
 
     /// Highest Q-value; ties (and the cold start) decided by association
@@ -1583,6 +1611,18 @@ struct Agent::Impl {
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
             entry.sample->continuous.resize(actor_critics.size());
 
+            if (HasMemory()) {
+                // Advance the memory state (0 at an episode start)
+                const size_t m = network->MemoryUnits();
+                entry.sample->episode_start = !previous_step.has_value();
+                if (entry.sample->episode_start || memory_state.size() != m) memory_state.assign(m, 0.0f);
+                entry.sample->memory_before = memory_state;
+                memory_state = network->Step(FusedRow(entry), nn::Matrix::RowVector(memory_state)).Row(0);
+                entry.sample->memory_after = memory_state;
+                history.push_back(entry.sample);
+                while (history.size() > config.memory_history) history.pop_front();
+            }
+
             // Distance to the nearest pattern before this state was stored
             if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
 
@@ -1696,15 +1736,25 @@ struct Agent::Impl {
     /// its discount x the target network's value of the action the online
     /// network picks in the state after the last step (no future part
     /// after a terminal step)
+    /// Memory: the online and target networks' states at every step of the
+    /// training windows (as for MemoryWindows: index t x windows + w)
+    struct WindowStates {
+        std::vector<nn::Matrix> online, target;
+        std::unordered_map<const Sample*, size_t> index;
+        size_t windows{0};
+    };
+
     void QTargets(const OutputState& out, const std::vector<SamplePtr>& batch,
                   std::vector<std::vector<HeadTarget>>& owned,
-                  std::vector<std::vector<const HeadTarget*>>& targets) const {
+                  std::vector<std::vector<const HeadTarget*>>& targets,
+                  const WindowStates* window_states = nullptr) const {
         const auto h = static_cast<size_t>(out.head);
         const size_t width = encoder.OutputSize();
         const size_t n = out.classes.size();
         std::vector<size_t> rows, bootstrap;
         std::map<size_t, Return> returns;
         for (size_t r = 0; r < batch.size(); ++r) {
+            if (!batch[r]) continue;
             const Sample& sample = *batch[r];
             if (sample.targets[h].action < 0 || !(sample.has_next || sample.terminal)) continue;
             rows.push_back(r);
@@ -1719,8 +1769,37 @@ struct Agent::Impl {
             for (size_t i = 0; i < bootstrap.size(); ++i) {
                 returns[bootstrap[i]].bootstrap->FillNext(next.Data() + i * width, width);
             }
-            nn::Matrix online = network->Infer(next, h);
-            nn::Matrix target = target_network->Infer(next, h);
+            nn::Matrix online, target;
+            if (HasMemory()) {
+                // The next state's memory: each network's own state there when
+                // the next step is in a training window, else the state
+                // computed when it was observed
+                const size_t m = network->MemoryUnits();
+                nn::Matrix online_memory(bootstrap.size(), m), target_memory(bootstrap.size(), m);
+                for (size_t i = 0; i < bootstrap.size(); ++i) {
+                    auto next_sample = returns[bootstrap[i]].bootstrap->next_sample.lock();
+                    if (!next_sample) continue;
+                    auto found = window_states ? window_states->index.find(next_sample.get())
+                                               : decltype(window_states->index.end()){};
+                    if (window_states && found != window_states->index.end()) {
+                        size_t t = found->second / window_states->windows, w = found->second % window_states->windows;
+                        std::copy(window_states->online[t].Data() + w * m, window_states->online[t].Data() + (w + 1) * m,
+                                  online_memory.Data() + i * m);
+                        std::copy(window_states->target[t].Data() + w * m, window_states->target[t].Data() + (w + 1) * m,
+                                  target_memory.Data() + i * m);
+                    } else if (next_sample->memory_after.size() == m) {
+                        std::copy(next_sample->memory_after.begin(), next_sample->memory_after.end(),
+                                  online_memory.Data() + i * m);
+                        std::copy(next_sample->memory_after.begin(), next_sample->memory_after.end(),
+                                  target_memory.Data() + i * m);
+                    }
+                }
+                online = network->Infer(next, h, &online_memory);
+                target = target_network->Infer(next, h, &target_memory);
+            } else {
+                online = network->Infer(next, h);
+                target = target_network->Infer(next, h);
+            }
             for (size_t i = 0; i < bootstrap.size(); ++i) {
                 size_t best = 0;
                 for (size_t a = 1; a < n; ++a) {
@@ -1781,6 +1860,7 @@ struct Agent::Impl {
             if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
             auto h = static_cast<size_t>(out.head);
             for (size_t r = 0; r < batch.size(); ++r) {
+                if (!batch[r]) continue;
                 const HeadTarget& stored = batch[r]->targets[h];
                 if (stored.Empty()) continue;
                 HeadTarget& t = owned[h][r];
@@ -1846,7 +1926,15 @@ struct Agent::Impl {
         std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(batch.size()));
         std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(batch.size()));
         SupervisedTargets(batch, owned, targets);
-        return network->Losses(inputs, targets);
+        if (!HasMemory()) return network->Losses(inputs, targets);
+        const size_t m = network->MemoryUnits();
+        nn::Matrix memory(batch.size(), m);
+        for (size_t r = 0; r < batch.size(); ++r) {
+            if (batch[r]->memory_after.size() == m) {
+                std::copy(batch[r]->memory_after.begin(), batch[r]->memory_after.end(), memory.Data() + r * m);
+            }
+        }
+        return network->Losses(inputs, targets, &memory);
     }
 
     /// Every holdout_check_interval training steps: if the held-out loss
@@ -1877,6 +1965,60 @@ struct Agent::Impl {
         held_out_loss = loss;
     }
 
+    /// Windows for training with memory: each of `ends` ends a window of up
+    /// to memory_window consecutive steps from the history, not reaching
+    /// back past an episode start. Each window starts from the state stored
+    /// before its first step (0 at an episode start). Returns the steps
+    /// time-major (row t x windows + w; nullptr pads shorter windows at the end).
+    std::vector<SamplePtr> MemoryWindows(const std::vector<SamplePtr>& ends, SequenceBatch& sequences) const {
+        const size_t m = network->MemoryUnits(), width = encoder.OutputSize();
+        const size_t count = ends.size();
+        std::vector<std::vector<SamplePtr>> windows;
+        size_t steps = 0;
+        for (size_t w = 0; w < count; ++w) {
+            const SamplePtr& end = ends[w];
+            std::vector<SamplePtr> window{end};
+            auto it = std::lower_bound(history.begin(), history.end(), end->step,
+                                       [](const SamplePtr& s, uint64_t step) { return s->step < step; });
+            if (it != history.end() && *it == end) {
+                size_t i = static_cast<size_t>(it - history.begin());
+                while (window.size() < config.memory_window && !history[i]->episode_start && i > 0 &&
+                       history[i - 1]->step + 1 == history[i]->step) {
+                    window.push_back(history[--i]);
+                }
+            }
+            std::reverse(window.begin(), window.end());
+            if (has_actions && it != history.end() && *it == end) {
+                // A few steps past the end, so the multi-step targets near it
+                // bootstrap from states computed in the window
+                size_t i = static_cast<size_t>(it - history.begin());
+                for (size_t k = 0; k < config.action_return_steps && i + 1 < history.size() &&
+                                   !history[i + 1]->episode_start && history[i + 1]->step == history[i]->step + 1;
+                     ++k) {
+                    window.push_back(history[++i]);
+                }
+            }
+            steps = std::max(steps, window.size());
+            windows.push_back(std::move(window));
+        }
+        sequences.inputs.assign(steps, nn::Matrix(count, width));
+        sequences.initial = nn::Matrix(count, m);
+        sequences.resets.clear();
+        std::vector<SamplePtr> rows(steps * count);
+        for (size_t w = 0; w < count; ++w) {
+            const auto& window = windows[w];
+            const Sample& first = *window.front();
+            if (!first.episode_start && first.memory_before.size() == m) {
+                std::copy(first.memory_before.begin(), first.memory_before.end(), sequences.initial.Data() + w * m);
+            }
+            for (size_t t = 0; t < window.size(); ++t) {
+                window[t]->Fill(sequences.inputs[t].Data() + w * width, width);
+                rows[t * count + w] = window[t];
+            }
+        }
+        return rows;
+    }
+
     void Train() {
         if (replay.Size() == 0 || (!network && !autoencoder && actor_critics.empty())) return;
 
@@ -1886,6 +2028,10 @@ struct Agent::Impl {
         auto wanted = static_cast<size_t>(std::lround(config.batch_size * share));
         size_t from_newest = std::min(newest.size(), wanted);
         std::vector<SamplePtr> batch(newest.end() - static_cast<std::ptrdiff_t>(from_newest), newest.end());
+        // With memory: one window ends at the newest sample (it covers the
+        // steps since the last training step), the others at replayed ones
+        std::vector<SamplePtr> window_ends;
+        if (HasMemory() && !newest.empty()) window_ends.push_back(newest.back());
         newest.clear();
         if (recovering_outputs > 0 && !recent.empty()) {
             std::uniform_int_distribution<size_t> pick(0, recent.size() - 1);
@@ -1896,6 +2042,14 @@ struct Agent::Impl {
         auto drawn = replay.Draw(config.batch_size - batch.size());
         batch.insert(batch.end(), drawn.begin(), drawn.end());
         if (batch.empty()) return;
+        if (HasMemory()) {
+            std::vector<SamplePtr> more = replay.Draw(config.memory_batch);
+            for (auto& sample : more) {
+                if (window_ends.size() >= config.memory_batch) break;
+                if (window_ends.empty() || sample != window_ends.front()) window_ends.push_back(std::move(sample));
+            }
+            if (window_ends.empty()) window_ends.push_back(batch.front());
+        }
 
         const size_t width = encoder.OutputSize();
         float total_loss = 0.0f;
@@ -1904,22 +2058,51 @@ struct Agent::Impl {
         auto bad = [&](float loss) { return std::isinf(loss) || loss > config.divergence_loss; };
 
         if (network) {
-            nn::Matrix inputs(batch.size(), width);
             const size_t heads = network->HeadCount();
-            std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(batch.size()));
-            std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(batch.size()));
-            for (size_t r = 0; r < batch.size(); ++r) {
-                batch[r]->Fill(inputs.Data() + r * width, width);
+            // With memory: the steps of the windows, time-major (nullptr = padding)
+            SequenceBatch sequences;
+            const std::vector<SamplePtr> rows = HasMemory() ? MemoryWindows(window_ends, sequences) : batch;
+            std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(rows.size()));
+            std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(rows.size()));
+            SupervisedTargets(rows, owned, targets);
+            WindowStates window_states;
+            if (HasMemory() && target_network) {
+                window_states.online = network->States(sequences);
+                window_states.target = target_network->States(sequences);
+                window_states.windows = sequences.initial.Rows();
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    if (rows[r]) window_states.index.emplace(rows[r].get(), r);
+                }
             }
-            SupervisedTargets(batch, owned, targets);
             for (const auto& out : outputs) {
-                if (out.spec->type == OutputType::ACTION) QTargets(out, batch, owned, targets);
+                if (out.spec->type == OutputType::ACTION) {
+                    QTargets(out, rows, owned, targets, HasMemory() && target_network ? &window_states : nullptr);
+                }
+            }
+            if (HasMemory()) {
+                // Window steps outside the replay buffer (held out, evicted, or
+                // dropped after a drift) are context only
+                const size_t windows = sequences.initial.Rows();
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    size_t t = r / windows, w = r % windows;
+                    // Row w is the window's first step
+                    bool burning = t < config.memory_burn_in && rows[w] && !rows[w]->episode_start;
+                    if (rows[r] && rows[r]->in_replay && !burning) continue;
+                    for (size_t h = 0; h < heads; ++h) targets[h][r] = nullptr;
+                }
             }
             std::vector<float> scale(heads, 1.0f);
             for (size_t h = 0; h < heads; ++h) {
                 if (!std::isnan(head_loss[h])) scale[h] = 1.0f / std::max(head_loss[h], 1e-3f);
             }
-            auto losses = network->TrainBatch(inputs, targets, scale, config.gradient_clip_norm);
+            std::vector<float> losses;
+            if (HasMemory()) {
+                losses = network->TrainSequences(sequences, targets, scale, config.gradient_clip_norm);
+            } else {
+                nn::Matrix inputs(batch.size(), width);
+                for (size_t r = 0; r < batch.size(); ++r) batch[r]->Fill(inputs.Data() + r * width, width);
+                losses = network->TrainBatch(inputs, targets, scale, config.gradient_clip_norm);
+            }
             for (size_t h = 0; h < heads; ++h) diverged = diverged || bad(losses[h]);
             for (size_t h = 0; h < heads; ++h) {
                 if (std::isnan(losses[h])) continue;
@@ -2044,6 +2227,7 @@ struct Agent::Impl {
         for (const auto& entry : pending) add(entry.sample.get());
         for (const auto& sample : newest) add(sample.get());
         for (const auto& sample : held_out) add(sample.get());
+        for (const auto& sample : history) add(sample.get());
         auto id_of = [&](const Sample* sample) -> uint64_t {
             auto it = ids.find(sample);
             return it == ids.end() ? 0 : it->second;
@@ -2061,6 +2245,9 @@ struct Agent::Impl {
         WriteVector(out, held_out_loss);
         io::WriteSize(out, training_slowdown);
         io::WriteSize(out, since_held_out_check);
+        io::WriteSize(out, history.size());
+        for (const auto& sample : history) io::Write<uint64_t>(out, id_of(sample.get()));
+        WriteVector(out, memory_state);
 
         // Pending steps
         io::WriteSize(out, pending.size());
@@ -2202,6 +2389,16 @@ struct Agent::Impl {
         training_slowdown = io::ReadSize(in);
         since_held_out_check = io::ReadSize(in);
         if (training_slowdown == 0) throw std::runtime_error("Agent checkpoint: bad training slowdown");
+        history.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            auto sample = lookup(io::Read<uint64_t>(in));
+            if (!sample || (!history.empty() && sample->step <= history.back()->step)) {
+                throw std::runtime_error("Agent checkpoint: bad history entry");
+            }
+            history.push_back(std::move(sample));
+        }
+        memory_state = ReadVector<float>(in);
 
         pending.clear();
         count = io::ReadSize(in, 1u << 30);
@@ -2368,6 +2565,8 @@ struct Agent::Impl {
     uint64_t feedback_count{0};
     uint64_t ignored_feedback{0};
     uint64_t training_steps{0};
+    std::deque<SamplePtr> history;      ///< Memory: the newest steps, in order
+    std::vector<float> memory_state;    ///< Memory: the state after the last step
     std::deque<SamplePtr> held_out;     ///< Newest held-out samples (never trained on)
     std::vector<float> held_out_loss;   ///< Per head, at the last check
     size_t training_slowdown{1};        ///< Training interval in units of train_every
@@ -2411,6 +2610,8 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         config.learning_rate = config.action_learning_rate;
         config.min_trunk_width = std::min(config.max_trunk_width,
                                           std::max(config.min_trunk_width, config.action_min_trunk_width));
+        config.memory_window = config.action_memory_window;
+        config.memory_batch = config.action_memory_batch;
     }
 
     impl_ = std::make_unique<Impl>(std::move(spec), config);
@@ -2512,6 +2713,7 @@ void Agent::EndEpisode(bool terminal) {
     }
     m.encoder.ResetEpisode();
     m.previous_step.reset();
+    m.memory_state.clear();
     m.last_acted_step.reset();
     m.episodes++;
 }

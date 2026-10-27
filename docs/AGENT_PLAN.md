@@ -195,6 +195,7 @@ integration test with a fixed seed and a fake clock.
 | 6. Images and speed | Complete. `Conv2D`, `MaxPool2D`, `Flatten` (`src/nn/convolution.hpp`), optional BLAS and multithreaded matrix products (`src/nn/compute.hpp`), convolutional image embeddings in the agent. Reference environment G passes (results and notes below). |
 | 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
 | 8. Continuous actions | Complete. `CONTINUOUS_ACTION` outputs with bounds (`OutputSpec::low` / `high`), learned with TD3 (`src/agent/actor_critic.hpp`); `Agent::ActContinuous`, `dpan_agent_act_continuous`, Python `act_continuous`. Reference environment I passes (results and notes below). |
+| 9. Memory | Complete. A GRU after the trunk (`memory_units`, off by default; `src/nn/recurrent.hpp`), trained on windows of steps with backpropagation through time. Memory tasks M1, M2 and M4 pass at the defaults, M3 with its own window settings (results below). |
 
 ### Phase 1 implementation notes
 
@@ -1112,3 +1113,88 @@ of three seeds, later passes within noise, the other CLASS tasks within
 noise. The weight follows the last ~50 labels and varies between seeds
 (0.57–0.98 at the end of Adult's first pass).
 
+
+## Phase 9: memory
+
+Goal: tasks whose answer depends on observations from earlier steps that
+the current observation does not show.
+
+**Design.** A GRU layer (`src/nn/recurrent.hpp`) after the trunk, enabled by
+`memory_units` (0 = off, the default): its state h_t = GRU(trunk(x_t),
+h_{t−1}) starts at 0 at the beginning of each episode (after `EndEpisode`; a
+stream without episodes is one sequence), and a Dense+ReLU layer on [trunk
+output, h_t] feeds the heads.
+
+- *Online:* each observation advances the state with the current weights;
+  the step's sample keeps the state before it (h_{t−1}) and after it (h_t).
+  Predictions use h_t.
+- *History:* the newest `memory_history` (20,000) steps are kept in order
+  (also those without feedback, whose inputs the state needs).
+- *Training:* each training step unrolls the network over `memory_batch`
+  windows of up to `memory_window` consecutive steps, with
+  backpropagation through time: one window ends at the newest sample (it
+  covers the steps since the last training step), the others at samples
+  drawn from replay. A window starts at the episode start (state 0) or from
+  the state stored before its first step; it does not reach back past an
+  episode start. Every step of a window that is in the replay buffer and
+  has a target adds to the loss (held-out samples, evicted ones and targets
+  dropped after a drift are context only), except the first
+  `memory_burn_in` (0) steps of a window that starts inside an episode.
+  Environments with action outputs use `action_memory_window` (8) and
+  `action_memory_batch` (32) instead of `memory_window` (64) and
+  `memory_batch` (8).
+- *Initialization:* the GRU's update-gate biases follow "chrono"
+  initialization (Tallec & Ollivier 2018) up to the window length, so its
+  units start out keeping their state for 2 to `memory_window` steps.
+- *Q-learning targets:* windows of environments with action outputs extend
+  `action_return_steps` steps past their end; the next state's value uses
+  each network's own state there when that step is in a window (both the
+  online and the target network are unrolled over the windows), else the
+  state stored when the step was observed.
+- Continuous actions (TD3) and the pattern memory do not use the state.
+- Checkpoint version 9: the memory settings, each sample's states and
+  episode-start mark, the history and the current state.
+
+**Tasks** (`tests/agent/memory_test.cpp`; criteria fixed before the first
+run; the memoryless agent is run on each once to show it fails):
+
+| | Task | Pass |
+|---|---|---|
+| M1 | Delayed recall: a cue (A–D) shown only at an episode's first step, then D steps with a 2-value noise input and no cue; a label for the cue at the last step. D = 5, 20, 50; 3,000 episodes each | accuracy at the last step over the last 500 episodes ≥ 0.9 (chance 0.25) |
+| M2 | T-maze: a corridor of 10 cells, a cue (left/right) only at the first cell; actions forward, left, right; at the junction turning toward the cue ends the episode with reward +4, the other way with −1; left/right in the corridor and forward at the junction cost −0.1; cut off after 30 steps. 2,000 training episodes | 100 greedy episodes after training: ≥ 90% turn toward the cue |
+| M3 | Cart-pole (environment F) observing only the cart position and pole angle (NUMERIC, so no differences are computed) | average reward of 100 consecutive episodes ≥ 195 within 2,000 episodes |
+| M4 | Running count: episodes of 50 steps, each step one event a, b or c (uniform); a VALUE output with the number of a's so far in the episode, as a target at every step; 1,000 episodes | mean absolute error over the last 100 episodes ≤ 0.5 |
+
+### Phase 9 results
+
+`memory_units` 32; the memoryless agent (defaults) for comparison:
+
+| | Without memory | With memory | Time |
+|---|---|---|---|
+| M1, delay 5 / 20 / 50 | 0.244 / 0.280 / 0.264 | 1.000 / 1.000 / 1.000 | 2 s / 12 s / 29 s |
+| M2 | 59 of 100 | 100 of 100 | 210 s |
+| M3 | best average 44.6 | 195 after 535 episodes, with `action_memory_window` 4 and `action_memory_batch` 64; best average 186.3 at the defaults (8, 32) | 506 s |
+| M4 | 4.27 | 0.081 | 14 s |
+
+M3 passes only with settings that make M2 fail (M2 at 64 windows of 4
+steps: 59 and 61 of 100), so the action defaults are those that pass M2,
+and the M3 test sets its own. Steps toward these results (M3: best
+100-episode average unless solved):
+
+| Change | M1 delay 50 | M2 | M3 | M4 |
+|---|---|---|---|---|
+| First version: update-gate bias 1, Q-learning targets from stored states, heads directly on [trunk, state], window ends spread over the batch (8 windows of 64 steps) | 0.238 | 96 | 24.8 | 0.083 |
+| Chrono initialization | 1.000 | 100 | 32.2 | 0.056 |
+| Q-learning targets from states unrolled over the windows | | | 37.2 (16 × 8: 69.9) | |
+| One window at the newest sample, the others at replayed ones | | | 79.1 | |
+| Dense+ReLU layer on [trunk, state] before the heads | 1.000 | 100 | 128.7 | 0.081 |
+| M3 windows × length: 32 × 8 / 16 × 16 with burn-in 8 / 64 × 8 / 64 × 8 with burn-in 4 / 64 × 4 | | | 186.3 / 160.9 / 169.5 / 160.3 / solved after 535 episodes | |
+
+With full cart-pole observations (velocities included) the memoryless
+agent reached a best average of 183.3 in 2,000 episodes on M3's seed, the
+agent with memory and 64 windows of 2 steps solved it after 286 episodes,
+and with the first version's 8 windows of 64 steps it reached 134.9: the
+number of independent windows, not the memory itself, limited Q-learning.
+Cost: with memory a training step of an environment with action outputs
+unrolls 256 steps (32 × 8) instead of training 64 samples; the memory tests
+take about 13 minutes together (label `memory`; `ctest -LE memory` skips them).

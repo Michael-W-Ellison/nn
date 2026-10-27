@@ -230,6 +230,13 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, holdout_check_interval),
         DPAN_FIELD(AgentConfig, holdout_min_samples),
         DPAN_FIELD(AgentConfig, max_training_slowdown),
+        DPAN_FIELD(AgentConfig, memory_units),
+        DPAN_FIELD(AgentConfig, memory_window),
+        DPAN_FIELD(AgentConfig, memory_batch),
+        DPAN_FIELD(AgentConfig, memory_history),
+        DPAN_FIELD(AgentConfig, memory_burn_in),
+        DPAN_FIELD(AgentConfig, action_memory_window),
+        DPAN_FIELD(AgentConfig, action_memory_batch),
     };
     return fields;
 }

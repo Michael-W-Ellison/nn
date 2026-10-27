@@ -17,8 +17,10 @@ namespace agent {
 using nn::Matrix;
 
 AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector<HeadSpec> heads,
-                           float learning_rate, uint32_t seed, size_t min_width, size_t max_width)
-    : learning_rate_(learning_rate),
+                           float learning_rate, uint32_t seed, size_t min_width, size_t max_width,
+                           size_t memory_units, float memory_timescale)
+    : memory_units_(memory_units),
+      learning_rate_(learning_rate),
       seed_(seed),
       head_specs_(std::move(heads)),
       body_optimizer_(learning_rate) {
@@ -53,10 +55,15 @@ AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector
     trunk_.push_back(std::make_unique<nn::Dense>(trunk_width_, trunk_width_, nn::Initialization::HE,
                                                  ++layer_seed));
     trunk_.push_back(std::make_unique<nn::ReLU>());
+    if (memory_units_ > 0) {
+        memory_ = std::make_unique<nn::GRU>(trunk_width_, memory_units_, ++layer_seed, memory_timescale);
+        post_ = std::make_unique<nn::Dense>(trunk_width_ + memory_units_, trunk_width_, nn::Initialization::HE,
+                                            ++layer_seed);
+    }
 
     for (const auto& spec : head_specs_) {
         heads_.push_back(spec.size == 0 ? nullptr
-                                        : std::make_unique<nn::Dense>(trunk_width_, spec.size,
+                                        : std::make_unique<nn::Dense>(HeadInputWidth(), spec.size,
                                                                       nn::Initialization::XAVIER,
                                                                       ++layer_seed));
         head_optimizers_.emplace_back(learning_rate);
@@ -76,6 +83,9 @@ AgentNetwork::AgentNetwork(const AgentNetwork& other)
     : input_size_(other.input_size_),
       embedded_size_(other.embedded_size_),
       trunk_width_(other.trunk_width_),
+      memory_units_(other.memory_units_),
+      memory_(other.memory_ ? std::make_unique<nn::GRU>(*other.memory_) : nullptr),
+      post_(other.post_ ? CloneDense(*other.post_) : nullptr),
       learning_rate_(other.learning_rate_),
       seed_(other.seed_),
       head_specs_(other.head_specs_),
@@ -120,6 +130,11 @@ void AgentNetwork::Serialize(std::ostream& out) const {
     }
     io::WriteSize(out, trunk_.size());
     for (const auto& layer : trunk_) layer->Serialize(out);
+    io::WriteSize(out, memory_units_);
+    if (memory_) {
+        memory_->Serialize(out);
+        post_->Serialize(out);
+    }
     io::WriteSize(out, heads_.size());
     for (size_t h = 0; h < heads_.size(); ++h) {
         io::WriteString(out, head_specs_[h].name);
@@ -151,6 +166,18 @@ std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
     }
     size_t layers = io::ReadSize(in, 64);
     for (size_t i = 0; i < layers; ++i) network->trunk_.push_back(nn::Layer::Deserialize(in));
+    network->memory_units_ = io::ReadSize(in, 1u << 16);
+    if (network->memory_units_ > 0) {
+        network->memory_ = std::make_unique<nn::GRU>(nn::GRU::Deserialize(in));
+        if (network->memory_->HiddenSize() != network->memory_units_ ||
+            network->memory_->InputSize() != network->trunk_width_) {
+            throw std::runtime_error("AgentNetwork: memory does not match the trunk");
+        }
+        network->post_ = ReadDense(in);
+        if (network->post_->InputSize() != network->trunk_width_ + network->memory_units_) {
+            throw std::runtime_error("AgentNetwork: memory layer does not match the trunk");
+        }
+    }
     size_t heads = io::ReadSize(in, 1u << 16);
     for (size_t h = 0; h < heads; ++h) {
         HeadSpec spec;
@@ -223,9 +250,10 @@ Matrix AgentNetwork::TrunkInfer(const Matrix& embedded) const {
 }
 
 std::vector<float> AgentNetwork::Losses(const Matrix& inputs,
-                                        const std::vector<std::vector<const HeadTarget*>>& targets) const {
+                                        const std::vector<std::vector<const HeadTarget*>>& targets,
+                                        const Matrix* memory) const {
     std::vector<float> losses(heads_.size(), std::numeric_limits<float>::quiet_NaN());
-    Matrix hidden = TrunkInfer(Embed(inputs, false));
+    Matrix hidden = HeadInput(inputs, memory);
     for (size_t h = 0; h < heads_.size() && h < targets.size(); ++h) {
         if (!heads_[h] || targets[h].size() != inputs.Rows() || head_specs_[h].kind == HeadKind::Q_VALUES) continue;
         Matrix output = heads_[h]->Infer(hidden);
@@ -261,11 +289,27 @@ std::vector<float> AgentNetwork::Losses(const Matrix& inputs,
     return losses;
 }
 
-Matrix AgentNetwork::Infer(const Matrix& inputs, size_t head) const {
+Matrix AgentNetwork::HeadInput(const Matrix& inputs, const Matrix* memory) const {
+    Matrix hidden = TrunkInfer(Embed(inputs, false));
+    if (!memory_) return hidden;
+    if (memory && (memory->Rows() != inputs.Rows() || memory->Cols() != memory_units_)) {
+        throw std::invalid_argument("AgentNetwork: expected a memory state of " + std::to_string(memory_units_) +
+                                    " values per row, got " + memory->ShapeString());
+    }
+    Matrix joined = nn::ConcatCols(hidden, memory ? *memory : Matrix(inputs.Rows(), memory_units_));
+    return post_relu_.Infer(post_->Infer(joined));
+}
+
+Matrix AgentNetwork::Step(const Matrix& inputs, const Matrix& state) const {
+    if (!memory_) throw std::logic_error("AgentNetwork::Step: the network has no memory");
+    return memory_->Step(TrunkInfer(Embed(inputs, false)), state);
+}
+
+Matrix AgentNetwork::Infer(const Matrix& inputs, size_t head, const Matrix* memory) const {
     if (!heads_.at(head)) {
         return Matrix(inputs.Rows(), 0);
     }
-    return heads_[head]->Infer(TrunkInfer(Embed(inputs, false)));
+    return heads_[head]->Infer(HeadInput(inputs, memory));
 }
 
 void AgentNetwork::GrowClasses(size_t head, size_t class_count) {
@@ -276,10 +320,10 @@ void AgentNetwork::GrowClasses(size_t head, size_t class_count) {
     if (class_count <= old_count) {
         return;
     }
-    auto grown = std::make_unique<nn::Dense>(trunk_width_, class_count, nn::Initialization::XAVIER,
-                                             ++seed_);
+    const size_t input_width = HeadInputWidth();
+    auto grown = std::make_unique<nn::Dense>(input_width, class_count, nn::Initialization::XAVIER, ++seed_);
     if (heads_[head]) {
-        for (size_t i = 0; i < trunk_width_; ++i) {
+        for (size_t i = 0; i < input_width; ++i) {
             for (size_t c = 0; c < old_count; ++c) {
                 grown->Weights()(i, c) = heads_[head]->Weights()(i, c);
             }
@@ -307,6 +351,7 @@ size_t AgentNetwork::ParameterCount() const {
     for (const auto& head : heads_) {
         if (head) count += head->Weights().Size() + head->Bias().Size();
     }
+    if (memory_) count += memory_->ParameterCount() + post_->Weights().Size() + post_->Bias().Size();
     return count;
 }
 
@@ -375,8 +420,35 @@ void AgentNetwork::Widen(size_t width) {
     trunk_[0] = std::move(wide_first);
     trunk_[2] = std::move(wide_second);
 
+    if (memory_) {
+        // The GRU reads the trunk output like a head
+        std::vector<Matrix> wide_input;
+        for (size_t g = 0; g < 3; ++g) {
+            const Matrix& old = memory_->InputWeights(g);
+            Matrix wide(width, memory_units_);
+            for (size_t u = 0; u < width; ++u) {
+                for (size_t c = 0; c < memory_units_; ++c) wide(u, c) = old(source2[u], c) * share2[u];
+            }
+            wide_input.push_back(std::move(wide));
+        }
+        memory_->SetInputWeights(std::move(wide_input));
+
+        // So does the layer on [trunk, state]; the heads read its output,
+        // whose width does not change
+        auto wide_post = std::make_unique<nn::Dense>(width + memory_units_, post_->OutputSize(),
+                                                     nn::Initialization::ZEROS);
+        for (size_t c = 0; c < post_->OutputSize(); ++c) {
+            for (size_t u = 0; u < width; ++u) wide_post->Weights()(u, c) = post_->Weights()(source2[u], c) * share2[u];
+            for (size_t m = 0; m < memory_units_; ++m) {
+                wide_post->Weights()(width + m, c) = post_->Weights()(old_width + m, c);
+            }
+        }
+        wide_post->Bias() = post_->Bias();
+        post_ = std::move(wide_post);
+    }
+
     for (auto& head : heads_) {
-        if (!head) continue;
+        if (!head || post_) continue;
         auto wide_head = std::make_unique<nn::Dense>(width, head->OutputSize(), nn::Initialization::ZEROS);
         for (size_t u = 0; u < width; ++u) {
             for (size_t c = 0; c < head->OutputSize(); ++c) {
@@ -403,6 +475,12 @@ std::vector<nn::Parameter> AgentNetwork::BodyParameters() {
         auto p = layer->Parameters();
         parameters.insert(parameters.end(), p.begin(), p.end());
     }
+    if (memory_) {
+        auto p = memory_->Parameters();
+        parameters.insert(parameters.end(), p.begin(), p.end());
+        p = post_->Parameters();
+        parameters.insert(parameters.end(), p.begin(), p.end());
+    }
     return parameters;
 }
 
@@ -414,31 +492,32 @@ void AgentNetwork::SetLearningRate(float learning_rate) {
     }
 }
 
-std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
-                                            const std::vector<std::vector<const HeadTarget*>>& targets,
-                                            const std::vector<float>& loss_scale, float clip_norm) {
-    const size_t rows = inputs.Rows();
-    if (targets.size() != heads_.size() || loss_scale.size() != heads_.size()) {
-        throw std::invalid_argument("AgentNetwork::TrainBatch: one target list and scale per head");
-    }
-    std::vector<float> losses(heads_.size(), std::numeric_limits<float>::quiet_NaN());
-
-    // Forward through embeddings and trunk, caching for Backward()
+Matrix AgentNetwork::BodyForward(const Matrix& inputs) {
     for (auto& embedding : embeddings_) {
         if (embedding.model) embedding.model->ZeroGradients();
     }
     for (auto& layer : trunk_) {
         layer->ZeroGradients();
     }
-    Matrix embedded = Embed(inputs, true);
-    Matrix hidden = embedded;
+    if (memory_) {
+        memory_->ZeroGradients();
+        post_->ZeroGradients();
+    }
+    Matrix hidden = Embed(inputs, true);
     for (auto& layer : trunk_) {
         hidden = layer->Forward(hidden, true);
     }
+    return hidden;
+}
 
-    Matrix grad_hidden(rows, trunk_width_);
+Matrix AgentNetwork::HeadsStep(const Matrix& head_input, const std::vector<std::vector<const HeadTarget*>>& targets,
+                               const std::vector<float>& loss_scale, std::vector<float>& losses,
+                               std::vector<bool>& trained) {
+    const size_t rows = head_input.Rows();
+    losses.assign(heads_.size(), std::numeric_limits<float>::quiet_NaN());
+    trained.assign(heads_.size(), false);
+    Matrix grad_input(rows, head_input.Cols());
     bool any = false;
-    std::vector<bool> trained(heads_.size(), false);
     for (size_t h = 0; h < heads_.size(); ++h) {
         auto& head = heads_[h];
         if (!head || targets[h].size() != rows) {
@@ -453,7 +532,7 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
         }
 
         head->ZeroGradients();
-        Matrix output = head->Forward(hidden, true);
+        Matrix output = head->Forward(head_input, true);
         const size_t width = output.Cols();
         Matrix grad(rows, width);
         double loss = 0.0;
@@ -513,14 +592,15 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
 
         losses[h] = static_cast<float>(loss);
         grad *= loss_scale[h];
-        grad_hidden += head->Backward(grad);
+        grad_input += head->Backward(grad);
         trained[h] = true;
         any = true;
     }
-    if (!any) {
-        return losses;
-    }
+    return any ? grad_input : Matrix();
+}
 
+void AgentNetwork::BodyBackward(const Matrix& grad_hidden) {
+    const size_t rows = grad_hidden.Rows();
     Matrix grad = grad_hidden;
     for (auto it = trunk_.rbegin(); it != trunk_.rend(); ++it) {
         grad = (*it)->Backward(grad);
@@ -536,7 +616,9 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
         }
         embedding.model->Backward(slice);
     }
+}
 
+void AgentNetwork::Update(const std::vector<bool>& trained, float clip_norm) {
     // Clip all gradients together, then update
     std::vector<nn::Parameter> body = BodyParameters();
     std::vector<nn::Parameter> all = body;
@@ -555,6 +637,109 @@ std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
             head_optimizers_[h].Step(heads_[h]->Parameters());
         }
     }
+}
+
+std::vector<float> AgentNetwork::TrainBatch(const Matrix& inputs,
+                                            const std::vector<std::vector<const HeadTarget*>>& targets,
+                                            const std::vector<float>& loss_scale, float clip_norm) {
+    if (memory_) throw std::logic_error("AgentNetwork::TrainBatch: a network with memory trains on sequences");
+    if (targets.size() != heads_.size() || loss_scale.size() != heads_.size()) {
+        throw std::invalid_argument("AgentNetwork::TrainBatch: one target list and scale per head");
+    }
+    Matrix hidden = BodyForward(inputs);
+    std::vector<float> losses;
+    std::vector<bool> trained;
+    Matrix grad_hidden = HeadsStep(hidden, targets, loss_scale, losses, trained);
+    if (grad_hidden.Empty()) return losses;
+    BodyBackward(grad_hidden);
+    Update(trained, clip_norm);
+    return losses;
+}
+
+std::vector<Matrix> AgentNetwork::States(const SequenceBatch& batch) const {
+    if (!memory_) throw std::logic_error("AgentNetwork::States: the network has no memory");
+    std::vector<Matrix> states;
+    Matrix state = batch.initial;
+    for (size_t t = 0; t < batch.inputs.size(); ++t) {
+        if (!batch.resets.empty()) {
+            for (size_t r = 0; r < batch.resets[t].size() && r < state.Rows(); ++r) {
+                if (!batch.resets[t][r]) continue;
+                for (size_t c = 0; c < memory_units_; ++c) state(r, c) = 0.0f;
+            }
+        }
+        state = memory_->Step(TrunkInfer(Embed(batch.inputs[t], false)), state);
+        states.push_back(state);
+    }
+    return states;
+}
+
+std::vector<float> AgentNetwork::TrainSequences(const SequenceBatch& batch,
+                                                const std::vector<std::vector<const HeadTarget*>>& targets,
+                                                const std::vector<float>& loss_scale, float clip_norm) {
+    if (!memory_) throw std::logic_error("AgentNetwork::TrainSequences: the network has no memory");
+    const size_t steps = batch.inputs.size();
+    const size_t rows = steps == 0 ? 0 : batch.inputs[0].Rows();
+    if (targets.size() != heads_.size() || loss_scale.size() != heads_.size()) {
+        throw std::invalid_argument("AgentNetwork::TrainSequences: one target list and scale per head");
+    }
+    if (batch.initial.Rows() != rows || batch.initial.Cols() != memory_units_) {
+        throw std::invalid_argument("AgentNetwork::TrainSequences: initial state must be rows x memory units");
+    }
+    std::vector<float> losses(heads_.size(), std::numeric_limits<float>::quiet_NaN());
+    if (steps == 0 || rows == 0) return losses;
+
+    // All steps through embeddings and trunk at once (time-major rows)
+    Matrix stacked(steps * rows, input_size_);
+    for (size_t t = 0; t < steps; ++t) {
+        if (batch.inputs[t].Rows() != rows || batch.inputs[t].Cols() != input_size_) {
+            throw std::invalid_argument("AgentNetwork::TrainSequences: every step needs rows x inputs");
+        }
+        std::copy(batch.inputs[t].Data(), batch.inputs[t].Data() + rows * input_size_,
+                  stacked.Data() + t * rows * input_size_);
+    }
+    Matrix hidden = BodyForward(stacked);
+    std::vector<Matrix> trunk_steps(steps, Matrix(rows, trunk_width_));
+    for (size_t t = 0; t < steps; ++t) {
+        std::copy(hidden.Data() + t * rows * trunk_width_, hidden.Data() + (t + 1) * rows * trunk_width_,
+                  trunk_steps[t].Data());
+    }
+    std::vector<Matrix> states = memory_->Forward(trunk_steps, batch.initial, batch.resets);
+
+    const size_t head_width = trunk_width_ + memory_units_;
+    Matrix head_input(steps * rows, head_width);
+    for (size_t t = 0; t < steps; ++t) {
+        for (size_t r = 0; r < rows; ++r) {
+            float* row = head_input.Data() + (t * rows + r) * head_width;
+            std::copy(trunk_steps[t].Data() + r * trunk_width_, trunk_steps[t].Data() + (r + 1) * trunk_width_, row);
+            std::copy(states[t].Data() + r * memory_units_, states[t].Data() + (r + 1) * memory_units_,
+                      row + trunk_width_);
+        }
+    }
+    Matrix post = post_relu_.Forward(post_->Forward(head_input, true), true);
+    std::vector<bool> trained;
+    Matrix grad_post = HeadsStep(post, targets, loss_scale, losses, trained);
+    if (grad_post.Empty()) return losses;
+    Matrix grad_input = post_->Backward(post_relu_.Backward(grad_post));
+
+    // Split the gradient: the trunk part goes straight back, the memory part
+    // back through time, then into the trunk outputs of each step
+    std::vector<Matrix> grad_states(steps, Matrix(rows, memory_units_));
+    Matrix grad_hidden(steps * rows, trunk_width_);
+    for (size_t t = 0; t < steps; ++t) {
+        for (size_t r = 0; r < rows; ++r) {
+            const float* row = grad_input.Data() + (t * rows + r) * head_width;
+            std::copy(row, row + trunk_width_, grad_hidden.Data() + (t * rows + r) * trunk_width_);
+            std::copy(row + trunk_width_, row + head_width, grad_states[t].Data() + r * memory_units_);
+        }
+    }
+    std::vector<Matrix> grad_trunk = memory_->Backward(grad_states);
+    for (size_t t = 0; t < steps; ++t) {
+        float* out = grad_hidden.Data() + t * rows * trunk_width_;
+        const float* in = grad_trunk[t].Data();
+        for (size_t i = 0; i < rows * trunk_width_; ++i) out[i] += in[i];
+    }
+    BodyBackward(grad_hidden);
+    Update(trained, clip_norm);
     return losses;
 }
 

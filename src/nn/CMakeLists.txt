@@ -9,6 +9,7 @@ add_library(dpan_nn STATIC
     compute.cpp
     layers.cpp
     convolution.cpp
+    recurrent.cpp
     loss.cpp
     optimizer.cpp
     sequential.cpp

@@ -4,6 +4,13 @@
 //
 //   fused vector -> channel embeddings -> trunk (2 x Dense+ReLU) -> one head per output
 //
+// With memory (memory_units > 0) a GRU after the trunk carries a state from
+// step to step, h_t = GRU(trunk(x_t), h_{t-1}), and a Dense+ReLU layer on
+// [trunk output, h_t] feeds the heads (so they can combine the current
+// observation with the remembered ones non-linearly). The caller keeps the
+// state between steps (Step) and passes it to Infer; training runs whole
+// sequences (TrainSequences).
+//
 // Channels with an embedding size are mapped by their own learned layers:
 // hashed categories and text by a Dense projection, images by convolution
 // and pooling layers and a projection; other channels pass through. Each head is a
@@ -15,6 +22,7 @@
 #include "agent/encoders.hpp"
 #include "nn/layers.hpp"
 #include "nn/optimizer.hpp"
+#include "nn/recurrent.hpp"
 #include "nn/sequential.hpp"
 
 #include <memory>
@@ -60,12 +68,26 @@ struct HeadSpec {
     size_t size{0};
 };
 
+/// Sequences for TrainSequences: inputs[t] holds step t of every sequence
+/// (rows x inputs), initial the state before step 0 (rows x memory units),
+/// resets[t][row] starts a sequence over at step t (state 0). Shorter
+/// sequences are padded at the end with rows that have no targets.
+struct SequenceBatch {
+    std::vector<nn::Matrix> inputs;
+    nn::Matrix initial;
+    std::vector<std::vector<bool>> resets;
+};
+
 class AgentNetwork {
 public:
     /// @param layout Channel layout of the fused vector (ObservationEncoder::Layout)
     /// @param min_width, max_width Trunk width = 2 x embedded size, clamped
+    /// @param memory_units GRU state size (0 = no memory)
+    /// @param memory_timescale Longest time scale of the GRU's chrono
+    ///        initialization (0 = update-gate bias 1)
     AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector<HeadSpec> heads,
-                 float learning_rate, uint32_t seed, size_t min_width = 32, size_t max_width = 512);
+                 float learning_rate, uint32_t seed, size_t min_width = 32, size_t max_width = 512,
+                 size_t memory_units = 0, float memory_timescale = 0.0f);
 
     /// Deep copy (weights and optimizer state), e.g. for a target network
     AgentNetwork(const AgentNetwork& other);
@@ -80,6 +102,11 @@ public:
     size_t EmbeddedSize() const { return embedded_size_; }
     size_t TrunkWidth() const { return trunk_width_; }
     size_t HeadCount() const { return heads_.size(); }
+    size_t MemoryUnits() const { return memory_units_; }
+
+    /// Memory: the state after the given inputs, from the state before them
+    /// (rows x memory units each)
+    nn::Matrix Step(const nn::Matrix& inputs, const nn::Matrix& state) const;
 
     /// Number of trainable values (weights and biases)
     size_t ParameterCount() const;
@@ -97,8 +124,9 @@ public:
     const HeadSpec& Head(size_t index) const { return head_specs_.at(index); }
 
     /// Outputs of one head for a batch (logits for classifiers); a
-    /// classifier with no classes returns a matrix with 0 columns
-    nn::Matrix Infer(const nn::Matrix& inputs, size_t head) const;
+    /// classifier with no classes returns a matrix with 0 columns. With
+    /// memory, `memory` holds each row's state after its step (nullptr = 0).
+    nn::Matrix Infer(const nn::Matrix& inputs, size_t head, const nn::Matrix* memory = nullptr) const;
 
     /// Add classes to a classifier head (existing weights are kept, the
     /// head's optimizer state is reset)
@@ -108,12 +136,26 @@ public:
     /// loss_scale[h] multiplies head h's loss. Gradients are clipped to
     /// clip_norm (0 = off) before the update.
     /// @return Mean loss per head over its targets (NaN for heads without any)
+    /// @throws std::logic_error for a network with memory
     std::vector<float> TrainBatch(const nn::Matrix& inputs,
                                   const std::vector<std::vector<const HeadTarget*>>& targets,
                                   const std::vector<float>& loss_scale, float clip_norm);
 
-    /// Mean loss per head over its targets, as TrainBatch computes it, without training
-    std::vector<float> Losses(const nn::Matrix& inputs, const std::vector<std::vector<const HeadTarget*>>& targets) const;
+    /// Memory: the state after each step of the sequences (no training),
+    /// one rows x memory units matrix per step
+    std::vector<nn::Matrix> States(const SequenceBatch& batch) const;
+
+    /// One optimization step on sequences, with backpropagation through time
+    /// (networks with memory). targets[h] has one entry per step and row,
+    /// time-major (index t x rows + row).
+    std::vector<float> TrainSequences(const SequenceBatch& batch,
+                                      const std::vector<std::vector<const HeadTarget*>>& targets,
+                                      const std::vector<float>& loss_scale, float clip_norm);
+
+    /// Mean loss per head over its targets, as TrainBatch computes it, without
+    /// training (`memory` as for Infer)
+    std::vector<float> Losses(const nn::Matrix& inputs, const std::vector<std::vector<const HeadTarget*>>& targets,
+                              const nn::Matrix* memory = nullptr) const;
 
     float LearningRate() const { return learning_rate_; }
     void SetLearningRate(float learning_rate);
@@ -136,11 +178,27 @@ private:
     AgentNetwork() = default;
     nn::Matrix Embed(const nn::Matrix& inputs, bool training) const;
     nn::Matrix TrunkInfer(const nn::Matrix& embedded) const;
+    /// Trunk output, followed by the memory state when there is one
+    nn::Matrix HeadInput(const nn::Matrix& inputs, const nn::Matrix* memory) const;
     std::vector<nn::Parameter> BodyParameters();
+
+    // Training pieces: embeddings and trunk forward (caching), the heads'
+    // losses and backward pass (returns the gradient of their input, empty
+    // if no head had a target), the trunk and embeddings backward pass, the update
+    nn::Matrix BodyForward(const nn::Matrix& inputs);
+    nn::Matrix HeadsStep(const nn::Matrix& head_input, const std::vector<std::vector<const HeadTarget*>>& targets,
+                         const std::vector<float>& loss_scale, std::vector<float>& losses, std::vector<bool>& trained);
+    void BodyBackward(const nn::Matrix& grad_hidden);
+    void Update(const std::vector<bool>& trained, float clip_norm);
 
     size_t input_size_{0};
     size_t embedded_size_{0};
     size_t trunk_width_{0};
+    size_t memory_units_{0};
+    std::unique_ptr<nn::GRU> memory_;
+    std::unique_ptr<nn::Dense> post_;  // memory: [trunk, state] -> head input (then ReLU)
+    nn::ReLU post_relu_;
+    size_t HeadInputWidth() const { return post_ ? post_->OutputSize() : trunk_width_; }
     float learning_rate_{0.0f};
     uint32_t seed_{0};
     std::vector<Embedding> embeddings_;

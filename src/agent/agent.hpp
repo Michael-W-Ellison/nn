@@ -179,6 +179,27 @@ struct AgentConfig {
     size_t holdout_check_interval{100};
     size_t holdout_min_samples{50};      ///< Held-out samples needed before a check counts
     size_t max_training_slowdown{8};
+
+    // Memory (docs/AGENT_PLAN.md, Phase 9): with memory_units > 0 a GRU
+    // after the trunk carries a state from step to step (reset at each
+    // episode start), and a layer on [trunk, state] feeds the network heads.
+    // Each training step unrolls the network over memory_batch windows of
+    // up to memory_window steps (one ending at the newest sample, the others
+    // at replayed ones), with backpropagation through time; the newest
+    // memory_history steps are kept for that. The first memory_burn_in steps
+    // of a window that starts inside an episode only rebuild the state (no
+    // loss). The GRU starts with time scales of 2 to memory_window steps.
+    // Continuous actions (TD3) and the pattern memory do not use the state.
+    size_t memory_units{0};
+    size_t memory_window{64};
+    size_t memory_batch{8};
+    size_t memory_history{20000};
+    size_t memory_burn_in{0};
+    /// With ACTION or CONTINUOUS_ACTION outputs these replace memory_window
+    /// and memory_batch: Q-learning needs many independent windows more
+    /// than long ones (see Phase 9 in the plan)
+    size_t action_memory_window{8};
+    size_t action_memory_batch{32};
 };
 
 struct Prediction {
