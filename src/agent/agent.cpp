@@ -54,6 +54,8 @@ void CheckConfig(const AgentConfig& c) {
     require(c.merge_ratio >= 0.0f, "merge_ratio must be >= 0");
     require(c.pattern_label_horizon > 0, "pattern_label_horizon must be > 0");
     require(c.quality_rate > 0.0f && c.quality_rate <= 1.0f, "quality_rate must be in (0, 1]");
+    require(c.class_blend_sharpness >= 0.0f && std::isfinite(c.class_blend_sharpness),
+            "class_blend_sharpness must be finite and >= 0");
     require(c.anomaly_baseline > 0, "anomaly_baseline must be > 0");
     require(c.max_classes > 0, "max_classes must be > 0");
     require(c.holdout_every == 0 || (c.holdout_capacity > 0 && c.holdout_check_interval > 0 &&
@@ -126,6 +128,13 @@ struct Quality {
     bool Measured() const { return count > 0; }
 };
 
+/// -log of the probability of class `cls`, with the probability floored at
+/// 1e-3 so one confident miss counts as at most about 6.9
+float LogLoss(const std::vector<float>& probabilities, size_t cls) {
+    float p = cls < probabilities.size() ? probabilities[cls] : 0.0f;
+    return -std::log(std::max(p, 1e-3f));
+}
+
 /// Percentile of x among the baseline (0.5 if the baseline is empty)
 float Percentile(const std::deque<float>& baseline, float x) {
     if (baseline.empty()) return 0.5f;
@@ -148,7 +157,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 7;
+constexpr uint32_t kCheckpointVersion = 8;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -284,6 +293,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.merge_ratio);
     io::WriteSize(out, c.pattern_label_horizon);
     io::Write<float>(out, c.quality_rate);
+    io::Write<float>(out, c.class_blend_sharpness);
     io::WriteSize(out, c.anomaly_baseline);
     io::WriteSize(out, c.max_classes);
     for (size_t v : {c.holdout_every, c.holdout_capacity, c.holdout_check_interval, c.holdout_min_samples,
@@ -361,6 +371,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.merge_ratio = io::Read<float>(in);
     c.pattern_label_horizon = io::ReadSize(in);
     c.quality_rate = io::Read<float>(in);
+    c.class_blend_sharpness = io::Read<float>(in);
     c.anomaly_baseline = io::ReadSize(in);
     c.max_classes = io::ReadSize(in);
     for (size_t* v : {&c.holdout_every, &c.holdout_capacity, &c.holdout_check_interval, &c.holdout_min_samples,
@@ -466,6 +477,10 @@ struct Agent::Impl {
         Quality neural;
         Quality pattern_short;  // votes of recently labelled patterns
         Quality pattern_long;   // votes of all patterns (also NEXT_OBSERVATION sequences)
+        // CLASS: running log-loss of each side (-log of the true class's probability)
+        Quality neural_log_loss;
+        Quality pattern_short_log_loss;
+        Quality pattern_long_log_loss;
 
         // Drift (Page-Hinkley on the neural loss) and recovery
         PageHinkley drift;
@@ -484,6 +499,9 @@ struct Agent::Impl {
         }
         const Quality& Pattern(bool higher_is_better) const {
             return UseShort(higher_is_better) ? pattern_short : pattern_long;
+        }
+        const Quality& PatternLogLoss() const {
+            return UseShort(true) ? pattern_short_log_loss : pattern_long_log_loss;
         }
     };
 
@@ -1004,6 +1022,7 @@ struct Agent::Impl {
         }
         // Re-estimate the blend from scratch
         out.neural = out.pattern_short = out.pattern_long = Quality();
+        out.neural_log_loss = out.pattern_short_log_loss = out.pattern_long_log_loss = Quality();
         // The held-out samples follow the old concept too; train at the full
         // rate while the new one is learned
         held_out.clear();
@@ -1055,6 +1074,14 @@ struct Agent::Impl {
         if (!neural) return 0.0f;
         if (!pattern) return 1.0f;
         if (out.samples < config.cold_start_samples) return 0.0f;
+        if (higher_is_better && config.class_blend_sharpness > 0.0f) {
+            // CLASS: 1 / (1 + exp(sharpness x (neural - pattern running log-loss)))
+            const Quality& pattern_log_loss = out.PatternLogLoss();
+            if (!out.neural_log_loss.Measured() || !pattern_log_loss.Measured()) return 0.5f;
+            double x = static_cast<double>(config.class_blend_sharpness) *
+                       (static_cast<double>(out.neural_log_loss.value) - pattern_log_loss.value);
+            return static_cast<float>(1.0 / (1.0 + std::exp(std::clamp(x, -50.0, 50.0))));
+        }
         const Quality& pattern_quality = out.Pattern(higher_is_better);
         if (!out.neural.Measured() || !pattern_quality.Measured()) return 0.5f;
         double n, p;
@@ -1386,13 +1413,20 @@ struct Agent::Impl {
         if (auto neural = NeuralClass(entry, out)) {
             float correct = ArgMax(*neural) == cls ? 1.0f : 0.0f;
             out.neural.Add(correct, config.quality_rate);
+            out.neural_log_loss.Add(LogLoss(*neural, cls), config.quality_rate);
             ObserveLoss(out, 1.0f - correct);
         }
         if (!out.classes.empty()) {
             auto votes = patterns->ClassVotes(entry.point, static_cast<size_t>(out.class_slot), out.classes.size(),
                                               config.neighbors, config.pattern_label_horizon);
-            if (votes.short_term) out.pattern_short.Add(ArgMax(*votes.short_term) == cls ? 1.0f : 0.0f, config.quality_rate);
-            if (votes.long_term) out.pattern_long.Add(ArgMax(*votes.long_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+            if (votes.short_term) {
+                out.pattern_short.Add(ArgMax(*votes.short_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+                out.pattern_short_log_loss.Add(LogLoss(*votes.short_term, cls), config.quality_rate);
+            }
+            if (votes.long_term) {
+                out.pattern_long.Add(ArgMax(*votes.long_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+                out.pattern_long_log_loss.Add(LogLoss(*votes.long_term, cls), config.quality_rate);
+            }
         }
 
         HeadTarget& target = entry.sample->targets[out.head];
@@ -1971,6 +2005,9 @@ struct Agent::Impl {
             SaveQuality(out, out_state.neural);
             SaveQuality(out, out_state.pattern_short);
             SaveQuality(out, out_state.pattern_long);
+            SaveQuality(out, out_state.neural_log_loss);
+            SaveQuality(out, out_state.pattern_short_log_loss);
+            SaveQuality(out, out_state.pattern_long_log_loss);
             out_state.drift.Save(out);
             io::Write<uint8_t>(out, out_state.recovering ? 1 : 0);
             io::Write<uint64_t>(out, out_state.recovery_samples);
@@ -2085,6 +2122,9 @@ struct Agent::Impl {
             out_state.neural = LoadQuality(in);
             out_state.pattern_short = LoadQuality(in);
             out_state.pattern_long = LoadQuality(in);
+            out_state.neural_log_loss = LoadQuality(in);
+            out_state.pattern_short_log_loss = LoadQuality(in);
+            out_state.pattern_long_log_loss = LoadQuality(in);
             out_state.drift.Load(in);
             out_state.recovering = io::Read<uint8_t>(in) != 0;
             out_state.recovery_samples = io::Read<uint64_t>(in);
@@ -2245,6 +2285,10 @@ struct Agent::Impl {
             o.drift_events = out.drift_events;
             o.recovering = out.recovering;
             o.pattern_quality = out.Pattern(out.spec->type == OutputType::CLASS).value;
+            if (out.spec->type == OutputType::CLASS) {
+                o.neural_log_loss = out.neural_log_loss.value;
+                o.pattern_log_loss = out.PatternLogLoss().value;
+            }
             if (out.spec->type == OutputType::ANOMALY) {
                 o.neural_weight = m.anomaly_samples >= m.config.cold_start_samples ? 0.5f : 0.0f;
             } else if (out.spec->type == OutputType::ACTION) {

@@ -35,6 +35,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -151,6 +152,14 @@ struct AgentConfig {
     /// Rate of the running accuracy/error estimates that weight the blend
     float quality_rate{0.02f};
 
+    /// CLASS outputs: the network's blend weight is 1 / (1 + exp(s x (L_n -
+    /// L_p))), with L_n and L_p the running log-loss of the network and of
+    /// the pattern memory (-log of the true class's probability, at
+    /// quality_rate). With quality_rate 0.02 (about 50 labels), s = 10 gives
+    /// the side whose log-loss is 0.1 lower about 73% of the weight, 0.3
+    /// lower 95%. 0: weights by squared running accuracy instead.
+    float class_blend_sharpness{10.0f};
+
     /// Recent anomaly scores kept as the percentile baseline
     size_t anomaly_baseline{1000};
 
@@ -215,6 +224,9 @@ struct OutputStats {
     /// NEXT_OBSERVATION) of each side; NaN if not measured
     float neural_quality{0.0f};
     float pattern_quality{0.0f};
+    /// CLASS: running log-loss of each side (NaN otherwise or if not measured)
+    float neural_log_loss{std::numeric_limits<float>::quiet_NaN()};
+    float pattern_log_loss{std::numeric_limits<float>::quiet_NaN()};
     float neural_weight{0.0f};  ///< Current blend weight of the neural side
     float exploration{0.0f};    ///< ACTION: current probability of a random action.
                                 ///< CONTINUOUS_ACTION: noise std (fraction of the half-range; 1 = uniform random)

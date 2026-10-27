@@ -222,6 +222,7 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, merge_ratio),
         DPAN_FIELD(AgentConfig, pattern_label_horizon),
         DPAN_FIELD(AgentConfig, quality_rate),
+        DPAN_FIELD(AgentConfig, class_blend_sharpness),
         DPAN_FIELD(AgentConfig, anomaly_baseline),
         DPAN_FIELD(AgentConfig, max_classes),
         DPAN_FIELD(AgentConfig, holdout_every),
@@ -503,6 +504,8 @@ std::string StatsToJson(const AgentStats& s) {
         item.Set("classes", o.classes);
         item.Set("neural_quality", o.neural_quality);
         item.Set("pattern_quality", o.pattern_quality);
+        item.Set("neural_log_loss", o.neural_log_loss);
+        item.Set("pattern_log_loss", o.pattern_log_loss);
         item.Set("neural_weight", o.neural_weight);
         item.Set("exploration", o.exploration);
         item.Set("drift_events", o.drift_events);

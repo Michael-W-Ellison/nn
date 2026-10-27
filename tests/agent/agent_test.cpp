@@ -330,6 +330,41 @@ TEST(AgentTest, TrainingSlowsWhenHeldOutLossRises) {
     EXPECT_LT(stats.training_steps, stats.replay_size / 8);
 }
 
+TEST(AgentTest, ClassBlendFollowsLogLoss) {
+    // Overlapping clusters, so neither side is perfect
+    auto run = [](float sharpness) {
+        AgentConfig config;
+        config.class_blend_sharpness = sharpness;
+        Agent agent(ClassSpec(), config);
+        std::mt19937 rng(11);
+        std::normal_distribution<float> noise(0.0f, 1.5f);
+        for (int i = 0; i < 1500; ++i) {
+            int cls = i % 2;
+            float c = cls ? 1.0f : -1.0f;
+            StepId step = agent.Observe({{"x", std::vector<float>{c + noise(rng), c + noise(rng)}}});
+            agent.Feedback(step, "label", static_cast<double>(cls));
+        }
+        return agent.Stats().outputs[0];
+    };
+    OutputStats sharp = run(AgentConfig{}.class_blend_sharpness);
+    ASSERT_TRUE(std::isfinite(sharp.neural_log_loss));
+    ASSERT_TRUE(std::isfinite(sharp.pattern_log_loss));
+    EXPECT_NE(sharp.neural_log_loss, sharp.pattern_log_loss);
+    float expected = 1.0f / (1.0f + std::exp(AgentConfig{}.class_blend_sharpness *
+                                             (sharp.neural_log_loss - sharp.pattern_log_loss)));
+    EXPECT_NEAR(expected, sharp.neural_weight, 1e-5f);
+
+    // 0: squared running accuracies
+    OutputStats squared = run(0.0f);
+    float n = squared.neural_quality * squared.neural_quality;
+    float p = squared.pattern_quality * squared.pattern_quality;
+    EXPECT_NEAR(n / (n + p), squared.neural_weight, 1e-5f);
+
+    AgentConfig bad;
+    bad.class_blend_sharpness = -1.0f;
+    EXPECT_THROW(Agent(ClassSpec(), bad), std::invalid_argument);
+}
+
 TEST(AgentTest, StatsDescribeTheAgent) {
     Agent agent(ClassSpec());
     std::mt19937 rng(6);

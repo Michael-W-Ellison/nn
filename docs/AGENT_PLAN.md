@@ -88,7 +88,7 @@ loss.
 
 | Feedback → output | Neural learner | DPAN component | Combined prediction |
 |---|---|---|---|
-| LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent accuracy |
+| LABEL → CLASS | Softmax head, cross-entropy loss | Fused states stored as patterns; vote by the k nearest patterns' labels (fast search) | Mix of the two, weighted by each one's recent log-loss (`class_blend_sharpness`; recent accuracy until the log-loss blend change below) |
 | TARGET → VALUE | Regression head, MSE loss | Average of the k nearest patterns' targets | Same weighting, by recent error |
 | REWARD → ACTION | Double DQN: Q-value head (Huber loss), target network synced every 500 training steps, 3-step returns cut at exploratory actions, ε-greedy exploration falling from 1.0 to 0.05 | Associations between states and actions, reinforced by reward sign | Neural Q-values; associations break ties and choose during the cold start |
 | REWARD → CONTINUOUS_ACTION | TD3: deterministic actor and two critics on the fused state, two updates per training step, target policy smoothing, actor and target updates every 2nd critic update; uniform random actions for the first 1,000 exploring steps, then Gaussian noise (std 0.5 of the half-range); 2 × 128 hidden units | — | The actor's action, scaled to the bounds |
@@ -1078,4 +1078,37 @@ pass is unchanged. The tasks that need much training lose a little,
 mostly because the held-out twentieth is never trained on. A tolerance of
 1% on the change gave the same results except on Adult (3 passes
 0.843–0.847).
+
+**Change: log-loss blend for CLASS outputs.** The network's weight in a
+CLASS prediction was n² / (n² + p²) with n and p the running accuracies of
+the two sides, so 0.85 against 0.82 gave 0.52, and on Adult the weaker
+pattern side took half of every prediction. It is now
+1 / (1 + exp(s × (L_n − L_p))), with L_n and L_p each side's running
+log-loss (−log of the true class's probability, floored at 1e-3, at
+`quality_rate`) and s = `class_blend_sharpness` (10; 0 restores the
+accuracy weights). The short- or long-term pattern memory is still chosen
+by accuracy. `OutputStats::neural_log_loss` and `pattern_log_loss` report
+the two log-losses; checkpoint version 8 stores them.
+
+Before the held-out check this lost on repeated passes (Adult pass 3: 0.818–0.833
+at s = 10–50 against 0.833–0.835), because the network's log-loss on rows
+it had memorised looked best and it took nearly all the weight. With the
+held-out check (seeds 1–3):
+
+| | Accuracy blend | s = 10 | s = 25 |
+|---|---|---|---|
+| Adult, pass 1 | 0.844–0.850 | 0.849–0.855 | 0.852–0.856 |
+| Adult, pass 2 | 0.848–0.853 | 0.850–0.852 | 0.848–0.851 |
+| Adult, pass 3 | 0.844–0.846 | 0.841–0.847 | 0.839–0.844 |
+| A (C++): before / 800–1,000 after / after the drift | 0.984 / 0.995 / 0.984 | 0.985 / 0.995 / 0.983 | 0.985 / 0.995 / 0.983 |
+| A (Python) | 0.990 / 1.000 / 0.986 | 0.990 / 0.990 / 0.985 | 0.990 / 0.990 / 0.984 |
+| G | 0.971 | 0.972 | 0.972 |
+| S1 / S3 / S5 / S10 | 0.946–0.958 / 0.946–0.952 / 1.0 / 0.997–0.999 | 0.949–0.957 / 0.945–0.950 / 1.0 / 0.997–0.999 | 0.947–0.957 / 0.946–0.950 / 1.0 / 0.997–0.999 |
+| SMS, 1 / 3 passes | 0.983–0.985 / 0.979–0.987 | 0.980–0.986 / 0.979–0.987 | 0.979–0.986 / 0.970–0.987 |
+| Digits, 1 / 3 passes | 0.981–0.992 / 0.986–0.994 | 0.983–0.989 / 0.986–0.994 | 0.981–0.986 / 0.983–0.994 |
+
+s = 10: Adult's first pass at or above logistic regression (0.853) for two
+of three seeds, later passes within noise, the other CLASS tasks within
+noise. The weight follows the last ~50 labels and varies between seeds
+(0.57–0.98 at the end of Adult's first pass).
 
