@@ -1670,7 +1670,8 @@ void DPANCli::BuildContextVector() {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     auto* tm = std::localtime(&time_t_now);
-    float hour_factor = tm->tm_hour / 24.0f;
+    // Middle of the hour, so hour 0 is not 0 (ContextVector drops zero values)
+    float hour_factor = (tm->tm_hour + 0.5f) / 24.0f;
     current_context_.Set("temporal_hour", hour_factor);
 }
 
