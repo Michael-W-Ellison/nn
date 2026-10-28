@@ -1273,16 +1273,20 @@ Findings:
   T2b range (0.944–0.985 with it, 0.947–0.979 without).
 - *T1 with GloVe.* With the vectors fixed, GloVe gave no gain over learned
   vectors (0.783 / 0.789 / 0.795 against 0.786 / 0.801 / 0.799 at
-  `quality_rate` 0.02). For comparison, logistic regression on the mean
+  `quality_rate` 0.02, Python runs). For comparison, logistic regression on the mean
   GloVe vector of a sentence reaches 0.753, and on bag-of-words plus the
   mean vector 0.823. Training the vectors (now the default) and the
   separate blend rate below gave 0.809 / 0.825 / 0.809 in a Python run with
   a different sentence order and 0.806 / 0.789 / 0.808 in the C++ test.
   More training steps (`train_every` 4 or 2) and `learning_rate` 1e-3 did
   not help (0.633–0.789).
-- *T1 without a file* went from 0.786 / 0.801 / 0.799 to 0.764 / 0.784 /
-  0.775 with the blend change below; which part of the change causes this
-  was not measured.
+- *T1 without a file* depends on the order of the training sentences: the
+  C++ test (`std::shuffle`) gives 0.764 / 0.784 / 0.775, a Python run of
+  the same data and seeds (numpy permutation) 0.788 / 0.801 / 0.799. The
+  blend change below does not lower it: with `class_blend_rate` 0.02 the
+  C++ test gives 0.763 / 0.776 / 0.775 and the Python run 0.786 / 0.801 /
+  0.799. (The other parts of the change apply to OUTCOME feedback and to
+  word-vector files only.)
 
 **Change: separate blend rate.** On SST-2 the network's weight in the CLASS
 blend fell from 0.90 to 0.23 over the last 20 training sentences of one run,
