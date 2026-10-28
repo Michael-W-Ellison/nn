@@ -45,6 +45,7 @@ void CheckConfig(const AgentConfig& c) {
             "trunk widths must satisfy 0 < min_trunk_width <= max_trunk_width");
     require(c.gradient_clip_norm >= 0.0f, "gradient_clip_norm must be >= 0");
     require(c.train_every > 0 && c.batch_size > 0, "train_every and batch_size must be > 0");
+    require(c.ensemble_size >= 1 && c.ensemble_size <= 16, "ensemble_size must be in [1, 16]");
     require(c.new_sample_share >= 0.0f && c.new_sample_share <= 1.0f, "new_sample_share must be in [0, 1]");
     require(c.replay_capacity > 0, "replay_capacity must be > 0");
     require(c.feedback_timeout > 0, "feedback_timeout must be > 0");
@@ -165,7 +166,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 14;
+constexpr uint32_t kCheckpointVersion = 15;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -265,6 +266,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.gradient_clip_norm);
     io::WriteSize(out, c.train_every);
     io::WriteSize(out, c.batch_size);
+    io::WriteSize(out, c.ensemble_size);
     io::Write<float>(out, c.new_sample_share);
     io::WriteSize(out, c.replay_capacity);
     io::WriteSize(out, c.cold_start_samples);
@@ -356,6 +358,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.gradient_clip_norm = io::Read<float>(in);
     c.train_every = io::ReadSize(in);
     c.batch_size = io::ReadSize(in);
+    c.ensemble_size = io::ReadSize(in, 16);
     c.new_sample_share = io::Read<float>(in);
     c.replay_capacity = io::ReadSize(in);
     c.cold_start_samples = io::ReadSize(in);
@@ -688,6 +691,13 @@ struct Agent::Impl {
                                                      static_cast<float>(config.memory_window));
             head_loss.assign(heads.size(), kNaN);
             if (has_actions) target_network = std::make_unique<AgentNetwork>(*network);
+            members.clear();
+            for (size_t k = 1; k < config.ensemble_size; ++k) {
+                members.push_back(std::make_unique<AgentNetwork>(
+                    layout, heads, config.learning_rate, config.seed + 7919 * static_cast<uint32_t>(k),
+                    config.min_trunk_width, config.max_trunk_width, config.memory_units,
+                    static_cast<float>(config.memory_window)));
+            }
         }
         if (has_anomaly) {
             autoencoder = std::make_unique<AnomalyAutoencoder>(encoder.OutputSize(), config.learning_rate,
@@ -743,6 +753,7 @@ struct Agent::Impl {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
         size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
         size_t bytes = parameters * 4 * sizeof(float) * copies + word_vector_bytes;
+        for (const auto& member : members) bytes += member->ParameterCount() * 4 * sizeof(float) * 2;
         // Actor-critics: live, target and snapshot copies
         for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
         return bytes;
@@ -919,11 +930,16 @@ struct Agent::Impl {
         for (auto& ac : actor_critics) {
             if (!ac->AllFinite()) return false;
         }
+        for (const auto& member : members) {
+            if (!member->AllFinite()) return false;
+        }
         return (!network || network->AllFinite()) && (!autoencoder || autoencoder->AllFinite());
     }
 
     void TakeSnapshot() {
         if (network) snapshot_network = std::make_unique<AgentNetwork>(*network);
+        snapshot_members.clear();
+        for (const auto& member : members) snapshot_members.push_back(std::make_unique<AgentNetwork>(*member));
         if (autoencoder) snapshot_autoencoder = std::make_unique<AnomalyAutoencoder>(*autoencoder);
         snapshot_actor_critics.clear();
         for (const auto& ac : actor_critics) snapshot_actor_critics.push_back(std::make_unique<ActorCritic>(*ac));
@@ -934,6 +950,9 @@ struct Agent::Impl {
         if (snapshot_network) {
             network = std::make_unique<AgentNetwork>(*snapshot_network);
             if (target_network) target_network = std::make_unique<AgentNetwork>(*snapshot_network);
+        }
+        for (size_t i = 0; i < snapshot_members.size() && i < members.size(); ++i) {
+            members[i] = std::make_unique<AgentNetwork>(*snapshot_members[i]);
         }
         if (snapshot_autoencoder) autoencoder = std::make_unique<AnomalyAutoencoder>(*snapshot_autoencoder);
         for (size_t i = 0; i < snapshot_actor_critics.size() && i < actor_critics.size(); ++i) {
@@ -1006,7 +1025,7 @@ struct Agent::Impl {
         // The wider network must leave room for the replay buffer and patterns
         AgentNetwork wider(*network);
         wider.Widen(width);
-        size_t copies = 2 + (target_network ? 1 : 0);
+        size_t copies = 2 + (target_network ? 1 : 0) + 2 * members.size();
         size_t extra = (wider.ParameterCount() - network->ParameterCount()) * 4 * sizeof(float) * copies;
         if (FixedBytes() + extra + kMinimumStoreBytes > config.memory_budget_bytes) {
             if (!growth_blocked) {
@@ -1018,6 +1037,11 @@ struct Agent::Impl {
         }
         network = std::make_unique<AgentNetwork>(wider);
         if (target_network) target_network = std::make_unique<AgentNetwork>(*network);
+        for (auto& member : members) {
+            AgentNetwork widened(*member);
+            widened.Widen(width);
+            member = std::make_unique<AgentNetwork>(widened);
+        }
         AllocateMemory();
         ApplyLearningRate();
         TakeSnapshot();
@@ -1032,6 +1056,7 @@ struct Agent::Impl {
     void ApplyLearningRate() {
         float rate = learning_rate * (recovering_outputs > 0 ? config.drift_learning_rate_factor : 1.0f);
         if (network) network->SetLearningRate(rate);
+        for (auto& member : members) member->SetLearningRate(rate);
         if (autoencoder) autoencoder->SetLearningRate(rate);
     }
 
@@ -1171,6 +1196,19 @@ struct Agent::Impl {
         return network->Infer(FusedRow(entry), head, &memory);
     }
 
+    /// One head's outputs, averaged over the ensemble's networks
+    std::vector<float> MeanHeadRow(const Pending& entry, size_t head) const {
+        auto z = HeadOutputs(entry, head).Row(0);
+        if (members.empty()) return z;
+        const nn::Matrix row = FusedRow(entry);
+        for (const auto& member : members) {
+            auto m = member->Infer(row, head).Row(0);
+            for (size_t i = 0; i < z.size() && i < m.size(); ++i) z[i] += m[i];
+        }
+        for (float& v : z) v /= static_cast<float>(members.size() + 1);
+        return z;
+    }
+
     std::optional<std::vector<float>> NeuralClass(const Pending& entry, const OutputState& out) const {
         // An output trained only by outcomes must predict before it has
         // learned anything, so its outcomes have a prediction to refer to
@@ -1179,6 +1217,15 @@ struct Agent::Impl {
             return std::nullopt;
         }
         auto probabilities = Softmax(HeadOutputs(entry, static_cast<size_t>(out.head)));
+        if (!members.empty()) {
+            // Ensemble: the mean of the networks' probabilities
+            const nn::Matrix row = FusedRow(entry);
+            for (const auto& member : members) {
+                auto p = Softmax(member->Infer(row, static_cast<size_t>(out.head)));
+                for (size_t i = 0; i < probabilities.size() && i < p.size(); ++i) probabilities[i] += p[i];
+            }
+            for (float& p : probabilities) p /= static_cast<float>(members.size() + 1);
+        }
         probabilities.resize(out.classes.size(), 0.0f);
         return probabilities;
     }
@@ -1197,14 +1244,14 @@ struct Agent::Impl {
 
     std::optional<std::vector<float>> NeuralValue(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
+        auto z = MeanHeadRow(entry, static_cast<size_t>(out.head));
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], out.target_stats[i]);
         return z;
     }
 
     std::optional<std::vector<float>> NeuralNext(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
+        auto z = MeanHeadRow(entry, static_cast<size_t>(out.head));
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], ObservedStats(i));
         return z;
     }
@@ -1480,6 +1527,7 @@ struct Agent::Impl {
         out.classes.push_back(name);
         out.class_index.emplace(name, index);
         if (network) network->GrowClasses(out.head, out.classes.size());
+        for (auto& member : members) member->GrowClasses(out.head, out.classes.size());
         Log(LogLevel::INFO, "Output '" + out.spec->name + "': new class '" + name + "'");
         return index;
     }
@@ -2105,6 +2153,7 @@ struct Agent::Impl {
                 if (auto sample = recent[pick(rng)].lock()) batch.push_back(std::move(sample));
             }
         }
+        const size_t fixed = batch.size();  // newest (and recovery) samples, shared by the ensemble
         auto drawn = replay.Draw(config.batch_size - batch.size());
         batch.insert(batch.end(), drawn.begin(), drawn.end());
         if (batch.empty()) return;
@@ -2170,6 +2219,21 @@ struct Agent::Impl {
                 losses = network->TrainBatch(inputs, targets, scale, config.gradient_clip_norm);
             }
             for (size_t h = 0; h < heads; ++h) diverged = diverged || bad(losses[h]);
+            // Ensemble: each further network on the same newest samples and
+            // its own replay draws
+            for (auto& member : members) {
+                std::vector<SamplePtr> rows_k(batch.begin(), batch.begin() + static_cast<std::ptrdiff_t>(fixed));
+                auto more = replay.Draw(config.batch_size - rows_k.size());
+                rows_k.insert(rows_k.end(), more.begin(), more.end());
+                std::vector<std::vector<HeadTarget>> owned_k(heads, std::vector<HeadTarget>(rows_k.size()));
+                std::vector<std::vector<const HeadTarget*>> targets_k(heads,
+                                                                      std::vector<const HeadTarget*>(rows_k.size()));
+                SupervisedTargets(rows_k, owned_k, targets_k);
+                nn::Matrix inputs(rows_k.size(), width);
+                for (size_t r = 0; r < rows_k.size(); ++r) rows_k[r]->Fill(inputs.Data() + r * width, width);
+                auto member_losses = member->TrainBatch(inputs, targets_k, scale, config.gradient_clip_norm);
+                for (float loss : member_losses) diverged = diverged || bad(loss);
+            }
             for (size_t h = 0; h < heads; ++h) {
                 if (std::isnan(losses[h])) continue;
                 head_loss[h] = std::isnan(head_loss[h]) ? losses[h] : 0.95f * head_loss[h] + 0.05f * losses[h];
@@ -2274,6 +2338,10 @@ struct Agent::Impl {
             for (const AgentNetwork* n : {network.get(), target_network.get(), snapshot_network.get()}) {
                 io::Write<uint8_t>(out, n ? 1 : 0);
                 if (n) n->Serialize(out);
+            }
+            for (const auto* list : {&members, &snapshot_members}) {
+                io::WriteSize(out, list->size());
+                for (const auto& member : *list) member->Serialize(out);
             }
             for (const AnomalyAutoencoder* a : {autoencoder.get(), snapshot_autoencoder.get()}) {
                 io::Write<uint8_t>(out, a ? 1 : 0);
@@ -2400,6 +2468,13 @@ struct Agent::Impl {
             for (auto* n : {&network, &target_network, &snapshot_network}) {
                 *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
                 if (*n) (*n)->AttachWordVectors(layout);
+            }
+            for (auto* list : {&members, &snapshot_members}) {
+                list->resize(io::ReadSize(in, 16));
+                for (auto& member : *list) {
+                    member = AgentNetwork::Deserialize(in);
+                    member->AttachWordVectors(layout);
+                }
             }
             FindWordIds();
             for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
@@ -2600,6 +2675,8 @@ struct Agent::Impl {
     std::unique_ptr<AgentNetwork> network;
     std::unique_ptr<AgentNetwork> target_network;  // ACTION heads (Double DQN)
     std::unique_ptr<AgentNetwork> snapshot_network;          // last healthy weights
+    std::vector<std::unique_ptr<AgentNetwork>> members;           // further networks of an ensemble
+    std::vector<std::unique_ptr<AgentNetwork>> snapshot_members;  // their last healthy weights
     std::unique_ptr<AnomalyAutoencoder> snapshot_autoencoder;
     uint64_t last_snapshot{0};
     uint64_t rollbacks{0};
@@ -2679,6 +2756,10 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
     bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(), [](const OutputSpec& output) {
         return output.type == OutputType::ACTION || output.type == OutputType::CONTINUOUS_ACTION;
     });
+    if (config.ensemble_size > 1 && (has_actions || config.memory_units > 0)) {
+        throw std::invalid_argument("AgentConfig: ensemble_size > 1 is not supported with ACTION or "
+                                    "CONTINUOUS_ACTION outputs or with memory_units > 0");
+    }
     if (has_actions) {
         config.train_every = config.action_train_every;
         config.learning_rate = config.action_learning_rate;
