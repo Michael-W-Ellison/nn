@@ -161,6 +161,7 @@ const std::vector<FieldEntry<EncoderConfig>>& EncoderFields() {
         DPAN_FIELD(EncoderConfig, text_word_vectors),
         DPAN_FIELD(EncoderConfig, text_word_vectors_limit),
         DPAN_FIELD(EncoderConfig, train_word_vectors),
+        DPAN_FIELD(EncoderConfig, text_bidirectional),
         DPAN_FIELD(EncoderConfig, text_word_dimension),
         DPAN_FIELD(EncoderConfig, text_sequence_units),
         DPAN_FIELD(EncoderConfig, time_series_window),

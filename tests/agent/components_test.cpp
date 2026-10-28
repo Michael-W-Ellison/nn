@@ -407,8 +407,8 @@ TEST(AgentNetworkTest, MemoryNetworkWidensCopiesAndSerializes) {
 
 TEST(WordSequenceTest, GradientsMatchFiniteDifferences) {
     auto pretrained = std::make_shared<Matrix>(Matrix::FromRows({{0.5f, -0.2f, 0.1f}, {-0.3f, 0.4f, 0.2f}}));
-    WordSequenceModel model(4, 3, 0, 5, pretrained, false, 3);
-    EXPECT_EQ(2 * 5u + 3u, model.OutputSize());
+    WordSequenceModel model(4, 3, 0, 5, true, pretrained, false, 3);
+    EXPECT_EQ(2 * 2 * 5u + 3u, model.OutputSize());
     // Rows: ids (2 pretrained, 3 learned + 1 shared): lengths 4, 2, 0
     Matrix ids = Matrix::FromRows({{1, 3, 4, 2}, {5, 6, 0, 0}, {0, 0, 0, 0}});
     std::mt19937 rng(4);

@@ -14,7 +14,8 @@ namespace agent {
 using nn::Matrix;
 
 WordSequenceModel::WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units,
-                                     std::shared_ptr<const Matrix> pretrained, bool train_pretrained, uint32_t seed)
+                                     bool bidirectional, std::shared_ptr<const Matrix> pretrained,
+                                     bool train_pretrained, uint32_t seed)
     : length_(length),
       dimension_(pretrained ? pretrained->Cols() : dimension),
       units_(units),
@@ -34,7 +35,10 @@ WordSequenceModel::WordSequenceModel(size_t length, size_t learned_words, size_t
         pretrained_ = std::move(pretrained);
     }
     learned_grad_ = Matrix(own, dimension_);
-    gru_ = std::make_unique<nn::GRU>(dimension_, units_, seed + 1, static_cast<float>(length_));
+    for (size_t d = 0; d < (bidirectional ? 2u : 1u); ++d) {
+        grus_.push_back(std::make_unique<nn::GRU>(dimension_, units_, seed + 1 + static_cast<uint32_t>(d),
+                                                  static_cast<float>(length_)));
+    }
 }
 
 WordSequenceModel::WordSequenceModel(const WordSequenceModel& other)
@@ -45,8 +49,9 @@ WordSequenceModel::WordSequenceModel(const WordSequenceModel& other)
       train_pretrained_(other.train_pretrained_),
       pretrained_(other.pretrained_),
       learned_(other.learned_),
-      learned_grad_(other.learned_grad_),
-      gru_(other.gru_ ? std::make_unique<nn::GRU>(*other.gru_) : nullptr) {}
+      learned_grad_(other.learned_grad_) {
+    for (const auto& gru : other.grus_) grus_.push_back(std::make_unique<nn::GRU>(*gru));
+}
 
 const float* WordSequenceModel::Vector(uint32_t id) const {
     if (id == 0) return nullptr;
@@ -75,35 +80,44 @@ void WordSequenceModel::Parse(const Matrix& ids, std::vector<std::vector<uint32_
     }
 }
 
-std::vector<Matrix> WordSequenceModel::Inputs(const std::vector<std::vector<uint32_t>>& rows) const {
+size_t WordSequenceModel::Position(size_t direction, size_t step, size_t length) {
+    return direction == 0 ? step : length - 1 - step;
+}
+
+std::vector<Matrix> WordSequenceModel::Inputs(const std::vector<std::vector<uint32_t>>& rows,
+                                              const std::vector<size_t>& lengths, size_t direction) const {
     std::vector<Matrix> xs(length_, Matrix(rows.size(), dimension_));
     for (size_t r = 0; r < rows.size(); ++r) {
-        for (size_t t = 0; t < length_; ++t) {
-            if (const float* v = Vector(rows[r][t])) std::copy(v, v + dimension_, xs[t].Data() + r * dimension_);
+        for (size_t t = 0; t < lengths[r]; ++t) {
+            if (const float* v = Vector(rows[r][Position(direction, t, lengths[r])])) {
+                std::copy(v, v + dimension_, xs[t].Data() + r * dimension_);
+            }
         }
     }
     return xs;
 }
 
-Matrix WordSequenceModel::Output(const std::vector<Matrix>& states, const std::vector<std::vector<uint32_t>>& rows,
+Matrix WordSequenceModel::Output(const std::vector<std::vector<Matrix>>& states,
+                                 const std::vector<std::vector<uint32_t>>& rows,
                                  const std::vector<size_t>& lengths) const {
     Matrix out(rows.size(), OutputSize());
     for (size_t r = 0; r < rows.size(); ++r) {
-        if (lengths[r] == 0) continue;
-        std::copy(states[lengths[r] - 1].Data() + r * units_, states[lengths[r] - 1].Data() + (r + 1) * units_,
-                  out.Data() + r * OutputSize());
-        float* mean_state = out.Data() + r * OutputSize() + units_;
-        for (size_t t = 0; t < lengths[r]; ++t) {
-            const float* h = states[t].Data() + r * units_;
-            for (size_t j = 0; j < units_; ++j) mean_state[j] += h[j] / static_cast<float>(lengths[r]);
-        }
-        float* mean = mean_state + units_;
-        for (size_t t = 0; t < lengths[r]; ++t) {
-            if (const float* v = Vector(rows[r][t])) {
-                for (size_t j = 0; j < dimension_; ++j) mean[j] += v[j];
+        const size_t n = lengths[r];
+        if (n == 0) continue;
+        float* o = out.Data() + r * OutputSize();
+        for (size_t d = 0; d < states.size(); ++d, o += 2 * units_) {
+            std::copy(states[d][n - 1].Data() + r * units_, states[d][n - 1].Data() + (r + 1) * units_, o);
+            for (size_t t = 0; t < n; ++t) {
+                const float* h = states[d][t].Data() + r * units_;
+                for (size_t j = 0; j < units_; ++j) o[units_ + j] += h[j] / static_cast<float>(n);
             }
         }
-        for (size_t j = 0; j < dimension_; ++j) mean[j] /= static_cast<float>(lengths[r]);
+        for (size_t t = 0; t < n; ++t) {
+            if (const float* v = Vector(rows[r][t])) {
+                for (size_t j = 0; j < dimension_; ++j) o[j] += v[j];
+            }
+        }
+        for (size_t j = 0; j < dimension_; ++j) o[j] /= static_cast<float>(n);
     }
     return out;
 }
@@ -112,7 +126,10 @@ Matrix WordSequenceModel::Forward(const Matrix& ids, bool training) {
     if (!training) return Infer(ids);
     if (NeedsPretrained()) throw std::logic_error("WordSequenceModel: pretrained vectors not attached");
     Parse(ids, cache_ids_, cache_lengths_);
-    auto states = gru_->Forward(Inputs(cache_ids_), Matrix(ids.Rows(), units_), {});
+    std::vector<std::vector<Matrix>> states;
+    for (size_t d = 0; d < grus_.size(); ++d) {
+        states.push_back(grus_[d]->Forward(Inputs(cache_ids_, cache_lengths_, d), Matrix(ids.Rows(), units_), {}));
+    }
     return Output(states, cache_ids_, cache_lengths_);
 }
 
@@ -121,13 +138,15 @@ Matrix WordSequenceModel::Infer(const Matrix& ids) const {
     std::vector<std::vector<uint32_t>> rows;
     std::vector<size_t> lengths;
     Parse(ids, rows, lengths);
-    auto xs = Inputs(rows);
-    std::vector<Matrix> states;
-    Matrix state(ids.Rows(), units_);
     size_t longest = lengths.empty() ? 0 : *std::max_element(lengths.begin(), lengths.end());
-    for (size_t t = 0; t < longest; ++t) {
-        state = gru_->Step(xs[t], state);
-        states.push_back(state);
+    std::vector<std::vector<Matrix>> states(grus_.size());
+    for (size_t d = 0; d < grus_.size(); ++d) {
+        auto xs = Inputs(rows, lengths, d);
+        Matrix state(ids.Rows(), units_);
+        for (size_t t = 0; t < longest; ++t) {
+            state = grus_[d]->Step(xs[t], state);
+            states[d].push_back(state);
+        }
     }
     return Output(states, rows, lengths);
 }
@@ -137,49 +156,63 @@ void WordSequenceModel::Backward(const Matrix& grad_output) {
     if (grad_output.Rows() != rows || grad_output.Cols() != OutputSize()) {
         throw std::invalid_argument("WordSequenceModel::Backward: gradient does not match the last Forward");
     }
-    std::vector<Matrix> grad_states(length_, Matrix(rows, units_));
-    for (size_t r = 0; r < rows; ++r) {
-        if (cache_lengths_[r] == 0) continue;
-        std::copy(grad_output.Data() + r * OutputSize(), grad_output.Data() + r * OutputSize() + units_,
-                  grad_states[cache_lengths_[r] - 1].Data() + r * units_);
-        const float* grad_mean_state = grad_output.Data() + r * OutputSize() + units_;
-        for (size_t t = 0; t < cache_lengths_[r]; ++t) {
-            float* g = grad_states[t].Data() + r * units_;
-            for (size_t j = 0; j < units_; ++j) g[j] += grad_mean_state[j] / static_cast<float>(cache_lengths_[r]);
+    // Gradient of each word's vector: from every direction's GRU input and
+    // from the mean vector
+    auto add = [&](size_t r, size_t t, const float* g, float scale) {
+        size_t index = cache_ids_[r][t] - 1;
+        if (!train_pretrained_ && pretrained_rows_ > 0) {
+            if (index < pretrained_rows_) return;  // fixed
+            index -= pretrained_rows_;
+        }
+        if (index >= learned_.Rows()) return;
+        float* to = learned_grad_.Data() + index * dimension_;
+        for (size_t j = 0; j < dimension_; ++j) to[j] += scale * g[j];
+    };
+    for (size_t d = 0; d < grus_.size(); ++d) {
+        std::vector<Matrix> grad_states(length_, Matrix(rows, units_));
+        for (size_t r = 0; r < rows; ++r) {
+            const size_t n = cache_lengths_[r];
+            if (n == 0) continue;
+            const float* g = grad_output.Data() + r * OutputSize() + d * 2 * units_;
+            std::copy(g, g + units_, grad_states[n - 1].Data() + r * units_);
+            for (size_t t = 0; t < n; ++t) {
+                float* to = grad_states[t].Data() + r * units_;
+                for (size_t j = 0; j < units_; ++j) to[j] += g[units_ + j] / static_cast<float>(n);
+            }
+        }
+        auto grad_inputs = grus_[d]->Backward(grad_states);
+        for (size_t r = 0; r < rows; ++r) {
+            for (size_t t = 0; t < cache_lengths_[r]; ++t) {
+                add(r, Position(d, t, cache_lengths_[r]), grad_inputs[t].Data() + r * dimension_, 1.0f);
+            }
         }
     }
-    auto grad_inputs = gru_->Backward(grad_states);
     for (size_t r = 0; r < rows; ++r) {
         const size_t n = cache_lengths_[r];
-        const float* grad_mean = grad_output.Data() + r * OutputSize() + 2 * units_;
-        for (size_t t = 0; t < n; ++t) {
-            uint32_t id = cache_ids_[r][t];
-            size_t index = id - 1;
-            if (!train_pretrained_ && pretrained_rows_ > 0) {
-                if (index < pretrained_rows_) continue;  // fixed
-                index -= pretrained_rows_;
-            }
-            if (index >= learned_.Rows()) continue;
-            float* g = learned_grad_.Data() + index * dimension_;
-            const float* from_gru = grad_inputs[t].Data() + r * dimension_;
-            for (size_t j = 0; j < dimension_; ++j) g[j] += from_gru[j] + grad_mean[j] / static_cast<float>(n);
-        }
+        const float* grad_mean = grad_output.Data() + r * OutputSize() + grus_.size() * 2 * units_;
+        for (size_t t = 0; t < n; ++t) add(r, t, grad_mean, 1.0f / static_cast<float>(n));
     }
 }
 
 std::vector<nn::Parameter> WordSequenceModel::Parameters() {
     std::vector<nn::Parameter> parameters{{&learned_, &learned_grad_}};
-    auto gru = gru_->Parameters();
-    parameters.insert(parameters.end(), gru.begin(), gru.end());
+    for (auto& gru : grus_) {
+        auto p = gru->Parameters();
+        parameters.insert(parameters.end(), p.begin(), p.end());
+    }
     return parameters;
 }
 
 void WordSequenceModel::ZeroGradients() {
     learned_grad_.Fill(0.0f);
-    gru_->ZeroGradients();
+    for (auto& gru : grus_) gru->ZeroGradients();
 }
 
-size_t WordSequenceModel::ParameterCount() const { return learned_.Size() + gru_->ParameterCount(); }
+size_t WordSequenceModel::ParameterCount() const {
+    size_t count = learned_.Size();
+    for (const auto& gru : grus_) count += gru->ParameterCount();
+    return count;
+}
 
 void WordSequenceModel::AttachPretrained(std::shared_ptr<const Matrix> pretrained) {
     if (!pretrained || pretrained->Rows() != pretrained_rows_ || pretrained->Cols() != dimension_) {
@@ -195,7 +228,8 @@ void WordSequenceModel::Serialize(std::ostream& out) const {
     io::WriteSize(out, pretrained_rows_);
     io::Write<uint8_t>(out, train_pretrained_ ? 1 : 0);
     learned_.Serialize(out);
-    gru_->Serialize(out);
+    io::Write<uint8_t>(out, static_cast<uint8_t>(grus_.size()));
+    for (const auto& gru : grus_) gru->Serialize(out);
 }
 
 WordSequenceModel WordSequenceModel::Deserialize(std::istream& in) {
@@ -207,9 +241,15 @@ WordSequenceModel WordSequenceModel::Deserialize(std::istream& in) {
     model.train_pretrained_ = io::Read<uint8_t>(in) != 0;
     model.learned_ = Matrix::Deserialize(in);
     model.learned_grad_ = Matrix(model.learned_.Rows(), model.learned_.Cols());
-    model.gru_ = std::make_unique<nn::GRU>(nn::GRU::Deserialize(in));
-    if (model.learned_.Cols() != model.dimension_ || model.gru_->InputSize() != model.dimension_ ||
-        model.gru_->HiddenSize() != model.units_ || model.length_ == 0) {
+    const size_t directions = io::Read<uint8_t>(in);
+    if (directions < 1 || directions > 2) throw std::runtime_error("WordSequenceModel: malformed data");
+    for (size_t d = 0; d < directions; ++d) {
+        model.grus_.push_back(std::make_unique<nn::GRU>(nn::GRU::Deserialize(in)));
+        if (model.grus_.back()->InputSize() != model.dimension_ || model.grus_.back()->HiddenSize() != model.units_) {
+            throw std::runtime_error("WordSequenceModel: malformed data");
+        }
+    }
+    if (model.learned_.Cols() != model.dimension_ || model.length_ == 0) {
         throw std::runtime_error("WordSequenceModel: malformed data");
     }
     return model;

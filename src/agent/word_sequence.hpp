@@ -2,8 +2,9 @@
 //
 // The agent network's reader of a TEXT channel's word sequence
 // (docs/AGENT_PLAN.md, Phase 10): word ids -> word vectors -> a GRU over the
-// words in order. The output is the GRU's state after the last word, the
-// mean of its states over the words and the mean of the word vectors.
+// words in order (and, bidirectional, a second GRU from the last word to the
+// first). The output is, per GRU, its state after its last step and the mean
+// of its states over the words; then the mean of the word vectors.
 //
 // Ids: 0 = no word (the sequence ends at the first 0); 1..P = the P
 // pretrained vectors (shared between copies of the model, fixed unless
@@ -28,11 +29,11 @@ public:
     ///        width sets the dimension if given
     /// @param train_pretrained Learn the pretrained vectors too (the model
     ///        then keeps its own copy)
-    WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units,
+    WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units, bool bidirectional,
                       std::shared_ptr<const nn::Matrix> pretrained, bool train_pretrained, uint32_t seed);
 
     size_t Length() const { return length_; }
-    size_t OutputSize() const { return 2 * units_ + dimension_; }
+    size_t OutputSize() const { return grus_.size() * 2 * units_ + dimension_; }
 
     /// ids: rows x Length() word ids (as floats). Forward keeps what Backward needs.
     nn::Matrix Forward(const nn::Matrix& ids, bool training);
@@ -61,9 +62,12 @@ private:
     const float* Vector(uint32_t id) const;
     /// Ids of each row and their count (up to the first 0)
     void Parse(const nn::Matrix& ids, std::vector<std::vector<uint32_t>>& rows, std::vector<size_t>& lengths) const;
-    std::vector<nn::Matrix> Inputs(const std::vector<std::vector<uint32_t>>& rows) const;
-    nn::Matrix Output(const std::vector<nn::Matrix>& states, const std::vector<std::vector<uint32_t>>& rows,
-                      const std::vector<size_t>& lengths) const;
+    /// Word index read at `step` by GRU `direction` (0: first to last, 1: last to first)
+    static size_t Position(size_t direction, size_t step, size_t length);
+    std::vector<nn::Matrix> Inputs(const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths,
+                                   size_t direction) const;
+    nn::Matrix Output(const std::vector<std::vector<nn::Matrix>>& states,
+                      const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths) const;
 
     size_t length_{0};
     size_t dimension_{0};
@@ -72,7 +76,7 @@ private:
     bool train_pretrained_{false};
     std::shared_ptr<const nn::Matrix> pretrained_;  // fixed, shared
     nn::Matrix learned_, learned_grad_;              // trainable rows (with train_pretrained: pretrained first)
-    std::unique_ptr<nn::GRU> gru_;
+    std::vector<std::unique_ptr<nn::GRU>> grus_;     // one per direction
 
     std::vector<std::vector<uint32_t>> cache_ids_;
     std::vector<size_t> cache_lengths_;

@@ -993,6 +993,7 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
             channel.word_dimension = text->WordDimension();
             channel.sequence_units = text->Config().text_sequence_units;
             channel.train_word_vectors = text->Config().train_word_vectors;
+            channel.bidirectional = text->Config().text_bidirectional;
             channel.word_vectors = text->WordVectors();
         }
         layout.push_back(channel);

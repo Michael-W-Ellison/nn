@@ -61,12 +61,14 @@ struct EncoderConfig {
     /// which are trained further (fixed if not train_word_vectors). Other words get learned vectors of
     /// text_word_dimension values (the file's dimension when there is one).
     /// The agent's network reads the words with a GRU of
-    /// text_sequence_units.
+    /// text_sequence_units (and, with text_bidirectional, a second one from
+    /// the last word to the first).
     size_t text_sequence_length{32};
     size_t text_vocabulary{20000};
     std::string text_word_vectors;
     size_t text_word_vectors_limit{40000};
     bool train_word_vectors{true};
+    bool text_bidirectional{true};
     size_t text_word_dimension{50};
     size_t text_sequence_units{64};
 
@@ -417,6 +419,7 @@ struct ChannelLayout {
     size_t learned_words{0};
     size_t word_dimension{0};
     size_t sequence_units{0};
+    bool bidirectional{false};
     bool train_word_vectors{false};
     std::shared_ptr<const nn::Matrix> word_vectors;
 };
