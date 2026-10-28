@@ -67,6 +67,10 @@ struct EncoderConfig {
     size_t text_vocabulary{20000};
     std::string text_word_vectors;
     size_t text_word_vectors_limit{40000};
+    /// The file's vectors are scaled by one factor to this mean row norm
+    /// (0 = as in the file; GloVe 6B 100d is about 5.3). Larger vectors
+    /// change less, relative to their size, when they are trained.
+    float text_word_vector_norm{10.0f};
     bool train_word_vectors{true};
     bool text_bidirectional{true};
     size_t text_word_dimension{50};

@@ -94,6 +94,9 @@ void ValidateEncoderConfig(const EncoderConfig& config) {
             "EncoderConfig: with text_sequence_length > 0, text_vocabulary, text_word_dimension and "
             "text_sequence_units must be > 0");
     }
+    if (!(config.text_word_vector_norm >= 0.0f) || !std::isfinite(config.text_word_vector_norm)) {
+        throw std::invalid_argument("EncoderConfig: text_word_vector_norm must be finite and >= 0");
+    }
 }
 
 // ============================================================================
@@ -440,6 +443,21 @@ void TextEncoder::LoadWordVectors() const {
     }
     if (words_.empty()) {
         throw std::invalid_argument("TEXT word vectors: no vectors in '" + config_.text_word_vectors + "'");
+    }
+    if (config_.text_word_vector_norm > 0.0f) {
+        // One factor for all rows (their relative geometry is kept): mean row
+        // norm text_word_vector_norm, the scale of the learned vectors
+        double total = 0.0;
+        for (size_t r = 0; r < words_.size(); ++r) {
+            double sum = 0.0;
+            for (size_t j = 0; j < dimension; ++j) sum += double(values[r * dimension + j]) * values[r * dimension + j];
+            total += std::sqrt(sum);
+        }
+        double mean = total / static_cast<double>(words_.size());
+        if (mean > 0.0) {
+            const float factor = static_cast<float>(config_.text_word_vector_norm / mean);
+            for (float& v : values) v *= factor;
+        }
     }
     vectors_ = std::make_shared<nn::Matrix>(words_.size(), dimension, std::move(values));
 }

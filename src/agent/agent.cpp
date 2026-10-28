@@ -323,6 +323,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteString(out, c.encoder.text_word_vectors);
     io::Write<uint8_t>(out, c.encoder.train_word_vectors ? 1 : 0);
     io::Write<uint8_t>(out, c.encoder.text_bidirectional ? 1 : 0);
+    io::Write<float>(out, c.encoder.text_word_vector_norm);
     io::WriteSize(out, c.encoder.time_series_window);
     io::WriteSize(out, c.encoder.image_size);
     io::WriteSize(out, c.encoder.max_image_size);
@@ -410,6 +411,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.text_word_vectors = io::ReadString(in, 1u << 16);
     c.encoder.train_word_vectors = io::Read<uint8_t>(in) != 0;
     c.encoder.text_bidirectional = io::Read<uint8_t>(in) != 0;
+    c.encoder.text_word_vector_norm = io::Read<float>(in);
     c.encoder.time_series_window = io::ReadSize(in);
     c.encoder.image_size = io::ReadSize(in);
     c.encoder.max_image_size = io::ReadSize(in);
