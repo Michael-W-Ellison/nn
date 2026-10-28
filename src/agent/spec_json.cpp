@@ -163,6 +163,7 @@ const std::vector<FieldEntry<EncoderConfig>>& EncoderFields() {
         DPAN_FIELD(EncoderConfig, text_word_vector_norm),
         DPAN_FIELD(EncoderConfig, train_word_vectors),
         DPAN_FIELD(EncoderConfig, text_bidirectional),
+        DPAN_FIELD(EncoderConfig, text_attention),
         DPAN_FIELD(EncoderConfig, text_word_dropout),
         DPAN_FIELD(EncoderConfig, text_dropout),
         DPAN_FIELD(EncoderConfig, text_word_dimension),

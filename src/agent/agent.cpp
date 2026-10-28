@@ -165,7 +165,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 13;
+constexpr uint32_t kCheckpointVersion = 14;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -323,6 +323,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteString(out, c.encoder.text_word_vectors);
     io::Write<uint8_t>(out, c.encoder.train_word_vectors ? 1 : 0);
     io::Write<uint8_t>(out, c.encoder.text_bidirectional ? 1 : 0);
+    io::Write<uint8_t>(out, c.encoder.text_attention ? 1 : 0);
     io::Write<float>(out, c.encoder.text_word_vector_norm);
     io::Write<float>(out, c.encoder.text_word_dropout);
     io::Write<float>(out, c.encoder.text_dropout);
@@ -413,6 +414,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.text_word_vectors = io::ReadString(in, 1u << 16);
     c.encoder.train_word_vectors = io::Read<uint8_t>(in) != 0;
     c.encoder.text_bidirectional = io::Read<uint8_t>(in) != 0;
+    c.encoder.text_attention = io::Read<uint8_t>(in) != 0;
     c.encoder.text_word_vector_norm = io::Read<float>(in);
     c.encoder.text_word_dropout = io::Read<float>(in);
     c.encoder.text_dropout = io::Read<float>(in);

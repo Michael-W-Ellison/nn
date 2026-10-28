@@ -3,8 +3,10 @@
 // The agent network's reader of a TEXT channel's word sequence
 // (docs/AGENT_PLAN.md, Phase 10): word ids -> word vectors -> a GRU over the
 // words in order (and, bidirectional, a second GRU from the last word to the
-// first). The output is, per GRU, its state after its last step and the mean
-// of its states over the words; then the mean of the word vectors.
+// first). With attention, the output is a weighted sum of the GRUs' states at
+// each word (weights: softmax over the words of a learned linear score);
+// without, it is, per GRU, its state after its last step and the mean of its
+// states over the words. The mean of the word vectors follows.
 //
 // Ids: 0 = no word (the sequence ends at the first 0); 1..P = the P
 // pretrained vectors (shared between copies of the model, fixed unless
@@ -31,7 +33,8 @@ public:
     /// @param train_pretrained Learn the pretrained vectors too (the model
     ///        then keeps its own copy)
     WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units, bool bidirectional,
-                      std::shared_ptr<const nn::Matrix> pretrained, bool train_pretrained, uint32_t seed);
+                      bool attention, std::shared_ptr<const nn::Matrix> pretrained, bool train_pretrained,
+                      uint32_t seed);
 
     /// Training only: each word is read as an empty vector with probability
     /// `word_dropout`, each output value is zeroed with probability `dropout`
@@ -39,7 +42,7 @@ public:
     void SetDropout(float word_dropout, float dropout);
 
     size_t Length() const { return length_; }
-    size_t OutputSize() const { return grus_.size() * 2 * units_ + dimension_; }
+    size_t OutputSize() const { return (attention_ ? 1 : 2) * grus_.size() * units_ + dimension_; }
 
     /// ids: rows x Length() word ids (as floats). Forward keeps what Backward needs.
     nn::Matrix Forward(const nn::Matrix& ids, bool training);
@@ -73,8 +76,12 @@ private:
     static size_t Position(size_t direction, size_t step, size_t length);
     std::vector<nn::Matrix> Inputs(const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths,
                                    size_t direction) const;
+    /// `weights` (rows x Length()) receives the attention weights
     nn::Matrix Output(const std::vector<std::vector<nn::Matrix>>& states,
-                      const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths) const;
+                      const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths,
+                      nn::Matrix* weights = nullptr) const;
+    /// GRUs' states at word t of row r, concatenated
+    void StateAt(const std::vector<std::vector<nn::Matrix>>& states, size_t r, size_t t, size_t n, float* out) const;
 
     size_t length_{0};
     size_t dimension_{0};
@@ -84,6 +91,10 @@ private:
     std::shared_ptr<const nn::Matrix> pretrained_;  // fixed, shared
     nn::Matrix learned_, learned_grad_;              // trainable rows (with train_pretrained: pretrained first)
     std::vector<std::unique_ptr<nn::GRU>> grus_;     // one per direction
+    bool attention_{false};
+    nn::Matrix attention_weights_, attention_grad_;  // 1 x (directions x units)
+    std::vector<std::vector<nn::Matrix>> cache_states_;
+    nn::Matrix cache_attention_;
 
     float word_dropout_{0.0f};
     float dropout_{0.0f};

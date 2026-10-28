@@ -15,7 +15,7 @@ namespace agent {
 using nn::Matrix;
 
 WordSequenceModel::WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units,
-                                     bool bidirectional, std::shared_ptr<const Matrix> pretrained,
+                                     bool bidirectional, bool attention, std::shared_ptr<const Matrix> pretrained,
                                      bool train_pretrained, uint32_t seed)
     : length_(length),
       dimension_(pretrained ? pretrained->Cols() : dimension),
@@ -41,6 +41,14 @@ WordSequenceModel::WordSequenceModel(size_t length, size_t learned_words, size_t
         grus_.push_back(std::make_unique<nn::GRU>(dimension_, units_, seed + 1 + static_cast<uint32_t>(d),
                                                   static_cast<float>(length_)));
     }
+    attention_ = attention;
+    if (attention_) {
+        const size_t width = grus_.size() * units_;
+        attention_weights_ = Matrix(1, width);
+        std::normal_distribution<float> init(0.0f, 1.0f / std::sqrt(static_cast<float>(width)));
+        for (size_t i = 0; i < width; ++i) attention_weights_.Data()[i] = init(rng);
+        attention_grad_ = Matrix(1, width);
+    }
 }
 
 WordSequenceModel::WordSequenceModel(const WordSequenceModel& other)
@@ -52,6 +60,9 @@ WordSequenceModel::WordSequenceModel(const WordSequenceModel& other)
       pretrained_(other.pretrained_),
       learned_(other.learned_),
       learned_grad_(other.learned_grad_),
+      attention_(other.attention_),
+      attention_weights_(other.attention_weights_),
+      attention_grad_(other.attention_grad_),
       word_dropout_(other.word_dropout_),
       dropout_(other.dropout_),
       rng_(other.rng_) {
@@ -110,15 +121,45 @@ std::vector<Matrix> WordSequenceModel::Inputs(const std::vector<std::vector<uint
     return xs;
 }
 
+void WordSequenceModel::StateAt(const std::vector<std::vector<Matrix>>& states, size_t r, size_t t, size_t n,
+                                float* out) const {
+    for (size_t d = 0; d < states.size(); ++d) {
+        const float* h = states[d][Position(d, t, n)].Data() + r * units_;
+        std::copy(h, h + units_, out + d * units_);
+    }
+}
+
 Matrix WordSequenceModel::Output(const std::vector<std::vector<Matrix>>& states,
-                                 const std::vector<std::vector<uint32_t>>& rows,
-                                 const std::vector<size_t>& lengths) const {
+                                 const std::vector<std::vector<uint32_t>>& rows, const std::vector<size_t>& lengths,
+                                 Matrix* weights) const {
     Matrix out(rows.size(), OutputSize());
+    if (weights) *weights = Matrix(rows.size(), length_);
+    const size_t width = states.size() * units_;
+    std::vector<float> h(width), scores(length_);
     for (size_t r = 0; r < rows.size(); ++r) {
         const size_t n = lengths[r];
         if (n == 0) continue;
         float* o = out.Data() + r * OutputSize();
-        for (size_t d = 0; d < states.size(); ++d, o += 2 * units_) {
+        if (attention_) {
+            float top = -1e30f;
+            for (size_t t = 0; t < n; ++t) {
+                StateAt(states, r, t, n, h.data());
+                float s = 0.0f;
+                for (size_t j = 0; j < width; ++j) s += attention_weights_.Data()[j] * h[j];
+                scores[t] = s;
+                top = std::max(top, s);
+            }
+            float total = 0.0f;
+            for (size_t t = 0; t < n; ++t) total += (scores[t] = std::exp(scores[t] - top));
+            for (size_t t = 0; t < n; ++t) {
+                const float a = scores[t] / total;
+                if (weights) (*weights)(r, t) = a;
+                StateAt(states, r, t, n, h.data());
+                for (size_t j = 0; j < width; ++j) o[j] += a * h[j];
+            }
+            o += width;
+        }
+        for (size_t d = 0; d < (attention_ ? 0 : states.size()); ++d, o += 2 * units_) {
             std::copy(states[d][n - 1].Data() + r * units_, states[d][n - 1].Data() + (r + 1) * units_, o);
             for (size_t t = 0; t < n; ++t) {
                 const float* h = states[d][t].Data() + r * units_;
@@ -152,7 +193,8 @@ Matrix WordSequenceModel::Forward(const Matrix& ids, bool training) {
     for (size_t d = 0; d < grus_.size(); ++d) {
         states.push_back(grus_[d]->Forward(Inputs(cache_ids_, cache_lengths_, d), Matrix(ids.Rows(), units_), {}));
     }
-    Matrix out = Output(states, cache_ids_, cache_lengths_);
+    Matrix out = Output(states, cache_ids_, cache_lengths_, &cache_attention_);
+    cache_states_ = std::move(states);
     cache_mask_ = Matrix();
     if (dropout_ > 0.0f) {
         cache_mask_ = Matrix(out.Rows(), out.Cols());
@@ -209,19 +251,50 @@ void WordSequenceModel::BackwardMasked(const Matrix& grad_output) {
         float* to = learned_grad_.Data() + index * dimension_;
         for (size_t j = 0; j < dimension_; ++j) to[j] += scale * g[j];
     };
-    for (size_t d = 0; d < grus_.size(); ++d) {
-        std::vector<Matrix> grad_states(length_, Matrix(rows, units_));
+    std::vector<std::vector<Matrix>> grad_states(grus_.size(), std::vector<Matrix>(length_, Matrix(rows, units_)));
+    if (attention_) {
+        // pooled = sum_t a_t h_t, a = softmax(w . h_t):
+        // dh_t = a_t g + ds_t w, ds_t = a_t (g . h_t - sum_k a_k g . h_k), dw = sum_t ds_t h_t
+        const size_t width = grus_.size() * units_;
+        std::vector<float> h(width), gh(length_);
         for (size_t r = 0; r < rows; ++r) {
             const size_t n = cache_lengths_[r];
             if (n == 0) continue;
-            const float* g = grad_output.Data() + r * OutputSize() + d * 2 * units_;
-            std::copy(g, g + units_, grad_states[n - 1].Data() + r * units_);
+            const float* g = grad_output.Data() + r * OutputSize();
+            float expected = 0.0f;
             for (size_t t = 0; t < n; ++t) {
-                float* to = grad_states[t].Data() + r * units_;
+                StateAt(cache_states_, r, t, n, h.data());
+                float dot = 0.0f;
+                for (size_t j = 0; j < width; ++j) dot += g[j] * h[j];
+                gh[t] = dot;
+                expected += cache_attention_(r, t) * dot;
+            }
+            for (size_t t = 0; t < n; ++t) {
+                const float a = cache_attention_(r, t);
+                const float ds = a * (gh[t] - expected);
+                StateAt(cache_states_, r, t, n, h.data());
+                for (size_t j = 0; j < width; ++j) attention_grad_.Data()[j] += ds * h[j];
+                for (size_t d = 0; d < grus_.size(); ++d) {
+                    float* to = grad_states[d][Position(d, t, n)].Data() + r * units_;
+                    for (size_t j = 0; j < units_; ++j) {
+                        to[j] += a * g[d * units_ + j] + ds * attention_weights_.Data()[d * units_ + j];
+                    }
+                }
+            }
+        }
+    }
+    for (size_t d = 0; d < grus_.size(); ++d) {
+        for (size_t r = 0; r < rows && !attention_; ++r) {
+            const size_t n = cache_lengths_[r];
+            if (n == 0) continue;
+            const float* g = grad_output.Data() + r * OutputSize() + d * 2 * units_;
+            std::copy(g, g + units_, grad_states[d][n - 1].Data() + r * units_);
+            for (size_t t = 0; t < n; ++t) {
+                float* to = grad_states[d][t].Data() + r * units_;
                 for (size_t j = 0; j < units_; ++j) to[j] += g[units_ + j] / static_cast<float>(n);
             }
         }
-        auto grad_inputs = grus_[d]->Backward(grad_states);
+        auto grad_inputs = grus_[d]->Backward(grad_states[d]);
         for (size_t r = 0; r < rows; ++r) {
             for (size_t t = 0; t < cache_lengths_[r]; ++t) {
                 add(r, Position(d, t, cache_lengths_[r]), grad_inputs[t].Data() + r * dimension_, 1.0f);
@@ -230,7 +303,7 @@ void WordSequenceModel::BackwardMasked(const Matrix& grad_output) {
     }
     for (size_t r = 0; r < rows; ++r) {
         const size_t n = cache_lengths_[r];
-        const float* grad_mean = grad_output.Data() + r * OutputSize() + grus_.size() * 2 * units_;
+        const float* grad_mean = grad_output.Data() + r * OutputSize() + (OutputSize() - dimension_);
         for (size_t t = 0; t < n; ++t) add(r, t, grad_mean, 1.0f / static_cast<float>(n));
     }
 }
@@ -241,16 +314,18 @@ std::vector<nn::Parameter> WordSequenceModel::Parameters() {
         auto p = gru->Parameters();
         parameters.insert(parameters.end(), p.begin(), p.end());
     }
+    if (attention_) parameters.push_back({&attention_weights_, &attention_grad_});
     return parameters;
 }
 
 void WordSequenceModel::ZeroGradients() {
     learned_grad_.Fill(0.0f);
+    attention_grad_.Fill(0.0f);
     for (auto& gru : grus_) gru->ZeroGradients();
 }
 
 size_t WordSequenceModel::ParameterCount() const {
-    size_t count = learned_.Size();
+    size_t count = learned_.Size() + attention_weights_.Size();
     for (const auto& gru : grus_) count += gru->ParameterCount();
     return count;
 }
@@ -271,6 +346,8 @@ void WordSequenceModel::Serialize(std::ostream& out) const {
     learned_.Serialize(out);
     io::Write<uint8_t>(out, static_cast<uint8_t>(grus_.size()));
     for (const auto& gru : grus_) gru->Serialize(out);
+    io::Write<uint8_t>(out, attention_ ? 1 : 0);
+    if (attention_) attention_weights_.Serialize(out);
     io::Write<float>(out, word_dropout_);
     io::Write<float>(out, dropout_);
     std::ostringstream rng;
@@ -297,6 +374,14 @@ WordSequenceModel WordSequenceModel::Deserialize(std::istream& in) {
     }
     if (model.learned_.Cols() != model.dimension_ || model.length_ == 0) {
         throw std::runtime_error("WordSequenceModel: malformed data");
+    }
+    model.attention_ = io::Read<uint8_t>(in) != 0;
+    if (model.attention_) {
+        model.attention_weights_ = Matrix::Deserialize(in);
+        if (model.attention_weights_.Rows() != 1 || model.attention_weights_.Cols() != model.grus_.size() * model.units_) {
+            throw std::runtime_error("WordSequenceModel: malformed data");
+        }
+        model.attention_grad_ = Matrix(1, model.attention_weights_.Cols());
     }
     model.word_dropout_ = io::Read<float>(in);
     model.dropout_ = io::Read<float>(in);

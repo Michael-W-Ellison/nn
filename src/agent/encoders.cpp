@@ -1015,6 +1015,7 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
             channel.sequence_units = text->Config().text_sequence_units;
             channel.train_word_vectors = text->Config().train_word_vectors;
             channel.bidirectional = text->Config().text_bidirectional;
+            channel.attention = text->Config().text_attention;
             channel.word_dropout = text->Config().text_word_dropout;
             channel.dropout = text->Config().text_dropout;
             channel.word_vectors = text->WordVectors();
