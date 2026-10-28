@@ -57,6 +57,13 @@ struct AgentConfig {
     float gradient_clip_norm{5.0f};
     size_t train_every{8};           ///< New trainable samples between training steps (observations with actions)
     size_t batch_size{64};
+    /// Number of complete agents (each with its own networks, pattern
+    /// memory, replay buffer and training schedule, from seeds seed,
+    /// seed + 7919, ...) that see every observation and feedback; CLASS,
+    /// VALUE, NEXT_OBSERVATION and ANOMALY predictions are their average.
+    /// Each uses memory_budget_bytes. Not with ACTION or CONTINUOUS_ACTION
+    /// outputs or memory_units > 0. Stats() reports the first agent.
+    size_t ensemble_size{1};
     float new_sample_share{0.5f};    ///< Share of each batch taken from the newest samples
     size_t replay_capacity{50000};
     size_t cold_start_samples{200};  ///< Samples a head needs before it is used
@@ -393,6 +400,7 @@ private:
     friend struct AgentTestAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    std::vector<std::unique_ptr<Agent>> members_;  ///< Further agents of an ensemble
 };
 
 }  // namespace agent

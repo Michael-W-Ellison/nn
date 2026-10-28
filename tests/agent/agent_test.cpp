@@ -44,6 +44,13 @@ TEST(AgentTest, RejectsUnsupportedOrInvalidSpecs) {
     AgentConfig config;
     config.batch_size = 0;
     EXPECT_THROW(Agent(ClassSpec(), config), std::invalid_argument);
+    AgentConfig ensemble;
+    ensemble.ensemble_size = 2;
+    ensemble.memory_units = 8;
+    EXPECT_THROW(Agent(ClassSpec(), ensemble), std::invalid_argument);  // not with memory
+    ensemble.ensemble_size = 17;
+    ensemble.memory_units = 0;
+    EXPECT_THROW(Agent(ClassSpec(), ensemble), std::invalid_argument);
 }
 
 TEST(AgentTest, StepsExpireAndNamesAreChecked) {
@@ -152,6 +159,32 @@ TEST(AgentTest, LearnsFromDelayedFeedback) {
     EXPECT_GE(correct, 95);
     EXPECT_EQ(1200u, agent.Stats().feedback);
     EXPECT_GT(agent.Stats().training_steps, 100u);
+}
+
+TEST(AgentTest, EnsembleAveragesItsAgents) {
+    // Two agents: the ensemble's probabilities are the mean of what the
+    // agents of seeds 42 and 42 + 7919 predict on their own
+    AgentConfig config;
+    config.ensemble_size = 2;
+    AgentConfig second;
+    second.seed = config.seed + 7919;
+    Agent ensemble(ClassSpec({"a", "b"}), config), first(ClassSpec({"a", "b"})), other(ClassSpec({"a", "b"}), second);
+    std::mt19937 rng(9);
+    for (int i = 0; i < 800; ++i) {
+        int cls = i % 2;
+        auto x = Point(rng, cls);
+        StepId s = ensemble.Observe({{"x", x}});
+        ASSERT_EQ(s, first.Observe({{"x", x}}));
+        ASSERT_EQ(s, other.Observe({{"x", x}}));
+        if (i >= 700) {
+            Prediction p = ensemble.Predict(s, "kind"), p1 = first.Predict(s, "kind"), p2 = other.Predict(s, "kind");
+            ASSERT_TRUE(p.available);
+            for (size_t c = 0; c < 2; ++c) {
+                EXPECT_NEAR(p.probabilities[c], (p1.probabilities[c] + p2.probabilities[c]) / 2.0f, 1e-6f);
+            }
+        }
+        for (Agent* agent : {&ensemble, &first, &other}) agent->Feedback(s, "label", cls ? std::string("b") : std::string("a"));
+    }
 }
 
 TEST(AgentTest, LearnsFromOutcomesOnly) {

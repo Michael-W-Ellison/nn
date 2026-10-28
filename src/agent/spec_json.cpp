@@ -187,6 +187,7 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, gradient_clip_norm),
         DPAN_FIELD(AgentConfig, train_every),
         DPAN_FIELD(AgentConfig, batch_size),
+        DPAN_FIELD(AgentConfig, ensemble_size),
         DPAN_FIELD(AgentConfig, new_sample_share),
         DPAN_FIELD(AgentConfig, replay_capacity),
         DPAN_FIELD(AgentConfig, cold_start_samples),
