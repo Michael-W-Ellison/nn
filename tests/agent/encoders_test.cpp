@@ -334,7 +334,12 @@ TEST(TextEncoderTest, ReadsWordVectorsAndRestoresWithoutTheFile) {
     EXPECT_EQ(3u, encoder.WordDimension());
     auto vectors = encoder.WordVectors();
     ASSERT_TRUE(vectors);
-    EXPECT_EQ((std::vector<float>{-1, 0, 0}), vectors->Row(1));
+    // Scaled by one factor to the mean row norm (default 10)
+    EXPECT_EQ((std::vector<float>{-10, 0, 0}), vectors->Row(1));
+    EncoderConfig unscaled = config;
+    unscaled.text_word_vector_norm = 0.0f;
+    TextEncoder as_in_file({"t", InputType::TEXT}, unscaled);
+    EXPECT_EQ((std::vector<float>{0, 1, 0}), as_in_file.WordVectors()->Row(2));
     // Known words keep their ids; new ones follow the file's words
     Value v = Text("a good movie");
     encoder.Update(&v);
