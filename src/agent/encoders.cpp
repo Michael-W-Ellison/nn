@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -86,6 +87,18 @@ void ValidateEncoderConfig(const EncoderConfig& config) {
     }
     if (config.max_image_size == 0) {
         throw std::invalid_argument("EncoderConfig: max_image_size must be > 0");
+    }
+    if (config.text_sequence_length > 0 &&
+        (config.text_vocabulary == 0 || config.text_word_dimension == 0 || config.text_sequence_units == 0)) {
+        throw std::invalid_argument(
+            "EncoderConfig: with text_sequence_length > 0, text_vocabulary, text_word_dimension and "
+            "text_sequence_units must be > 0");
+    }
+    for (float p : {config.text_word_dropout, config.text_dropout}) {
+        if (!(p >= 0.0f && p < 1.0f)) throw std::invalid_argument("EncoderConfig: text dropout must be in [0, 1)");
+    }
+    if (!(config.text_word_vector_norm >= 0.0f) || !std::isfinite(config.text_word_vector_norm)) {
+        throw std::invalid_argument("EncoderConfig: text_word_vector_norm must be finite and >= 0");
     }
 }
 
@@ -393,7 +406,102 @@ void HashedCategoryEncoder::LoadState(std::istream& in) {
 TextEncoder::TextEncoder(InputSpec spec, const EncoderConfig& config)
     : Encoder(std::move(spec)),
       buckets_(config.text_buckets),
-      embedding_size_(config.text_embedding_size) {}
+      embedding_size_(config.text_embedding_size),
+      sequence_length_(config.text_sequence_length),
+      vocabulary_(config.text_vocabulary),
+      config_(config) {}
+
+void TextEncoder::LoadWordVectors() const {
+    if (vectors_loaded_) return;
+    vectors_loaded_ = true;
+    if (sequence_length_ == 0 || config_.text_word_vectors.empty()) return;
+    std::ifstream file(config_.text_word_vectors);
+    if (!file) {
+        throw std::invalid_argument("TEXT word vectors: cannot open '" + config_.text_word_vectors + "'");
+    }
+    std::vector<float> values;
+    size_t dimension = 0;
+    std::string line;
+    size_t line_number = 0;
+    while (words_.size() < config_.text_word_vectors_limit && std::getline(file, line)) {
+        ++line_number;
+        std::istringstream fields(line);
+        fields.imbue(std::locale::classic());
+        std::string word;
+        if (!(fields >> word)) continue;
+        std::vector<float> vector;
+        float x;
+        while (fields >> x) vector.push_back(x);
+        if (line_number == 1 && vector.size() == 1) continue;  // "count dimension" header
+        if (dimension == 0) dimension = vector.size();
+        if (vector.empty() || vector.size() != dimension) {
+            throw std::invalid_argument("TEXT word vectors: line " + std::to_string(line_number) + " of '" +
+                                        config_.text_word_vectors + "' has " + std::to_string(vector.size()) +
+                                        " values, expected " + std::to_string(dimension));
+        }
+        if (ids_.count(word)) continue;
+        ids_.emplace(word, static_cast<uint32_t>(words_.size() + 1));
+        words_.push_back(word);
+        values.insert(values.end(), vector.begin(), vector.end());
+    }
+    if (words_.empty()) {
+        throw std::invalid_argument("TEXT word vectors: no vectors in '" + config_.text_word_vectors + "'");
+    }
+    if (config_.text_word_vector_norm > 0.0f) {
+        // One factor for all rows (their relative geometry is kept): mean row
+        // norm text_word_vector_norm, the scale of the learned vectors
+        double total = 0.0;
+        for (size_t r = 0; r < words_.size(); ++r) {
+            double sum = 0.0;
+            for (size_t j = 0; j < dimension; ++j) sum += double(values[r * dimension + j]) * values[r * dimension + j];
+            total += std::sqrt(sum);
+        }
+        double mean = total / static_cast<double>(words_.size());
+        if (mean > 0.0) {
+            const float factor = static_cast<float>(config_.text_word_vector_norm / mean);
+            for (float& v : values) v *= factor;
+        }
+    }
+    vectors_ = std::make_shared<nn::Matrix>(words_.size(), dimension, std::move(values));
+}
+
+size_t TextEncoder::PretrainedWords() const {
+    LoadWordVectors();
+    return vectors_ ? vectors_->Rows() : 0;
+}
+
+size_t TextEncoder::WordDimension() const {
+    LoadWordVectors();
+    return vectors_ ? vectors_->Cols() : config_.text_word_dimension;
+}
+
+std::shared_ptr<const nn::Matrix> TextEncoder::WordVectors() const {
+    LoadWordVectors();
+    return vectors_;
+}
+
+std::vector<uint32_t> TextEncoder::WordIds(const std::string& text) const {
+    LoadWordVectors();
+    std::vector<uint32_t> ids(sequence_length_, 0);
+    const size_t capacity = PretrainedWords() + vocabulary_;
+    const auto unknown = static_cast<uint32_t>(capacity + 1);
+    std::map<std::string, uint32_t> fresh;  // words this text would add
+    auto words = Words(text);
+    for (size_t i = 0; i < words.size() && i < sequence_length_; ++i) {
+        auto known = ids_.find(words[i]);
+        if (known != ids_.end()) {
+            ids[i] = known->second;
+            continue;
+        }
+        auto added = fresh.find(words[i]);
+        if (added == fresh.end()) {
+            size_t next = words_.size() + fresh.size();
+            added = fresh.emplace(words[i], next < capacity ? static_cast<uint32_t>(next + 1) : unknown).first;
+        }
+        ids[i] = added->second;
+    }
+    return ids;
+}
 
 std::vector<std::string> TextEncoder::Words(const std::string& text) {
     std::vector<std::string> words;
@@ -446,6 +554,10 @@ std::vector<float> TextEncoder::Encode(const Value* value) const {
             out[i] *= scale;
         }
     }
+    if (sequence_length_ > 0) {
+        auto ids = WordIds(*text);
+        for (size_t i = 0; i < ids.size(); ++i) out[buckets_ + i] = static_cast<float>(ids[i]);
+    }
     return out;
 }
 
@@ -453,15 +565,48 @@ void TextEncoder::Update(const Value* value) {
     if (value == nullptr) {
         return;
     }
-    if (!std::holds_alternative<std::string>(*value)) {
+    const auto* text = std::get_if<std::string>(value);
+    if (text == nullptr) {
         RejectType(*value, "text");
     }
     ++texts_seen_;
+    if (sequence_length_ == 0) return;
+    auto ids = WordIds(*text);
+    auto words = Words(*text);
+    const uint32_t unknown = static_cast<uint32_t>(PretrainedWords() + vocabulary_ + 1);
+    for (size_t i = 0; i < ids.size() && i < words.size(); ++i) {
+        if (ids[i] == unknown || ids[i] <= words_.size()) continue;
+        ids_.emplace(words[i], ids[i]);
+        words_.push_back(words[i]);
+    }
 }
 
-void TextEncoder::SaveState(std::ostream& out) const { io::Write<uint64_t>(out, texts_seen_); }
+void TextEncoder::SaveState(std::ostream& out) const {
+    io::Write<uint64_t>(out, texts_seen_);
+    LoadWordVectors();
+    io::WriteSize(out, words_.size());
+    for (const auto& word : words_) io::WriteString(out, word);
+    io::Write<uint8_t>(out, vectors_ ? 1 : 0);
+    if (vectors_) vectors_->Serialize(out);
+}
 
-void TextEncoder::LoadState(std::istream& in) { texts_seen_ = io::Read<uint64_t>(in); }
+void TextEncoder::LoadState(std::istream& in) {
+    texts_seen_ = io::Read<uint64_t>(in);
+    words_.clear();
+    ids_.clear();
+    size_t count = io::ReadSize(in, 1u << 26);
+    for (size_t i = 0; i < count; ++i) {
+        std::string word = io::ReadString(in, 1u << 16);
+        ids_.emplace(word, static_cast<uint32_t>(i + 1));
+        words_.push_back(std::move(word));
+    }
+    vectors_.reset();
+    if (io::Read<uint8_t>(in)) vectors_ = std::make_shared<nn::Matrix>(nn::Matrix::Deserialize(in));
+    vectors_loaded_ = true;  // the file is not needed again
+    if (ids_.size() != words_.size() || (vectors_ && vectors_->Rows() > words_.size())) {
+        throw std::runtime_error("TextEncoder::LoadState: malformed vocabulary");
+    }
+}
 
 // ============================================================================
 // TimeSeriesEncoder
@@ -862,6 +1007,17 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
             channel.image_height = image->EncodedHeight();
             channel.image_width = image->EncodedWidth();
             channel.image_channels = image->Spec().image_channels;
+        }
+        if (const auto* text = dynamic_cast<const TextEncoder*>(encoder.get()); text && text->SequenceLength() > 0) {
+            channel.sequence_length = text->SequenceLength();
+            channel.learned_words = text->LearnedWords();
+            channel.word_dimension = text->WordDimension();
+            channel.sequence_units = text->Config().text_sequence_units;
+            channel.train_word_vectors = text->Config().train_word_vectors;
+            channel.bidirectional = text->Config().text_bidirectional;
+            channel.word_dropout = text->Config().text_word_dropout;
+            channel.dropout = text->Config().text_dropout;
+            channel.word_vectors = text->WordVectors();
         }
         layout.push_back(channel);
         offset += size;

@@ -15,3 +15,7 @@ gtest_discover_tests(convolution_test)
 add_executable(compute_test compute_test.cpp)
 target_link_libraries(compute_test dpan_nn GTest::gtest_main)
 gtest_discover_tests(compute_test)
+
+add_executable(recurrent_test recurrent_test.cpp)
+target_link_libraries(recurrent_test dpan_nn GTest::gtest_main)
+gtest_discover_tests(recurrent_test)

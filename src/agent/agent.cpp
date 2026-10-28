@@ -24,6 +24,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace dpan {
@@ -54,8 +55,21 @@ void CheckConfig(const AgentConfig& c) {
     require(c.merge_ratio >= 0.0f, "merge_ratio must be >= 0");
     require(c.pattern_label_horizon > 0, "pattern_label_horizon must be > 0");
     require(c.quality_rate > 0.0f && c.quality_rate <= 1.0f, "quality_rate must be in (0, 1]");
+    require(c.class_blend_sharpness >= 0.0f && std::isfinite(c.class_blend_sharpness),
+            "class_blend_sharpness must be finite and >= 0");
+    require(c.class_blend_rate > 0.0f && c.class_blend_rate <= 1.0f, "class_blend_rate must be in (0, 1]");
     require(c.anomaly_baseline > 0, "anomaly_baseline must be > 0");
     require(c.max_classes > 0, "max_classes must be > 0");
+    require(c.holdout_every == 0 || (c.holdout_capacity > 0 && c.holdout_check_interval > 0 &&
+                                     c.holdout_min_samples <= c.holdout_capacity && c.max_training_slowdown > 0),
+            "holdout_capacity, holdout_check_interval and max_training_slowdown must be > 0, and "
+            "holdout_min_samples <= holdout_capacity");
+    require(c.memory_units == 0 ||
+                (c.memory_window > 0 && c.memory_batch > 0 && c.memory_history >= c.memory_window &&
+                 c.action_memory_window > 0 && c.action_memory_batch > 0 && c.memory_history >= c.action_memory_window &&
+                 c.memory_burn_in < std::min(c.memory_window, c.action_memory_window)),
+            "with memory_units > 0, the memory windows and batches must be > 0, memory_history at least each window, "
+            "and memory_burn_in shorter than each window");
     require(c.memory_budget_bytes > 0, "memory_budget_bytes must be > 0");
     require(c.snapshot_interval > 0 && c.divergence_loss > 0.0f, "snapshot_interval and divergence_loss must be > 0");
     require(c.capacity_growth > 1.0f, "capacity_growth must be > 1");
@@ -81,6 +95,8 @@ void CheckConfig(const AgentConfig& c) {
     require(c.continuous_policy_delay > 0, "continuous_policy_delay must be > 0");
     require(c.continuous_updates_per_step > 0, "continuous_updates_per_step must be > 0");
     require(c.continuous_tau > 0.0f && c.continuous_tau <= 1.0f, "continuous_tau must be in (0, 1]");
+    require(c.continuous_saturation_penalty >= 0.0f && c.continuous_saturation_threshold >= 0.0f,
+            "continuous saturation settings must be >= 0");
     ValidateEncoderConfig(c.encoder);
 }
 
@@ -120,6 +136,13 @@ struct Quality {
     bool Measured() const { return count > 0; }
 };
 
+/// -log of the probability of class `cls`, with the probability floored at
+/// 1e-3 so one confident miss counts as at most about 6.9
+float LogLoss(const std::vector<float>& probabilities, size_t cls) {
+    float p = cls < probabilities.size() ? probabilities[cls] : 0.0f;
+    return -std::log(std::max(p, 1e-3f));
+}
+
 /// Percentile of x among the baseline (0.5 if the baseline is empty)
 float Percentile(const std::deque<float>& baseline, float x) {
     if (baseline.empty()) return 0.5f;
@@ -142,7 +165,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 5;
+constexpr uint32_t kCheckpointVersion = 13;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -278,14 +301,31 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.merge_ratio);
     io::WriteSize(out, c.pattern_label_horizon);
     io::Write<float>(out, c.quality_rate);
+    io::Write<float>(out, c.class_blend_sharpness);
+    io::Write<float>(out, c.class_blend_rate);
     io::WriteSize(out, c.anomaly_baseline);
     io::WriteSize(out, c.max_classes);
+    for (size_t v : {c.holdout_every, c.holdout_capacity, c.holdout_check_interval, c.holdout_min_samples,
+                     c.max_training_slowdown, c.memory_units, c.memory_window, c.memory_batch, c.memory_history,
+                     c.memory_burn_in, c.action_memory_window, c.action_memory_batch}) {
+        io::WriteSize(out, v);
+    }
     io::Write<float>(out, c.encoder.clip_sigma);
     io::Write<uint64_t>(out, c.encoder.statistics_limit);
     io::WriteSize(out, c.encoder.category_buckets);
     io::WriteSize(out, c.encoder.category_embedding_size);
     io::WriteSize(out, c.encoder.text_buckets);
     io::WriteSize(out, c.encoder.text_embedding_size);
+    for (size_t v : {c.encoder.text_sequence_length, c.encoder.text_vocabulary, c.encoder.text_word_vectors_limit,
+                     c.encoder.text_word_dimension, c.encoder.text_sequence_units}) {
+        io::WriteSize(out, v);
+    }
+    io::WriteString(out, c.encoder.text_word_vectors);
+    io::Write<uint8_t>(out, c.encoder.train_word_vectors ? 1 : 0);
+    io::Write<uint8_t>(out, c.encoder.text_bidirectional ? 1 : 0);
+    io::Write<float>(out, c.encoder.text_word_vector_norm);
+    io::Write<float>(out, c.encoder.text_word_dropout);
+    io::Write<float>(out, c.encoder.text_dropout);
     io::WriteSize(out, c.encoder.time_series_window);
     io::WriteSize(out, c.encoder.image_size);
     io::WriteSize(out, c.encoder.max_image_size);
@@ -301,6 +341,8 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.continuous_policy_delay);
     io::Write<float>(out, c.continuous_tau);
     io::WriteSize(out, c.continuous_updates_per_step);
+    io::Write<float>(out, c.continuous_saturation_penalty);
+    io::Write<float>(out, c.continuous_saturation_threshold);
 }
 
 AgentConfig LoadConfig(std::istream& in) {
@@ -349,14 +391,31 @@ AgentConfig LoadConfig(std::istream& in) {
     c.merge_ratio = io::Read<float>(in);
     c.pattern_label_horizon = io::ReadSize(in);
     c.quality_rate = io::Read<float>(in);
+    c.class_blend_sharpness = io::Read<float>(in);
+    c.class_blend_rate = io::Read<float>(in);
     c.anomaly_baseline = io::ReadSize(in);
     c.max_classes = io::ReadSize(in);
+    for (size_t* v : {&c.holdout_every, &c.holdout_capacity, &c.holdout_check_interval, &c.holdout_min_samples,
+                      &c.max_training_slowdown, &c.memory_units, &c.memory_window, &c.memory_batch,
+                      &c.memory_history, &c.memory_burn_in, &c.action_memory_window, &c.action_memory_batch}) {
+        *v = io::ReadSize(in);
+    }
     c.encoder.clip_sigma = io::Read<float>(in);
     c.encoder.statistics_limit = io::Read<uint64_t>(in);
     c.encoder.category_buckets = io::ReadSize(in);
     c.encoder.category_embedding_size = io::ReadSize(in);
     c.encoder.text_buckets = io::ReadSize(in);
     c.encoder.text_embedding_size = io::ReadSize(in);
+    for (size_t* v : {&c.encoder.text_sequence_length, &c.encoder.text_vocabulary, &c.encoder.text_word_vectors_limit,
+                      &c.encoder.text_word_dimension, &c.encoder.text_sequence_units}) {
+        *v = io::ReadSize(in);
+    }
+    c.encoder.text_word_vectors = io::ReadString(in, 1u << 16);
+    c.encoder.train_word_vectors = io::Read<uint8_t>(in) != 0;
+    c.encoder.text_bidirectional = io::Read<uint8_t>(in) != 0;
+    c.encoder.text_word_vector_norm = io::Read<float>(in);
+    c.encoder.text_word_dropout = io::Read<float>(in);
+    c.encoder.text_dropout = io::Read<float>(in);
     c.encoder.time_series_window = io::ReadSize(in);
     c.encoder.image_size = io::ReadSize(in);
     c.encoder.max_image_size = io::ReadSize(in);
@@ -372,6 +431,8 @@ AgentConfig LoadConfig(std::istream& in) {
     c.continuous_policy_delay = io::ReadSize(in);
     c.continuous_tau = io::Read<float>(in);
     c.continuous_updates_per_step = io::ReadSize(in);
+    c.continuous_saturation_penalty = io::Read<float>(in);
+    c.continuous_saturation_threshold = io::Read<float>(in);
     return c;
 }
 
@@ -448,6 +509,10 @@ struct Agent::Impl {
         Quality neural;
         Quality pattern_short;  // votes of recently labelled patterns
         Quality pattern_long;   // votes of all patterns (also NEXT_OBSERVATION sequences)
+        // CLASS: running log-loss of each side (-log of the true class's probability)
+        Quality neural_log_loss;
+        Quality pattern_short_log_loss;
+        Quality pattern_long_log_loss;
 
         // Drift (Page-Hinkley on the neural loss) and recovery
         PageHinkley drift;
@@ -466,6 +531,9 @@ struct Agent::Impl {
         }
         const Quality& Pattern(bool higher_is_better) const {
             return UseShort(higher_is_better) ? pattern_short : pattern_long;
+        }
+        const Quality& PatternLogLoss() const {
+            return UseShort(true) ? pattern_short_log_loss : pattern_long_log_loss;
         }
     };
 
@@ -609,10 +677,13 @@ struct Agent::Impl {
 
     void BuildModels() {
         auto layout = encoder.Layout();
+        FindWordIds();
         auto heads = PrepareLayout();
         if (!heads.empty()) {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
-                                                     config.min_trunk_width, config.max_trunk_width);
+                                                     config.min_trunk_width, config.max_trunk_width,
+                                                     config.memory_units,
+                                                     static_cast<float>(config.memory_window));
             head_loss.assign(heads.size(), kNaN);
             if (has_actions) target_network = std::make_unique<AgentNetwork>(*network);
         }
@@ -630,6 +701,8 @@ struct Agent::Impl {
             ac.target_noise = config.continuous_target_noise;
             ac.noise_clip = config.continuous_noise_clip;
             ac.policy_delay = config.continuous_policy_delay;
+            ac.saturation_penalty = config.continuous_saturation_penalty;
+            ac.saturation_threshold = config.continuous_saturation_threshold;
             ac.seed = config.seed + 100 + static_cast<uint32_t>(actor_critics.size()) * 10;
             actor_critics.push_back(
                 std::make_unique<ActorCritic>(encoder.OutputSize(), outputs[index].spec->size, ac));
@@ -667,7 +740,7 @@ struct Agent::Impl {
     size_t ModelBytes() const {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
         size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
-        size_t bytes = parameters * 4 * sizeof(float) * copies;
+        size_t bytes = parameters * 4 * sizeof(float) * copies + word_vector_bytes;
         // Actor-critics: live, target and snapshot copies
         for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
         return bytes;
@@ -704,6 +777,8 @@ struct Agent::Impl {
             add_sample(entry.sample);
         }
         for (const auto& sample : newest) add_sample(sample);
+        for (const auto& sample : held_out) add_sample(sample);
+        for (const auto& sample : history) add_sample(sample);
         return bytes;
     }
 
@@ -806,7 +881,29 @@ struct Agent::Impl {
         return pending[step - pending.front().step];
     }
 
+    /// Environments with action outputs train every train_every
+    /// observations: each step completes a transition. Otherwise training
+    /// follows new samples, not observations: an observation without
+    /// feedback adds none, so it does not retrain on old samples.
+    bool TrainsPerObservation() const { return has_actions || !continuous_outputs.empty(); }
+
+    void MaybeTrain() {
+        const size_t interval = config.train_every * training_slowdown;
+        if (untrained_samples < interval) return;
+        untrained_samples -= interval;
+        Train();
+        CheckHeldOut();
+    }
+
     void MakeTrainable(const SamplePtr& sample) {
+        if (sample->held_out) return;  // never trained on
+        if (!sample->in_replay && HoldsOut() && sample->key % config.holdout_every == 0) {
+            sample->held_out = true;
+            held_out.push_back(sample);
+            while (held_out.size() > config.holdout_capacity) held_out.pop_front();
+            return;
+        }
+        if (!sample->in_replay && !TrainsPerObservation()) untrained_samples++;  // new, not more feedback for a stored sample
         replay.Add(sample);
         newest.push_back(sample);
         while (newest.size() > config.batch_size) newest.pop_front();
@@ -961,6 +1058,12 @@ struct Agent::Impl {
         }
         // Re-estimate the blend from scratch
         out.neural = out.pattern_short = out.pattern_long = Quality();
+        out.neural_log_loss = out.pattern_short_log_loss = out.pattern_long_log_loss = Quality();
+        // The held-out samples follow the old concept too; train at the full
+        // rate while the new one is learned
+        held_out.clear();
+        held_out_loss.clear();
+        training_slowdown = 1;
         // Labels and targets from before the drift describe the old concept:
         // drop them from replay (samples observed up to the warm-up length
         // before detection may already follow the new one and are kept)
@@ -1007,6 +1110,14 @@ struct Agent::Impl {
         if (!neural) return 0.0f;
         if (!pattern) return 1.0f;
         if (out.samples < config.cold_start_samples) return 0.0f;
+        if (higher_is_better && config.class_blend_sharpness > 0.0f) {
+            // CLASS: 1 / (1 + exp(sharpness x (neural - pattern running log-loss)))
+            const Quality& pattern_log_loss = out.PatternLogLoss();
+            if (!out.neural_log_loss.Measured() || !pattern_log_loss.Measured()) return 0.5f;
+            double x = static_cast<double>(config.class_blend_sharpness) *
+                       (static_cast<double>(out.neural_log_loss.value) - pattern_log_loss.value);
+            return static_cast<float>(1.0 / (1.0 + std::exp(std::clamp(x, -50.0, 50.0))));
+        }
         const Quality& pattern_quality = out.Pattern(higher_is_better);
         if (!out.neural.Measured() || !pattern_quality.Measured()) return 0.5f;
         double n, p;
@@ -1020,6 +1131,44 @@ struct Agent::Impl {
         return n + p > 0.0 ? static_cast<float>(n / (n + p)) : 0.5f;
     }
 
+    bool HasMemory() const { return network && network->MemoryUnits() > 0; }
+
+    /// TEXT word ids in the fused vector (offset, count): not quantities, so
+    /// the pattern memory, the anomaly autoencoder and TD3 do not see them
+    void FindWordIds() {
+        word_ids.clear();
+        word_vector_bytes = 0;
+        for (const auto& channel : encoder.Layout()) {
+            if (channel.sequence_length == 0) continue;
+            word_ids.emplace_back(channel.offset + channel.size - 1 - channel.sequence_length, channel.sequence_length);
+            if (channel.word_vectors) word_vector_bytes += channel.word_vectors->Size() * sizeof(float);
+        }
+    }
+
+    void MaskWordIds(float* row) const {
+        for (const auto& [offset, count] : word_ids) std::fill(row + offset, row + offset + count, 0.0f);
+    }
+
+    nn::Matrix QuantityRow(const Pending& entry) const {
+        nn::Matrix row = FusedRow(entry);
+        MaskWordIds(row.Data());
+        return row;
+    }
+
+    /// The network's state after this sample's step (0 if it has none)
+    nn::Matrix MemoryRow(const Sample* sample) const {
+        const size_t m = network->MemoryUnits();
+        if (sample && sample->memory_after.size() == m) return nn::Matrix::RowVector(sample->memory_after);
+        return nn::Matrix(1, m);
+    }
+
+    /// One head's outputs for a pending step (with its memory state)
+    nn::Matrix HeadOutputs(const Pending& entry, size_t head) const {
+        if (!HasMemory()) return network->Infer(FusedRow(entry), head);
+        nn::Matrix memory = MemoryRow(entry.sample.get());
+        return network->Infer(FusedRow(entry), head, &memory);
+    }
+
     std::optional<std::vector<float>> NeuralClass(const Pending& entry, const OutputState& out) const {
         // An output trained only by outcomes must predict before it has
         // learned anything, so its outcomes have a prediction to refer to
@@ -1027,7 +1176,7 @@ struct Agent::Impl {
             network->Head(static_cast<size_t>(out.head)).size == 0) {
             return std::nullopt;
         }
-        auto probabilities = Softmax(network->Infer(FusedRow(entry), out.head));
+        auto probabilities = Softmax(HeadOutputs(entry, static_cast<size_t>(out.head)));
         probabilities.resize(out.classes.size(), 0.0f);
         return probabilities;
     }
@@ -1046,14 +1195,14 @@ struct Agent::Impl {
 
     std::optional<std::vector<float>> NeuralValue(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
+        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], out.target_stats[i]);
         return z;
     }
 
     std::optional<std::vector<float>> NeuralNext(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples == 0) return std::nullopt;
-        auto z = network->Infer(FusedRow(entry), out.head).Row(0);
+        auto z = HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
         for (size_t i = 0; i < z.size(); ++i) z[i] = FromZ(z[i], ObservedStats(i));
         return z;
     }
@@ -1070,7 +1219,7 @@ struct Agent::Impl {
     /// Q-values once the head is past the cold start
     std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
         if (!network || out.samples < config.cold_start_samples) return std::nullopt;
-        return network->Infer(FusedRow(entry), static_cast<size_t>(out.head)).Row(0);
+        return HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
     }
 
     /// Highest Q-value; ties (and the cold start) decided by association
@@ -1161,7 +1310,7 @@ struct Agent::Impl {
             for (auto& a : normalized) a = uniform(rng);
         } else {
             const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-            nn::Matrix greedy = ac.Act(FusedRow(entry));
+            nn::Matrix greedy = ac.Act(QuantityRow(entry));
             std::normal_distribution<float> noise(0.0f, config.continuous_exploration_noise);
             for (size_t i = 0; i < n; ++i) {
                 float a = greedy(0, i);
@@ -1267,7 +1416,7 @@ struct Agent::Impl {
                 break;
             case OutputType::CONTINUOUS_ACTION: {
                 const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-                nn::Matrix state = FusedRow(entry);
+                nn::Matrix state = QuantityRow(entry);
                 nn::Matrix greedy = ac.Act(state);
                 prediction.available = true;
                 prediction.values = ToBounds(*out.spec, greedy.Data());
@@ -1333,18 +1482,38 @@ struct Agent::Impl {
         return index;
     }
 
+    /// A wrong OUTCOME: the blend's log-losses score -log(1 - p(cls)) on both
+    /// sides, so they are not measured on correct outcomes only
+    void ScoreNotClass(Pending& entry, OutputState& out, size_t cls) {
+        auto not_class = [cls](const std::vector<float>& p) {
+            return -std::log(std::max(1.0f - (cls < p.size() ? p[cls] : 0.0f), 1e-3f));
+        };
+        if (auto neural = NeuralClass(entry, out)) out.neural_log_loss.Add(not_class(*neural), config.class_blend_rate);
+        auto votes = patterns->ClassVotes(entry.point, static_cast<size_t>(out.class_slot), out.classes.size(),
+                                          config.neighbors, config.pattern_label_horizon);
+        if (votes.short_term) out.pattern_short_log_loss.Add(not_class(*votes.short_term), config.class_blend_rate);
+        if (votes.long_term) out.pattern_long_log_loss.Add(not_class(*votes.long_term), config.class_blend_rate);
+    }
+
     void LearnLabel(Pending& entry, OutputState& out, size_t cls) {
         // Score both sides on this sample before learning from it
         if (auto neural = NeuralClass(entry, out)) {
             float correct = ArgMax(*neural) == cls ? 1.0f : 0.0f;
             out.neural.Add(correct, config.quality_rate);
+            out.neural_log_loss.Add(LogLoss(*neural, cls), config.class_blend_rate);
             ObserveLoss(out, 1.0f - correct);
         }
         if (!out.classes.empty()) {
             auto votes = patterns->ClassVotes(entry.point, static_cast<size_t>(out.class_slot), out.classes.size(),
                                               config.neighbors, config.pattern_label_horizon);
-            if (votes.short_term) out.pattern_short.Add(ArgMax(*votes.short_term) == cls ? 1.0f : 0.0f, config.quality_rate);
-            if (votes.long_term) out.pattern_long.Add(ArgMax(*votes.long_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+            if (votes.short_term) {
+                out.pattern_short.Add(ArgMax(*votes.short_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+                out.pattern_short_log_loss.Add(LogLoss(*votes.short_term, cls), config.class_blend_rate);
+            }
+            if (votes.long_term) {
+                out.pattern_long.Add(ArgMax(*votes.long_term) == cls ? 1.0f : 0.0f, config.quality_rate);
+                out.pattern_long_log_loss.Add(LogLoss(*votes.long_term, cls), config.class_blend_rate);
+            }
         }
 
         HeadTarget& target = entry.sample->targets[out.head];
@@ -1448,6 +1617,7 @@ struct Agent::Impl {
                 if (correct) {
                     LearnLabel(entry, out, *predicted);
                 } else {
+                    ScoreNotClass(entry, out, *predicted);
                     HeadTarget& target = entry.sample->targets[out.head];
                     if (target.label < 0) target.negative = static_cast<int>(*predicted);
                     patterns->AddNegative(entry.pattern, out.class_slot, *predicted);
@@ -1488,7 +1658,9 @@ struct Agent::Impl {
         if (fused && patterns) {
             entry.encoded = true;
             entry.observed = Observed(observation);
-            entry.point = patterns->Project(*fused);
+            std::vector<float> quantities = *fused;
+            MaskWordIds(quantities.data());
+            entry.point = patterns->Project(quantities);
 
             auto placement = patterns->Insert(entry.point, step, entry.observed);
             entry.pattern = placement.id;
@@ -1496,9 +1668,22 @@ struct Agent::Impl {
             // The fused vector is kept once, sparsely, in the sample
             entry.sample = std::make_shared<Sample>();
             entry.sample->step = step;
+            entry.sample->key = ObservationKey(observation);
             entry.sample->SetFused(*fused);
             entry.sample->targets.resize(network ? network->HeadCount() : 0);
             entry.sample->continuous.resize(actor_critics.size());
+
+            if (HasMemory()) {
+                // Advance the memory state (0 at an episode start)
+                const size_t m = network->MemoryUnits();
+                entry.sample->episode_start = !previous_step.has_value();
+                if (entry.sample->episode_start || memory_state.size() != m) memory_state.assign(m, 0.0f);
+                entry.sample->memory_before = memory_state;
+                memory_state = network->Step(FusedRow(entry), nn::Matrix::RowVector(memory_state)).Row(0);
+                entry.sample->memory_after = memory_state;
+                history.push_back(entry.sample);
+                while (history.size() > config.memory_history) history.pop_front();
+            }
 
             // Distance to the nearest pattern before this state was stored
             if (has_anomaly) ScoreAnomaly(entry, placement.nearest_distance);
@@ -1529,10 +1714,8 @@ struct Agent::Impl {
         pending.push_back(std::move(entry));
         while (pending.size() > config.feedback_timeout) pending.pop_front();
 
-        if (++since_training >= config.train_every) {
-            since_training = 0;
-            Train();
-        }
+        if (TrainsPerObservation()) untrained_samples++;
+        MaybeTrain();
         if (patterns && steps - last_snapshot >= config.snapshot_interval && ModelsFinite()) TakeSnapshot();
         return step;
     }
@@ -1556,7 +1739,7 @@ struct Agent::Impl {
         float pattern_percentile = std::isfinite(distance) ? Percentile(pattern_baseline, distance) : 0.5f;
         float neural_percentile = 0.5f;
         float weight = 0.0f;
-        float error = autoencoder->Errors(FusedRow(entry))[0];
+        float error = autoencoder->Errors(QuantityRow(entry))[0];
         if (anomaly_samples >= config.cold_start_samples) {
             neural_percentile = Percentile(neural_baseline, error);
             weight = 0.5f;
@@ -1615,15 +1798,25 @@ struct Agent::Impl {
     /// its discount x the target network's value of the action the online
     /// network picks in the state after the last step (no future part
     /// after a terminal step)
+    /// Memory: the online and target networks' states at every step of the
+    /// training windows (as for MemoryWindows: index t x windows + w)
+    struct WindowStates {
+        std::vector<nn::Matrix> online, target;
+        std::unordered_map<const Sample*, size_t> index;
+        size_t windows{0};
+    };
+
     void QTargets(const OutputState& out, const std::vector<SamplePtr>& batch,
                   std::vector<std::vector<HeadTarget>>& owned,
-                  std::vector<std::vector<const HeadTarget*>>& targets) const {
+                  std::vector<std::vector<const HeadTarget*>>& targets,
+                  const WindowStates* window_states = nullptr) const {
         const auto h = static_cast<size_t>(out.head);
         const size_t width = encoder.OutputSize();
         const size_t n = out.classes.size();
         std::vector<size_t> rows, bootstrap;
         std::map<size_t, Return> returns;
         for (size_t r = 0; r < batch.size(); ++r) {
+            if (!batch[r]) continue;
             const Sample& sample = *batch[r];
             if (sample.targets[h].action < 0 || !(sample.has_next || sample.terminal)) continue;
             rows.push_back(r);
@@ -1638,8 +1831,37 @@ struct Agent::Impl {
             for (size_t i = 0; i < bootstrap.size(); ++i) {
                 returns[bootstrap[i]].bootstrap->FillNext(next.Data() + i * width, width);
             }
-            nn::Matrix online = network->Infer(next, h);
-            nn::Matrix target = target_network->Infer(next, h);
+            nn::Matrix online, target;
+            if (HasMemory()) {
+                // The next state's memory: each network's own state there when
+                // the next step is in a training window, else the state
+                // computed when it was observed
+                const size_t m = network->MemoryUnits();
+                nn::Matrix online_memory(bootstrap.size(), m), target_memory(bootstrap.size(), m);
+                for (size_t i = 0; i < bootstrap.size(); ++i) {
+                    auto next_sample = returns[bootstrap[i]].bootstrap->next_sample.lock();
+                    if (!next_sample) continue;
+                    auto found = window_states ? window_states->index.find(next_sample.get())
+                                               : decltype(window_states->index.end()){};
+                    if (window_states && found != window_states->index.end()) {
+                        size_t t = found->second / window_states->windows, w = found->second % window_states->windows;
+                        std::copy(window_states->online[t].Data() + w * m, window_states->online[t].Data() + (w + 1) * m,
+                                  online_memory.Data() + i * m);
+                        std::copy(window_states->target[t].Data() + w * m, window_states->target[t].Data() + (w + 1) * m,
+                                  target_memory.Data() + i * m);
+                    } else if (next_sample->memory_after.size() == m) {
+                        std::copy(next_sample->memory_after.begin(), next_sample->memory_after.end(),
+                                  online_memory.Data() + i * m);
+                        std::copy(next_sample->memory_after.begin(), next_sample->memory_after.end(),
+                                  target_memory.Data() + i * m);
+                    }
+                }
+                online = network->Infer(next, h, &online_memory);
+                target = target_network->Infer(next, h, &target_memory);
+            } else {
+                online = network->Infer(next, h);
+                target = target_network->Infer(next, h);
+            }
             for (size_t i = 0; i < bootstrap.size(); ++i) {
                 size_t best = 0;
                 for (size_t a = 1; a < n; ++a) {
@@ -1679,6 +1901,7 @@ struct Agent::Impl {
         for (size_t r = 0; r < rows.size(); ++r) {
             const Sample& sample = *rows[r];
             sample.Fill(b.states.Data() + r * width, width);
+            MaskWordIds(b.states.Data() + r * width);
             std::copy(sample.continuous[slot].action.begin(), sample.continuous[slot].action.end(),
                       b.actions.Data() + r * n);
             b.rewards[r] = sample.continuous[slot].reward;
@@ -1686,10 +1909,178 @@ struct Agent::Impl {
                 b.discounts[r] = 0.0f;
             } else {
                 sample.FillNext(b.next_states.Data() + r * width, width);
+                MaskWordIds(b.next_states.Data() + r * width);
                 b.discounts[r] = config.discount;
             }
         }
         return actor_critics[slot]->Train(b, rng).critic;
+    }
+
+    /// Targets of the CLASS, VALUE and NEXT_OBSERVATION heads in network
+    /// units (regression targets standardized)
+    void SupervisedTargets(const std::vector<SamplePtr>& batch, std::vector<std::vector<HeadTarget>>& owned,
+                           std::vector<std::vector<const HeadTarget*>>& targets) const {
+        for (const auto& out : outputs) {
+            if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
+            auto h = static_cast<size_t>(out.head);
+            for (size_t r = 0; r < batch.size(); ++r) {
+                if (!batch[r]) continue;
+                const HeadTarget& stored = batch[r]->targets[h];
+                if (stored.Empty()) continue;
+                HeadTarget& t = owned[h][r];
+                t.label = stored.label;
+                t.negative = stored.negative;
+                if (!stored.values.empty()) {
+                    t.values.resize(stored.values.size());
+                    for (size_t i = 0; i < stored.values.size(); ++i) {
+                        t.values[i] = out.spec->type == OutputType::VALUE ? ToZ(stored.values[i], out.target_stats[i])
+                                                                           : ToZ(stored.values[i], ObservedStats(i));
+                    }
+                }
+                targets[h][r] = &t;
+            }
+        }
+    }
+
+    // ---------------------------------------------------- held-out samples
+
+    /// FNV-1a hash of the raw observation: the same observation always gets
+    /// the same key (the fused vector changes as normalization adapts)
+    static uint64_t ObservationKey(const Observation& observation) {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const void* data, size_t bytes) {
+            const auto* p = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < bytes; ++i) {
+                h ^= p[i];
+                h *= 1099511628211ull;
+            }
+        };
+        auto mix_size = [&](size_t n) {
+            uint64_t v = n;
+            mix(&v, sizeof v);
+        };
+        for (const auto& [name, value] : observation) {
+            mix(name.data(), name.size());
+            mix_size(value.index());
+            if (const double* d = std::get_if<double>(&value)) {
+                mix(d, sizeof *d);
+            } else if (const auto* v = std::get_if<std::vector<float>>(&value)) {
+                mix(v->data(), v->size() * sizeof(float));
+            } else if (const auto* s = std::get_if<std::string>(&value)) {
+                mix(s->data(), s->size());
+            } else if (const auto* image = std::get_if<Image>(&value)) {
+                mix_size(image->width);
+                mix_size(image->height);
+                mix(image->pixels.data(), image->pixels.size() * sizeof(float));
+            }
+        }
+        return h;
+    }
+
+    /// Whether samples are held out to check the training rate (networks of
+    /// environments without action outputs)
+    bool HoldsOut() const { return config.holdout_every > 0 && network && !TrainsPerObservation(); }
+
+    /// Mean loss of each network head over the held-out samples (NaN without any)
+    std::vector<float> HeldOutLoss() const {
+        const size_t heads = network->HeadCount(), width = encoder.OutputSize();
+        std::vector<SamplePtr> batch(held_out.begin(), held_out.end());
+        nn::Matrix inputs(batch.size(), width);
+        for (size_t r = 0; r < batch.size(); ++r) batch[r]->Fill(inputs.Data() + r * width, width);
+        std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(batch.size()));
+        std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(batch.size()));
+        SupervisedTargets(batch, owned, targets);
+        if (!HasMemory()) return network->Losses(inputs, targets);
+        const size_t m = network->MemoryUnits();
+        nn::Matrix memory(batch.size(), m);
+        for (size_t r = 0; r < batch.size(); ++r) {
+            if (batch[r]->memory_after.size() == m) {
+                std::copy(batch[r]->memory_after.begin(), batch[r]->memory_after.end(), memory.Data() + r * m);
+            }
+        }
+        return network->Losses(inputs, targets, &memory);
+    }
+
+    /// Every holdout_check_interval training steps: if the held-out loss
+    /// rose since the last check (mean relative change over the heads), the
+    /// network is fitting its samples more than it generalizes, so training
+    /// slows (twice the interval, up to max_training_slowdown); if it fell,
+    /// training speeds up again (down to every train_every samples)
+    void CheckHeldOut() {
+        if (!HoldsOut() || ++since_held_out_check < config.holdout_check_interval) return;
+        since_held_out_check = 0;
+        if (held_out.size() < config.holdout_min_samples) return;
+        auto loss = HeldOutLoss();
+        double change = 0.0;
+        size_t counted = 0;
+        for (size_t h = 0; h < loss.size() && h < held_out_loss.size(); ++h) {
+            if (std::isfinite(loss[h]) && std::isfinite(held_out_loss[h]) && held_out_loss[h] > 0.0f) {
+                change += (loss[h] - held_out_loss[h]) / held_out_loss[h];
+                ++counted;
+            }
+        }
+        if (counted > 0) {
+            if (change > 0.0) {
+                training_slowdown = std::min(training_slowdown * 2, config.max_training_slowdown);
+            } else if (change < 0.0) {
+                training_slowdown = std::max(training_slowdown / 2, size_t{1});
+            }
+        }
+        held_out_loss = loss;
+    }
+
+    /// Windows for training with memory: each of `ends` ends a window of up
+    /// to memory_window consecutive steps from the history, not reaching
+    /// back past an episode start. Each window starts from the state stored
+    /// before its first step (0 at an episode start). Returns the steps
+    /// time-major (row t x windows + w; nullptr pads shorter windows at the end).
+    std::vector<SamplePtr> MemoryWindows(const std::vector<SamplePtr>& ends, SequenceBatch& sequences) const {
+        const size_t m = network->MemoryUnits(), width = encoder.OutputSize();
+        const size_t count = ends.size();
+        std::vector<std::vector<SamplePtr>> windows;
+        size_t steps = 0;
+        for (size_t w = 0; w < count; ++w) {
+            const SamplePtr& end = ends[w];
+            std::vector<SamplePtr> window{end};
+            auto it = std::lower_bound(history.begin(), history.end(), end->step,
+                                       [](const SamplePtr& s, uint64_t step) { return s->step < step; });
+            if (it != history.end() && *it == end) {
+                size_t i = static_cast<size_t>(it - history.begin());
+                while (window.size() < config.memory_window && !history[i]->episode_start && i > 0 &&
+                       history[i - 1]->step + 1 == history[i]->step) {
+                    window.push_back(history[--i]);
+                }
+            }
+            std::reverse(window.begin(), window.end());
+            if (has_actions && it != history.end() && *it == end) {
+                // A few steps past the end, so the multi-step targets near it
+                // bootstrap from states computed in the window
+                size_t i = static_cast<size_t>(it - history.begin());
+                for (size_t k = 0; k < config.action_return_steps && i + 1 < history.size() &&
+                                   !history[i + 1]->episode_start && history[i + 1]->step == history[i]->step + 1;
+                     ++k) {
+                    window.push_back(history[++i]);
+                }
+            }
+            steps = std::max(steps, window.size());
+            windows.push_back(std::move(window));
+        }
+        sequences.inputs.assign(steps, nn::Matrix(count, width));
+        sequences.initial = nn::Matrix(count, m);
+        sequences.resets.clear();
+        std::vector<SamplePtr> rows(steps * count);
+        for (size_t w = 0; w < count; ++w) {
+            const auto& window = windows[w];
+            const Sample& first = *window.front();
+            if (!first.episode_start && first.memory_before.size() == m) {
+                std::copy(first.memory_before.begin(), first.memory_before.end(), sequences.initial.Data() + w * m);
+            }
+            for (size_t t = 0; t < window.size(); ++t) {
+                window[t]->Fill(sequences.inputs[t].Data() + w * width, width);
+                rows[t * count + w] = window[t];
+            }
+        }
+        return rows;
     }
 
     void Train() {
@@ -1701,6 +2092,10 @@ struct Agent::Impl {
         auto wanted = static_cast<size_t>(std::lround(config.batch_size * share));
         size_t from_newest = std::min(newest.size(), wanted);
         std::vector<SamplePtr> batch(newest.end() - static_cast<std::ptrdiff_t>(from_newest), newest.end());
+        // With memory: one window ends at the newest sample (it covers the
+        // steps since the last training step), the others at replayed ones
+        std::vector<SamplePtr> window_ends;
+        if (HasMemory() && !newest.empty()) window_ends.push_back(newest.back());
         newest.clear();
         if (recovering_outputs > 0 && !recent.empty()) {
             std::uniform_int_distribution<size_t> pick(0, recent.size() - 1);
@@ -1711,6 +2106,14 @@ struct Agent::Impl {
         auto drawn = replay.Draw(config.batch_size - batch.size());
         batch.insert(batch.end(), drawn.begin(), drawn.end());
         if (batch.empty()) return;
+        if (HasMemory()) {
+            std::vector<SamplePtr> more = replay.Draw(config.memory_batch);
+            for (auto& sample : more) {
+                if (window_ends.size() >= config.memory_batch) break;
+                if (window_ends.empty() || sample != window_ends.front()) window_ends.push_back(std::move(sample));
+            }
+            if (window_ends.empty()) window_ends.push_back(batch.front());
+        }
 
         const size_t width = encoder.OutputSize();
         float total_loss = 0.0f;
@@ -1719,40 +2122,51 @@ struct Agent::Impl {
         auto bad = [&](float loss) { return std::isinf(loss) || loss > config.divergence_loss; };
 
         if (network) {
-            nn::Matrix inputs(batch.size(), width);
             const size_t heads = network->HeadCount();
-            std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(batch.size()));
-            std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(batch.size()));
-            for (size_t r = 0; r < batch.size(); ++r) {
-                batch[r]->Fill(inputs.Data() + r * width, width);
-            }
-            for (const auto& out : outputs) {
-                if (out.head < 0 || out.spec->type == OutputType::ACTION) continue;
-                auto h = static_cast<size_t>(out.head);
-                for (size_t r = 0; r < batch.size(); ++r) {
-                    const HeadTarget& stored = batch[r]->targets[h];
-                    if (stored.Empty()) continue;
-                    HeadTarget& t = owned[h][r];
-                    t.label = stored.label;
-                    t.negative = stored.negative;
-                    if (!stored.values.empty()) {
-                        t.values.resize(stored.values.size());
-                        for (size_t i = 0; i < stored.values.size(); ++i) {
-                            t.values[i] = out.spec->type == OutputType::VALUE ? ToZ(stored.values[i], out.target_stats[i])
-                                                                               : ToZ(stored.values[i], ObservedStats(i));
-                        }
-                    }
-                    targets[h][r] = &t;
+            // With memory: the steps of the windows, time-major (nullptr = padding)
+            SequenceBatch sequences;
+            const std::vector<SamplePtr> rows = HasMemory() ? MemoryWindows(window_ends, sequences) : batch;
+            std::vector<std::vector<HeadTarget>> owned(heads, std::vector<HeadTarget>(rows.size()));
+            std::vector<std::vector<const HeadTarget*>> targets(heads, std::vector<const HeadTarget*>(rows.size()));
+            SupervisedTargets(rows, owned, targets);
+            WindowStates window_states;
+            if (HasMemory() && target_network) {
+                window_states.online = network->States(sequences);
+                window_states.target = target_network->States(sequences);
+                window_states.windows = sequences.initial.Rows();
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    if (rows[r]) window_states.index.emplace(rows[r].get(), r);
                 }
             }
             for (const auto& out : outputs) {
-                if (out.spec->type == OutputType::ACTION) QTargets(out, batch, owned, targets);
+                if (out.spec->type == OutputType::ACTION) {
+                    QTargets(out, rows, owned, targets, HasMemory() && target_network ? &window_states : nullptr);
+                }
+            }
+            if (HasMemory()) {
+                // Window steps outside the replay buffer (held out, evicted, or
+                // dropped after a drift) are context only
+                const size_t windows = sequences.initial.Rows();
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    size_t t = r / windows, w = r % windows;
+                    // Row w is the window's first step
+                    bool burning = t < config.memory_burn_in && rows[w] && !rows[w]->episode_start;
+                    if (rows[r] && rows[r]->in_replay && !burning) continue;
+                    for (size_t h = 0; h < heads; ++h) targets[h][r] = nullptr;
+                }
             }
             std::vector<float> scale(heads, 1.0f);
             for (size_t h = 0; h < heads; ++h) {
                 if (!std::isnan(head_loss[h])) scale[h] = 1.0f / std::max(head_loss[h], 1e-3f);
             }
-            auto losses = network->TrainBatch(inputs, targets, scale, config.gradient_clip_norm);
+            std::vector<float> losses;
+            if (HasMemory()) {
+                losses = network->TrainSequences(sequences, targets, scale, config.gradient_clip_norm);
+            } else {
+                nn::Matrix inputs(batch.size(), width);
+                for (size_t r = 0; r < batch.size(); ++r) batch[r]->Fill(inputs.Data() + r * width, width);
+                losses = network->TrainBatch(inputs, targets, scale, config.gradient_clip_norm);
+            }
             for (size_t h = 0; h < heads; ++h) diverged = diverged || bad(losses[h]);
             for (size_t h = 0; h < heads; ++h) {
                 if (std::isnan(losses[h])) continue;
@@ -1773,7 +2187,10 @@ struct Agent::Impl {
             }
             if (!rows.empty()) {
                 nn::Matrix inputs(rows.size(), width);
-                for (size_t r = 0; r < rows.size(); ++r) rows[r]->Fill(inputs.Data() + r * width, width);
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    rows[r]->Fill(inputs.Data() + r * width, width);
+                    MaskWordIds(inputs.Data() + r * width);
+                }
                 float loss = autoencoder->TrainBatch(inputs, config.gradient_clip_norm);
                 diverged = diverged || bad(loss) || std::isnan(loss);
                 total_loss += loss;
@@ -1838,6 +2255,9 @@ struct Agent::Impl {
             SaveQuality(out, out_state.neural);
             SaveQuality(out, out_state.pattern_short);
             SaveQuality(out, out_state.pattern_long);
+            SaveQuality(out, out_state.neural_log_loss);
+            SaveQuality(out, out_state.pattern_short_log_loss);
+            SaveQuality(out, out_state.pattern_long_log_loss);
             out_state.drift.Save(out);
             io::Write<uint8_t>(out, out_state.recovering ? 1 : 0);
             io::Write<uint64_t>(out, out_state.recovery_samples);
@@ -1873,6 +2293,8 @@ struct Agent::Impl {
         replay.ForEach([&](const SamplePtr& sample) { add(sample.get()); });
         for (const auto& entry : pending) add(entry.sample.get());
         for (const auto& sample : newest) add(sample.get());
+        for (const auto& sample : held_out) add(sample.get());
+        for (const auto& sample : history) add(sample.get());
         auto id_of = [&](const Sample* sample) -> uint64_t {
             auto it = ids.find(sample);
             return it == ids.end() ? 0 : it->second;
@@ -1885,6 +2307,14 @@ struct Agent::Impl {
         for (const auto& sample : newest) io::Write<uint64_t>(out, id_of(sample.get()));
         io::WriteSize(out, recent.size());
         for (const auto& sample : recent) io::Write<uint64_t>(out, id_of(sample.lock().get()));
+        io::WriteSize(out, held_out.size());
+        for (const auto& sample : held_out) io::Write<uint64_t>(out, id_of(sample.get()));
+        WriteVector(out, held_out_loss);
+        io::WriteSize(out, training_slowdown);
+        io::WriteSize(out, since_held_out_check);
+        io::WriteSize(out, history.size());
+        for (const auto& sample : history) io::Write<uint64_t>(out, id_of(sample.get()));
+        WriteVector(out, memory_state);
 
         // Pending steps
         io::WriteSize(out, pending.size());
@@ -1922,7 +2352,7 @@ struct Agent::Impl {
                            drift_events, last_snapshot, rollbacks, widenings}) {
             io::Write<uint64_t>(out, v);
         }
-        io::WriteSize(out, since_training);
+        io::WriteSize(out, untrained_samples);
         io::WriteSize(out, recovering_outputs);
         io::Write<uint8_t>(out, growth_blocked ? 1 : 0);
         io::Write<float>(out, gap_at_widening);
@@ -1946,6 +2376,9 @@ struct Agent::Impl {
             out_state.neural = LoadQuality(in);
             out_state.pattern_short = LoadQuality(in);
             out_state.pattern_long = LoadQuality(in);
+            out_state.neural_log_loss = LoadQuality(in);
+            out_state.pattern_short_log_loss = LoadQuality(in);
+            out_state.pattern_long_log_loss = LoadQuality(in);
             out_state.drift.Load(in);
             out_state.recovering = io::Read<uint8_t>(in) != 0;
             out_state.recovery_samples = io::Read<uint64_t>(in);
@@ -1961,9 +2394,12 @@ struct Agent::Impl {
         if (io::Read<uint8_t>(in)) {
             if (!encoder.Ready()) throw std::runtime_error("Agent checkpoint: models without known input sizes");
             auto heads = PrepareLayout();
+            const auto layout = encoder.Layout();
             for (auto* n : {&network, &target_network, &snapshot_network}) {
                 *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
+                if (*n) (*n)->AttachWordVectors(layout);
             }
+            FindWordIds();
             for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
                 *a = io::Read<uint8_t>(in) ? AnomalyAutoencoder::Deserialize(in) : nullptr;
             }
@@ -2012,6 +2448,27 @@ struct Agent::Impl {
         recent.clear();
         count = io::ReadSize(in, 1u << 30);
         for (size_t i = 0; i < count; ++i) recent.push_back(lookup(io::Read<uint64_t>(in)));
+        held_out.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            auto sample = lookup(io::Read<uint64_t>(in));
+            if (!sample || !sample->held_out) throw std::runtime_error("Agent checkpoint: bad held-out entry");
+            held_out.push_back(std::move(sample));
+        }
+        held_out_loss = ReadVector<float>(in);
+        training_slowdown = io::ReadSize(in);
+        since_held_out_check = io::ReadSize(in);
+        if (training_slowdown == 0) throw std::runtime_error("Agent checkpoint: bad training slowdown");
+        history.clear();
+        count = io::ReadSize(in, 1u << 30);
+        for (size_t i = 0; i < count; ++i) {
+            auto sample = lookup(io::Read<uint64_t>(in));
+            if (!sample || (!history.empty() && sample->step <= history.back()->step)) {
+                throw std::runtime_error("Agent checkpoint: bad history entry");
+            }
+            history.push_back(std::move(sample));
+        }
+        memory_state = ReadVector<float>(in);
 
         pending.clear();
         count = io::ReadSize(in, 1u << 30);
@@ -2052,7 +2509,7 @@ struct Agent::Impl {
                             &drift_events, &last_snapshot, &rollbacks, &widenings}) {
             *v = io::Read<uint64_t>(in);
         }
-        since_training = io::ReadSize(in);
+        untrained_samples = io::ReadSize(in);
         recovering_outputs = io::ReadSize(in);
         growth_blocked = io::Read<uint8_t>(in) != 0;
         gap_at_widening = io::Read<float>(in);
@@ -2070,6 +2527,8 @@ struct Agent::Impl {
         stats.training_steps = m.training_steps;
         stats.pending_steps = m.pending.size();
         stats.replay_size = m.replay.Size();
+        stats.held_out_samples = m.held_out.size();
+        stats.training_slowdown = m.training_slowdown;
         stats.patterns = m.patterns ? m.patterns->Size() : 0;
         stats.associations = m.patterns ? m.patterns->Associations().GetAssociationCount() : 0;
         stats.patterns_pruned = m.patterns ? m.patterns->Pruned() : 0;
@@ -2093,6 +2552,10 @@ struct Agent::Impl {
             o.drift_events = out.drift_events;
             o.recovering = out.recovering;
             o.pattern_quality = out.Pattern(out.spec->type == OutputType::CLASS).value;
+            if (out.spec->type == OutputType::CLASS) {
+                o.neural_log_loss = out.neural_log_loss.value;
+                o.pattern_log_loss = out.PatternLogLoss().value;
+            }
             if (out.spec->type == OutputType::ANOMALY) {
                 o.neural_weight = m.anomaly_samples >= m.config.cold_start_samples ? 0.5f : 0.0f;
             } else if (out.spec->type == OutputType::ACTION) {
@@ -2172,7 +2635,15 @@ struct Agent::Impl {
     uint64_t feedback_count{0};
     uint64_t ignored_feedback{0};
     uint64_t training_steps{0};
-    size_t since_training{0};
+    std::vector<std::pair<size_t, size_t>> word_ids;  ///< TEXT word ids in the fused vector
+    size_t word_vector_bytes{0};                      ///< Pretrained word vectors (shared by network copies)
+    std::deque<SamplePtr> history;      ///< Memory: the newest steps, in order
+    std::vector<float> memory_state;    ///< Memory: the state after the last step
+    std::deque<SamplePtr> held_out;     ///< Newest held-out samples (never trained on)
+    std::vector<float> held_out_loss;   ///< Per head, at the last check
+    size_t training_slowdown{1};        ///< Training interval in units of train_every
+    size_t since_held_out_check{0};
+    size_t untrained_samples{0};  ///< Samples (or, with actions, observations) toward the next training step
 
     Logger logger;
     mutable std::mutex mutex;
@@ -2211,6 +2682,8 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         config.learning_rate = config.action_learning_rate;
         config.min_trunk_width = std::min(config.max_trunk_width,
                                           std::max(config.min_trunk_width, config.action_min_trunk_width));
+        config.memory_window = config.action_memory_window;
+        config.memory_batch = config.action_memory_batch;
     }
 
     impl_ = std::make_unique<Impl>(std::move(spec), config);
@@ -2269,6 +2742,7 @@ Prediction Agent::Predict(StepId step, const std::string& output) const {
 void Agent::Feedback(StepId step, const std::string& feedback, const Value& value) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->FeedbackLocked(step, feedback, value);
+    impl_->MaybeTrain();
 }
 
 std::string Agent::Act(StepId step, const std::string& action_output, bool explore) {
@@ -2311,6 +2785,7 @@ void Agent::EndEpisode(bool terminal) {
     }
     m.encoder.ResetEpisode();
     m.previous_step.reset();
+    m.memory_state.clear();
     m.last_acted_step.reset();
     m.episodes++;
 }

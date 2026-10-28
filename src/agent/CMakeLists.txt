@@ -7,6 +7,7 @@ add_library(dpan_agent STATIC
     environment.cpp
     encoders.cpp
     network.cpp
+    word_sequence.cpp
     pattern_memory.cpp
     replay_buffer.cpp
     agent.cpp

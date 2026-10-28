@@ -67,3 +67,13 @@ gtest_discover_tests(agent_scenarios_test PROPERTIES
     LABELS scenarios
     TIMEOUT 900
     SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
+
+# Memory (Phase 9): tasks M1-M4 that need earlier observations; label "memory"
+add_executable(agent_memory_test memory_test.cpp)
+target_link_libraries(agent_memory_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_memory_test PROPERTIES LABELS memory TIMEOUT 3600)
+
+# Sentence meaning (Phase 10): tests T1-T3; label "text"
+add_executable(agent_text_test text_test.cpp)
+target_link_libraries(agent_text_test dpan_agent GTest::gtest_main)
+gtest_discover_tests(agent_text_test PROPERTIES LABELS text TIMEOUT 3600)

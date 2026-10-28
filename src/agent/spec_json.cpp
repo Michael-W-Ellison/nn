@@ -137,7 +137,8 @@ Json Numbers(const std::vector<float>& values) {
 // on others (macOS, Windows)
 template <typename Owner>
 using Field = std::variant<bool Owner::*, float Owner::*, double Owner::*, uint32_t Owner::*, size_t Owner::*,
-                           std::conditional_t<std::is_same_v<size_t, uint64_t>, std::monostate, uint64_t Owner::*>>;
+                           std::conditional_t<std::is_same_v<size_t, uint64_t>, std::monostate, uint64_t Owner::*>,
+                           std::string Owner::*>;
 
 template <typename Owner>
 struct FieldEntry {
@@ -155,6 +156,17 @@ const std::vector<FieldEntry<EncoderConfig>>& EncoderFields() {
         DPAN_FIELD(EncoderConfig, category_embedding_size),
         DPAN_FIELD(EncoderConfig, text_buckets),
         DPAN_FIELD(EncoderConfig, text_embedding_size),
+        DPAN_FIELD(EncoderConfig, text_sequence_length),
+        DPAN_FIELD(EncoderConfig, text_vocabulary),
+        DPAN_FIELD(EncoderConfig, text_word_vectors),
+        DPAN_FIELD(EncoderConfig, text_word_vectors_limit),
+        DPAN_FIELD(EncoderConfig, text_word_vector_norm),
+        DPAN_FIELD(EncoderConfig, train_word_vectors),
+        DPAN_FIELD(EncoderConfig, text_bidirectional),
+        DPAN_FIELD(EncoderConfig, text_word_dropout),
+        DPAN_FIELD(EncoderConfig, text_dropout),
+        DPAN_FIELD(EncoderConfig, text_word_dimension),
+        DPAN_FIELD(EncoderConfig, text_sequence_units),
         DPAN_FIELD(EncoderConfig, time_series_window),
         DPAN_FIELD(EncoderConfig, image_size),
         DPAN_FIELD(EncoderConfig, max_image_size),
@@ -200,6 +212,8 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, continuous_policy_delay),
         DPAN_FIELD(AgentConfig, continuous_tau),
         DPAN_FIELD(AgentConfig, continuous_updates_per_step),
+        DPAN_FIELD(AgentConfig, continuous_saturation_penalty),
+        DPAN_FIELD(AgentConfig, continuous_saturation_threshold),
         DPAN_FIELD(AgentConfig, detect_drift),
         DPAN_FIELD(AgentConfig, drift_delta),
         DPAN_FIELD(AgentConfig, drift_threshold),
@@ -220,8 +234,22 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, merge_ratio),
         DPAN_FIELD(AgentConfig, pattern_label_horizon),
         DPAN_FIELD(AgentConfig, quality_rate),
+        DPAN_FIELD(AgentConfig, class_blend_sharpness),
+        DPAN_FIELD(AgentConfig, class_blend_rate),
         DPAN_FIELD(AgentConfig, anomaly_baseline),
         DPAN_FIELD(AgentConfig, max_classes),
+        DPAN_FIELD(AgentConfig, holdout_every),
+        DPAN_FIELD(AgentConfig, holdout_capacity),
+        DPAN_FIELD(AgentConfig, holdout_check_interval),
+        DPAN_FIELD(AgentConfig, holdout_min_samples),
+        DPAN_FIELD(AgentConfig, max_training_slowdown),
+        DPAN_FIELD(AgentConfig, memory_units),
+        DPAN_FIELD(AgentConfig, memory_window),
+        DPAN_FIELD(AgentConfig, memory_batch),
+        DPAN_FIELD(AgentConfig, memory_history),
+        DPAN_FIELD(AgentConfig, memory_burn_in),
+        DPAN_FIELD(AgentConfig, action_memory_window),
+        DPAN_FIELD(AgentConfig, action_memory_batch),
     };
     return fields;
 }
@@ -237,6 +265,9 @@ void ReadField(Owner& owner, const Field<Owner>& field, const Json& value, const
             if constexpr (std::is_same_v<T, bool>) {
                 if (!value.IsBool()) Fail(where, std::string("expected a boolean, got ") + ToString(value.GetType()));
                 owner.*member = value.AsBool();
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                if (!value.IsString()) Fail(where, std::string("expected a string, got ") + ToString(value.GetType()));
+                owner.*member = value.AsString();
             } else if constexpr (std::is_floating_point_v<T>) {
                 if (!value.IsNumber()) Fail(where, std::string("expected a number, got ") + ToString(value.GetType()));
                 double v = value.AsNumber();
@@ -472,6 +503,8 @@ std::string StatsToJson(const AgentStats& s) {
     root.Set("training_steps", s.training_steps);
     root.Set("pending_steps", s.pending_steps);
     root.Set("replay_size", s.replay_size);
+    root.Set("held_out_samples", s.held_out_samples);
+    root.Set("training_slowdown", s.training_slowdown);
     root.Set("patterns", s.patterns);
     root.Set("patterns_pruned", s.patterns_pruned);
     root.Set("drift_events", s.drift_events);
@@ -494,6 +527,8 @@ std::string StatsToJson(const AgentStats& s) {
         item.Set("classes", o.classes);
         item.Set("neural_quality", o.neural_quality);
         item.Set("pattern_quality", o.pattern_quality);
+        item.Set("neural_log_loss", o.neural_log_loss);
+        item.Set("pattern_log_loss", o.pattern_log_loss);
         item.Set("neural_weight", o.neural_weight);
         item.Set("exploration", o.exploration);
         item.Set("drift_events", o.drift_events);

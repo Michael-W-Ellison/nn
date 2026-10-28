@@ -35,6 +35,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,7 +55,7 @@ struct AgentConfig {
     size_t min_trunk_width{32};
     size_t max_trunk_width{512};
     float gradient_clip_norm{5.0f};
-    size_t train_every{8};           ///< Observations between training steps
+    size_t train_every{8};           ///< New trainable samples between training steps (observations with actions)
     size_t batch_size{64};
     float new_sample_share{0.5f};    ///< Share of each batch taken from the newest samples
     size_t replay_capacity{50000};
@@ -90,6 +91,11 @@ struct AgentConfig {
     float continuous_noise_clip{0.5f};
     size_t continuous_policy_delay{2};            ///< Critic updates per actor update
     float continuous_tau{0.005f};                 ///< Rate at which target networks follow the live ones
+    /// Actor penalty weight x (|z| - threshold)^2 on each pre-tanh action
+    /// output z beyond the threshold; keeps the actor from sticking at a
+    /// bound, where the tanh gradient vanishes (0 turns it off)
+    float continuous_saturation_penalty{0.001f};
+    float continuous_saturation_threshold{2.0f};
     /// TD3 updates per training step (each further one on its own batch from
     /// the replay buffer). Two learn the pendulum (environment I) more
     /// reliably than one, at twice the cost.
@@ -146,11 +152,57 @@ struct AgentConfig {
     /// Rate of the running accuracy/error estimates that weight the blend
     float quality_rate{0.02f};
 
+    /// CLASS outputs: the network's blend weight is 1 / (1 + exp(s x (L_n -
+    /// L_p))), with L_n and L_p the running log-loss of the network and of
+    /// the pattern memory (-log of the true class's probability, at
+    /// class_blend_rate). s = 10 gives the side whose log-loss is 0.1 lower
+    /// about 73% of the weight, 0.3 lower 95%. 0: weights by squared running
+    /// accuracy (at quality_rate) instead.
+    float class_blend_sharpness{10.0f};
+    /// Rate of the running log-losses: about 200 labels. One confident miss
+    /// (log-loss up to 6.9) moves them by at most 0.035.
+    float class_blend_rate{0.005f};
+
     /// Recent anomaly scores kept as the percentile baseline
     size_t anomaly_baseline{1000};
 
     /// Limit for CLASS outputs whose classes are learned from labels
     size_t max_classes{1000};
+
+    // Held-out samples (environments without action outputs): one in
+    // holdout_every new trainable samples, chosen by a hash of the raw
+    // observation (so a repeated observation is always held out or never),
+    // is kept out of training. Every holdout_check_interval training steps
+    // the network's loss on the newest holdout_capacity of them is compared
+    // with the last check: if it rose, training slows to half as often (up
+    // to every max_training_slowdown x train_every samples); if it fell,
+    // twice as often again. A drift clears them. 0 turns this off.
+    size_t holdout_every{20};
+    size_t holdout_capacity{500};
+    size_t holdout_check_interval{100};
+    size_t holdout_min_samples{50};      ///< Held-out samples needed before a check counts
+    size_t max_training_slowdown{8};
+
+    // Memory (docs/AGENT_PLAN.md, Phase 9): with memory_units > 0 a GRU
+    // after the trunk carries a state from step to step (reset at each
+    // episode start), and a layer on [trunk, state] feeds the network heads.
+    // Each training step unrolls the network over memory_batch windows of
+    // up to memory_window steps (one ending at the newest sample, the others
+    // at replayed ones), with backpropagation through time; the newest
+    // memory_history steps are kept for that. The first memory_burn_in steps
+    // of a window that starts inside an episode only rebuild the state (no
+    // loss). The GRU starts with time scales of 2 to memory_window steps.
+    // Continuous actions (TD3) and the pattern memory do not use the state.
+    size_t memory_units{0};
+    size_t memory_window{64};
+    size_t memory_batch{8};
+    size_t memory_history{20000};
+    size_t memory_burn_in{0};
+    /// With ACTION or CONTINUOUS_ACTION outputs these replace memory_window
+    /// and memory_batch: Q-learning needs many independent windows more
+    /// than long ones (see Phase 9 in the plan)
+    size_t action_memory_window{8};
+    size_t action_memory_batch{32};
 };
 
 struct Prediction {
@@ -196,6 +248,9 @@ struct OutputStats {
     /// NEXT_OBSERVATION) of each side; NaN if not measured
     float neural_quality{0.0f};
     float pattern_quality{0.0f};
+    /// CLASS: running log-loss of each side (NaN otherwise or if not measured)
+    float neural_log_loss{std::numeric_limits<float>::quiet_NaN()};
+    float pattern_log_loss{std::numeric_limits<float>::quiet_NaN()};
     float neural_weight{0.0f};  ///< Current blend weight of the neural side
     float exploration{0.0f};    ///< ACTION: current probability of a random action.
                                 ///< CONTINUOUS_ACTION: noise std (fraction of the half-range; 1 = uniform random)
@@ -211,6 +266,8 @@ struct AgentStats {
     uint64_t training_steps{0};
     size_t pending_steps{0};
     size_t replay_size{0};
+    size_t held_out_samples{0};    ///< Samples kept out of training to check the training rate
+    size_t training_slowdown{1};   ///< Training every training_slowdown x train_every new samples
     size_t patterns{0};
     uint64_t patterns_pruned{0};
     uint64_t drift_events{0};
@@ -242,7 +299,10 @@ public:
     Agent& operator=(const Agent&) = delete;
 
     /// Learn from an observation (channels may be missing) and open a step
-    /// for Predict and Feedback. Trains every train_every observations.
+    /// for Predict and Feedback. Without action outputs, trains once per
+    /// train_every new trainable samples (labels, targets, outcomes,
+    /// self-supervised samples), so observations without feedback do not
+    /// train; with action outputs, every train_every observations.
     /// @throws std::invalid_argument for unknown channels or bad values
     StepId Observe(const Observation& observation);
 

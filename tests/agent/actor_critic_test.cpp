@@ -138,6 +138,38 @@ TEST(ActorCriticTest, SavesLoadsAndCopiesExactly) {
     EXPECT_ANY_THROW(ActorCritic::Deserialize(truncated));
 }
 
+TEST(ActorCriticTest, SaturationPenaltyKeepsTheActorOffTheBound) {
+    // Reward a: the best action is the bound +1. The actor's pre-tanh output
+    // keeps growing without the penalty; with it, it levels off a little
+    // past the threshold, where the gradient can still turn it back.
+    auto pre_tanh = [](float saturation_penalty) {
+        ActorCriticConfig config;
+        config.hidden = 16;
+        config.saturation_penalty = saturation_penalty;
+        ActorCritic ac(1, 1, config);
+        std::mt19937 data(9), noise(10);
+        std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+        for (int i = 0; i < 8000; ++i) {
+            const size_t n = 32;
+            ActorCritic::Batch batch{nn::Matrix(n, 1), nn::Matrix(n, 1), std::vector<float>(n), nn::Matrix(n, 1),
+                                     std::vector<float>(n, 0.0f)};
+            for (size_t r = 0; r < n; ++r) {
+                batch.states(r, 0) = u(data);
+                batch.actions(r, 0) = u(data);
+                batch.rewards[r] = batch.actions(r, 0);
+            }
+            ac.Train(batch, noise);
+        }
+        float t = ac.Act(nn::Matrix(1, 1, 0.0f))(0, 0);
+        return std::atanh(std::min(t, 1.0f - 1e-7f));
+    };
+    float with = pre_tanh(ActorCriticConfig{}.saturation_penalty);
+    float without = pre_tanh(0.0f);
+    EXPECT_GT(with, ActorCriticConfig{}.saturation_threshold);  // at the bound's side
+    EXPECT_LT(with, ActorCriticConfig{}.saturation_threshold + 2.0f);  // about 3.6
+    EXPECT_GT(without, with + 1.5f);                                  // about 5.5
+}
+
 TEST(ActorCriticTest, DelaysActorUpdates) {
     ActorCriticConfig config;
     config.policy_delay = 3;
@@ -147,6 +179,8 @@ TEST(ActorCriticTest, DelaysActorUpdates) {
     for (int i = 0; i < 6; ++i) updated.push_back(ac.Train(BanditBatch(data, 8), noise).actor_updated);
     EXPECT_EQ((std::vector<bool>{false, false, true, false, false, true}), updated);
     EXPECT_THROW(ActorCritic(0, 1, config), std::invalid_argument);
+    config.saturation_penalty = -1.0f;
+    EXPECT_THROW(ActorCritic(2, 1, config), std::invalid_argument);
 }
 
 }  // namespace

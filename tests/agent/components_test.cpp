@@ -5,6 +5,7 @@
 #include "agent/network.hpp"
 #include "agent/pattern_memory.hpp"
 #include "agent/replay_buffer.hpp"
+#include "agent/word_sequence.hpp"
 
 #include <gtest/gtest.h>
 
@@ -13,6 +14,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <sstream>
 
 namespace dpan {
 namespace agent {
@@ -320,6 +322,164 @@ TEST(AgentNetworkTest, WideningKeepsOutputsAndStillTrains) {
     EXPECT_TRUE(network.AllFinite());
     network.AllParameters().front().value->Data()[0] = std::nanf("");
     EXPECT_FALSE(network.AllFinite());
+}
+
+TEST(AgentNetworkTest, MemoryLearnsADelayedCue) {
+    // The sign of input 0 at the first step decides the class at the last;
+    // the other steps show noise only
+    std::vector<ChannelLayout> layout = {{"x", InputType::NUMERIC, 0, 2, 0}};
+    AgentNetwork network(layout, {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 7, 32, 512, 16);
+    EXPECT_EQ(16u, network.MemoryUnits());
+    std::mt19937 rng(14);
+    std::normal_distribution<float> noise(0.0f, 1.0f);
+    const size_t steps = 8, rows = 16;
+    auto episode = [&](std::vector<Matrix>& inputs, std::vector<int>& labels) {
+        inputs.assign(steps, Matrix(rows, 2));
+        labels.assign(rows, 0);
+        for (size_t r = 0; r < rows; ++r) {
+            labels[r] = noise(rng) > 0.0f ? 1 : 0;
+            inputs[0](r, 0) = labels[r] ? 1.0f : -1.0f;
+            for (size_t t = 1; t < steps; ++t) inputs[t](r, 1) = noise(rng);
+        }
+    };
+    std::vector<HeadTarget> label_targets(2);
+    label_targets[0].label = 0;
+    label_targets[1].label = 1;
+    for (int iteration = 0; iteration < 300; ++iteration) {
+        SequenceBatch batch;
+        std::vector<int> labels;
+        episode(batch.inputs, labels);
+        batch.initial = Matrix(rows, 16);
+        std::vector<const HeadTarget*> targets(steps * rows, nullptr);
+        for (size_t r = 0; r < rows; ++r) targets[(steps - 1) * rows + r] = &label_targets[labels[r]];
+        network.TrainSequences(batch, {targets}, {1.0f}, 5.0f);
+    }
+    // Online: advance the state step by step, then read the head
+    std::vector<Matrix> inputs;
+    std::vector<int> labels;
+    episode(inputs, labels);
+    Matrix state(rows, 16);
+    for (size_t t = 0; t < steps; ++t) state = network.Step(inputs[t], state);
+    Matrix logits = network.Infer(inputs.back(), 0, &state);
+    int correct = 0;
+    for (size_t r = 0; r < rows; ++r) correct += (logits(r, 1) > logits(r, 0) ? 1 : 0) == labels[r];
+    EXPECT_GE(correct, 15);
+    EXPECT_THROW(network.TrainBatch(inputs[0], {std::vector<const HeadTarget*>(rows, nullptr)}, {1.0f}, 5.0f),
+                 std::logic_error);
+}
+
+TEST(AgentNetworkTest, MemoryNetworkWidensCopiesAndSerializes) {
+    AgentNetwork network(Layout(), {{"c", HeadKind::CLASSIFIER, 3}, {"v", HeadKind::REGRESSOR, 2}}, 1e-2f, 8, 32,
+                         512, 6);
+    std::mt19937 rng(15);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    Matrix x(5, 12), state(5, 6);
+    for (size_t i = 0; i < x.Size(); ++i) x.Data()[i] = normal(rng);
+    for (size_t i = 0; i < state.Size(); ++i) state.Data()[i] = 0.5f * normal(rng);
+    Matrix next = network.Step(x, state);
+    Matrix before0 = network.Infer(x, 0, &next), before1 = network.Infer(x, 1, &next);
+
+    std::stringstream buffer;
+    network.Serialize(buffer);
+    auto loaded = AgentNetwork::Deserialize(buffer);
+    AgentNetwork copy(network);
+    EXPECT_EQ(next.Values(), loaded->Step(x, state).Values());
+    EXPECT_EQ(before0.Values(), loaded->Infer(x, 0, &next).Values());
+    EXPECT_EQ(before1.Values(), copy.Infer(x, 1, &next).Values());
+    EXPECT_EQ(network.ParameterCount(), loaded->ParameterCount());
+
+    network.Widen(48);
+    Matrix wide_next = network.Step(x, state);
+    for (size_t i = 0; i < next.Size(); ++i) EXPECT_NEAR(next.Data()[i], wide_next.Data()[i], 1e-4f);
+    Matrix after0 = network.Infer(x, 0, &next), after1 = network.Infer(x, 1, &next);
+    for (size_t i = 0; i < before0.Size(); ++i) EXPECT_NEAR(before0.Data()[i], after0.Data()[i], 1e-4f);
+    for (size_t i = 0; i < before1.Size(); ++i) EXPECT_NEAR(before1.Data()[i], after1.Data()[i], 1e-4f);
+
+    AgentNetwork classes(Layout(), {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 9, 32, 512, 6);
+    Matrix two = classes.Infer(x, 0, &next);
+    classes.GrowClasses(0, 4);
+    Matrix four = classes.Infer(x, 0, &next);
+    for (size_t r = 0; r < 5; ++r) {
+        for (size_t c = 0; c < 2; ++c) EXPECT_FLOAT_EQ(two(r, c), four(r, c));
+    }
+    EXPECT_THROW(network.Infer(x, 0, &x), std::invalid_argument);  // wrong state size
+}
+
+TEST(WordSequenceTest, GradientsMatchFiniteDifferences) {
+    auto pretrained = std::make_shared<Matrix>(Matrix::FromRows({{0.5f, -0.2f, 0.1f}, {-0.3f, 0.4f, 0.2f}}));
+    WordSequenceModel model(4, 3, 0, 5, true, pretrained, false, 3);
+    EXPECT_EQ(2 * 2 * 5u + 3u, model.OutputSize());
+    // Rows: ids (2 pretrained, 3 learned + 1 shared): lengths 4, 2, 0
+    Matrix ids = Matrix::FromRows({{1, 3, 4, 2}, {5, 6, 0, 0}, {0, 0, 0, 0}});
+    std::mt19937 rng(4);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    Matrix weights(3, model.OutputSize());
+    for (size_t i = 0; i < weights.Size(); ++i) weights.Data()[i] = normal(rng);
+    auto loss = [&](WordSequenceModel& m) {
+        Matrix out = m.Infer(ids);
+        double sum = 0.0;
+        for (size_t i = 0; i < out.Size(); ++i) sum += static_cast<double>(out.Data()[i]) * weights.Data()[i];
+        return sum;
+    };
+    Matrix out = model.Forward(ids, true);
+    EXPECT_EQ(out.Values(), model.Infer(ids).Values());
+    for (size_t j = 0; j < model.OutputSize(); ++j) EXPECT_EQ(0.0f, out(2, j));  // no words
+    model.ZeroGradients();
+    model.Backward(weights);
+    const float epsilon = 1e-3f;
+    for (auto& parameter : model.Parameters()) {
+        for (size_t i = 0; i < parameter.value->Size(); ++i) {
+            float saved = parameter.value->Data()[i];
+            parameter.value->Data()[i] = saved + epsilon;
+            double plus = loss(model);
+            parameter.value->Data()[i] = saved - epsilon;
+            double minus = loss(model);
+            parameter.value->Data()[i] = saved;
+            double numeric = (plus - minus) / (2.0 * epsilon);
+            ASSERT_NEAR(numeric, parameter.gradient->Data()[i], 2e-2 * std::max(1.0, std::fabs(numeric)));
+        }
+    }
+    // The pretrained vectors are fixed and shared by copies; a deserialized
+    // model needs them attached
+    WordSequenceModel copy(model);
+    EXPECT_EQ(out.Values(), copy.Infer(ids).Values());
+    std::stringstream buffer;
+    model.Serialize(buffer);
+    WordSequenceModel loaded = WordSequenceModel::Deserialize(buffer);
+    EXPECT_TRUE(loaded.NeedsPretrained());
+    EXPECT_THROW(loaded.Infer(ids), std::logic_error);
+    EXPECT_THROW(loaded.AttachPretrained(std::make_shared<Matrix>(3, 3)), std::invalid_argument);
+    loaded.AttachPretrained(pretrained);
+    EXPECT_EQ(out.Values(), loaded.Infer(ids).Values());
+}
+
+TEST(AgentNetworkTest, ReadsWordOrder) {
+    // A TEXT channel of 4 features and 3 word ids: the class is which of
+    // words 1 and 2 comes first (both always occur; the features are the same)
+    ChannelLayout text{"t", InputType::TEXT, 0, 4 + 3 + 1, 2};
+    text.sequence_length = 3;
+    text.learned_words = 4;
+    text.word_dimension = 4;
+    text.sequence_units = 8;
+    AgentNetwork network({text}, {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 10);
+    Matrix x(32, 8);
+    std::vector<HeadTarget> labels(2);
+    labels[0].label = 0;
+    labels[1].label = 1;
+    std::vector<const HeadTarget*> targets(32);
+    for (size_t r = 0; r < 32; ++r) {
+        bool first = r % 2 == 0;
+        x(r, 0) = 0.5f;
+        x(r, 4) = first ? 1.0f : 2.0f;
+        x(r, 5) = r % 4 < 2 ? 3.0f : (first ? 2.0f : 1.0f);
+        x(r, 6) = r % 4 < 2 ? (first ? 2.0f : 1.0f) : 0.0f;
+        targets[r] = &labels[first ? 0 : 1];
+    }
+    for (int i = 0; i < 300; ++i) network.TrainBatch(x, {targets}, {1.0f}, 5.0f);
+    Matrix logits = network.Infer(x, 0);
+    int correct = 0;
+    for (size_t r = 0; r < 32; ++r) correct += (logits(r, 1) > logits(r, 0)) == (r % 2 == 1);
+    EXPECT_EQ(32, correct);
 }
 
 TEST(ReplayBufferTest, StaysWithinByteBudget) {

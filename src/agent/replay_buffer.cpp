@@ -52,6 +52,7 @@ size_t Sample::MemoryBytes() const {
     for (const auto& target : targets) bytes += target.values.size() * sizeof(float);
     bytes += continuous.size() * sizeof(ContinuousTarget);
     for (const auto& target : continuous) bytes += target.action.size() * sizeof(float);
+    bytes += (memory_before.size() + memory_after.size()) * sizeof(float);
     return bytes;
 }
 
@@ -96,6 +97,11 @@ void Sample::Save(std::ostream& out) const {
     io::Write<uint8_t>(out, has_next ? 1 : 0);
     io::Write<uint8_t>(out, terminal ? 1 : 0);
     io::Write<int32_t>(out, balance_class);
+    io::Write<uint64_t>(out, key);
+    io::Write<uint8_t>(out, held_out ? 1 : 0);
+    WriteVector(out, memory_before);
+    WriteVector(out, memory_after);
+    io::Write<uint8_t>(out, episode_start ? 1 : 0);
     io::WriteSize(out, stored_bytes);
 }
 
@@ -124,6 +130,11 @@ std::shared_ptr<Sample> Sample::Load(std::istream& in) {
     sample->has_next = io::Read<uint8_t>(in) != 0;
     sample->terminal = io::Read<uint8_t>(in) != 0;
     sample->balance_class = io::Read<int32_t>(in);
+    sample->key = io::Read<uint64_t>(in);
+    sample->held_out = io::Read<uint8_t>(in) != 0;
+    sample->memory_before = ReadVector<float>(in);
+    sample->memory_after = ReadVector<float>(in);
+    sample->episode_start = io::Read<uint8_t>(in) != 0;
     sample->stored_bytes = io::ReadSize(in);
     if (sample->indices.size() != sample->values.size() || sample->next_indices.size() != sample->next_values.size()) {
         throw std::runtime_error("Sample::Load: malformed sample");

@@ -11,6 +11,10 @@
 // (target policy smoothing; the primes are target networks), and every
 // policy_delay steps moves the actor up the first critic's gradient and the
 // target networks toward the live ones (Polyak averaging with rate tau).
+// The actor's loss also has a penalty saturation_penalty x (|z| -
+// saturation_threshold)^2 on each pre-tanh output z beyond the threshold:
+// without it, an actor that drives an action to a bound gets no gradient
+// back (the tanh slope there is near 0) and can stay stuck at the bound.
 // Actions are in [-1, 1]; the agent maps them to each output's bounds.
 #pragma once
 
@@ -34,6 +38,8 @@ struct ActorCriticConfig {
     float target_noise{0.2f};       ///< Std of the target policy smoothing noise
     float noise_clip{0.5f};         ///< Bound on that noise
     size_t policy_delay{2};         ///< Critic updates per actor update
+    float saturation_penalty{0.001f};   ///< Weight of the actor's penalty on saturated outputs
+    float saturation_threshold{2.0f};   ///< Pre-tanh magnitude where the penalty starts (tanh 0.96)
     uint32_t seed{1};
 };
 
