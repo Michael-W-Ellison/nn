@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -284,6 +286,73 @@ TEST(HashedCategoryEncoderTest, TracksObservedVocabularyUpToLimit) {
 // TextEncoder
 // ============================================================================
 
+TEST(TextEncoderTest, WordIdsFollowFirstAppearance) {
+    EncoderConfig config;
+    config.text_sequence_length = 4;
+    config.text_vocabulary = 3;
+    TextEncoder encoder({"t", InputType::TEXT}, config);
+    EXPECT_EQ(3u + 1u, encoder.LearnedWords());  // the last id is shared by later words
+    Value a = Text("The dog saw the cat");
+    auto before = encoder.Encode(&a);
+    // Ids as they will be after Update: the, dog, saw, the (the fifth word is cut)
+    std::vector<float> ids(before.begin() + 1024, before.begin() + 1028);
+    EXPECT_EQ((std::vector<float>{1, 2, 3, 1}), ids);
+    encoder.Update(&a);
+    EXPECT_EQ(before, encoder.Encode(&a));
+    EXPECT_EQ((std::vector<std::string>{"the", "dog", "saw"}), encoder.Vocabulary());
+    // The vocabulary is full: new words share id 4; shorter texts end with 0
+    Value b = Text("cat dog");
+    EXPECT_EQ((std::vector<uint32_t>{4, 2, 0, 0}), encoder.WordIds("cat dog"));
+    encoder.Update(&b);
+    EXPECT_EQ(3u, encoder.Vocabulary().size());
+
+    EncoderConfig off;
+    off.text_sequence_length = 0;
+    EXPECT_EQ(1025u, TextEncoder({"t", InputType::TEXT}, off).OutputSize());
+    EncoderConfig bad;
+    bad.text_vocabulary = 0;
+    EXPECT_THROW(ValidateEncoderConfig(bad), std::invalid_argument);
+}
+
+TEST(TextEncoderTest, ReadsWordVectorsAndRestoresWithoutTheFile) {
+    std::string path = ::testing::TempDir() + "/dpan_word_vectors.txt";
+    {
+        std::ofstream file(path);
+        file << "4 3\n"
+             << "good 1 0 0\n"
+             << "bad -1 0 0\n"
+             << "movie 0 1 0\n"
+             << "unused 0 0 1\n";
+    }
+    EncoderConfig config;
+    config.text_sequence_length = 3;
+    config.text_vocabulary = 5;
+    config.text_word_vectors = path;
+    config.text_word_vectors_limit = 3;
+    TextEncoder encoder({"t", InputType::TEXT}, config);
+    EXPECT_EQ(3u, encoder.PretrainedWords());  // the limit
+    EXPECT_EQ(3u, encoder.WordDimension());
+    auto vectors = encoder.WordVectors();
+    ASSERT_TRUE(vectors);
+    EXPECT_EQ((std::vector<float>{-1, 0, 0}), vectors->Row(1));
+    // Known words keep their ids; new ones follow the file's words
+    Value v = Text("a good movie");
+    encoder.Update(&v);
+    EXPECT_EQ((std::vector<uint32_t>{4, 1, 3}), encoder.WordIds("a good movie"));
+
+    std::stringstream state;
+    encoder.SaveState(state);
+    std::remove(path.c_str());
+    TextEncoder restored({"t", InputType::TEXT}, config);
+    restored.LoadState(state);
+    EXPECT_EQ(encoder.WordIds("a bad movie"), restored.WordIds("a bad movie"));
+    EXPECT_EQ(vectors->Values(), restored.WordVectors()->Values());
+
+    // Without the file a new encoder cannot start
+    TextEncoder missing({"t", InputType::TEXT}, config);
+    EXPECT_THROW(missing.WordIds("good"), std::invalid_argument);
+}
+
 TEST(TextEncoderTest, SplitsLowercaseWords) {
     EXPECT_EQ((std::vector<std::string>{"hello", "world", "42", "na\xC3\xAFve"}),
               TextEncoder::Words("Hello, WORLD!  42 na\xC3\xAFve"));
@@ -306,7 +375,7 @@ TEST(TextEncoderTest, CountsWordsAndTrigrams) {
 
 TEST(TextEncoderTest, UnitLengthAndCaseInsensitive) {
     TextEncoder encoder({"t", InputType::TEXT}, {});
-    EXPECT_EQ(1025u, encoder.OutputSize());
+    EXPECT_EQ(1024u + 32u + 1u, encoder.OutputSize());  // features, word ids, missing
     EXPECT_EQ(32u, encoder.EmbeddingSize());
 
     Value a = Text("The quick brown fox");
@@ -611,14 +680,17 @@ TEST(ObservationEncoderTest, FusesChannelsInSpecOrder) {
     EXPECT_EQ(1025u, layout[2].size);
     EXPECT_EQ(8u, layout[2].embedding_size);
     EXPECT_EQ(1032u, layout[3].offset);
-    EXPECT_EQ(1025u, layout[3].size);
-    EXPECT_EQ(2057u, encoder.OutputSize());
-    EXPECT_EQ(2057u, fused->size());
+    EXPECT_EQ(1024u + 32u + 1u, layout[3].size);  // features, word ids, missing
+    EXPECT_EQ(32u, layout[3].sequence_length);
+    EXPECT_EQ(0u, layout[2].sequence_length);
+    EXPECT_EQ(2089u, encoder.OutputSize());
+    EXPECT_EQ(2089u, fused->size());
 
     // Missing channels set their indicators
     EXPECT_FLOAT_EQ(1.0f, (*fused)[3 + 3]);      // color missing
     EXPECT_FLOAT_EQ(1.0f, (*fused)[7 + 1024]);   // user missing
-    EXPECT_FLOAT_EQ(0.0f, (*fused)[1032 + 1024]);
+    EXPECT_FLOAT_EQ(0.0f, (*fused)[1032 + 1056]);  // note present
+    EXPECT_FLOAT_EQ(1.0f, (*fused)[1032 + 1024]);  // its first word has id 1
 }
 
 TEST(ObservationEncoderTest, PeekMatchesEncodeWithoutLearning) {
@@ -680,7 +752,7 @@ TEST(ObservationEncoderTest, AllInputTypesTogether) {
     };
     auto fused = encoder.Encode(observation);
     ASSERT_TRUE(fused.has_value());
-    size_t expected = 2 + 4 + 1025 + 1025 + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
+    size_t expected = 2 + 4 + 1025 + (1025 + 32) + (2 * (2 * 16 + 3) + 2) + (2 * 2 * 3 + 1);
     EXPECT_EQ(expected, fused->size());
     auto layout = encoder.Layout();
     EXPECT_EQ(2u, layout.back().image_height);

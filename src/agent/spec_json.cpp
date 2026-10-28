@@ -137,7 +137,8 @@ Json Numbers(const std::vector<float>& values) {
 // on others (macOS, Windows)
 template <typename Owner>
 using Field = std::variant<bool Owner::*, float Owner::*, double Owner::*, uint32_t Owner::*, size_t Owner::*,
-                           std::conditional_t<std::is_same_v<size_t, uint64_t>, std::monostate, uint64_t Owner::*>>;
+                           std::conditional_t<std::is_same_v<size_t, uint64_t>, std::monostate, uint64_t Owner::*>,
+                           std::string Owner::*>;
 
 template <typename Owner>
 struct FieldEntry {
@@ -155,6 +156,13 @@ const std::vector<FieldEntry<EncoderConfig>>& EncoderFields() {
         DPAN_FIELD(EncoderConfig, category_embedding_size),
         DPAN_FIELD(EncoderConfig, text_buckets),
         DPAN_FIELD(EncoderConfig, text_embedding_size),
+        DPAN_FIELD(EncoderConfig, text_sequence_length),
+        DPAN_FIELD(EncoderConfig, text_vocabulary),
+        DPAN_FIELD(EncoderConfig, text_word_vectors),
+        DPAN_FIELD(EncoderConfig, text_word_vectors_limit),
+        DPAN_FIELD(EncoderConfig, train_word_vectors),
+        DPAN_FIELD(EncoderConfig, text_word_dimension),
+        DPAN_FIELD(EncoderConfig, text_sequence_units),
         DPAN_FIELD(EncoderConfig, time_series_window),
         DPAN_FIELD(EncoderConfig, image_size),
         DPAN_FIELD(EncoderConfig, max_image_size),
@@ -252,6 +260,9 @@ void ReadField(Owner& owner, const Field<Owner>& field, const Json& value, const
             if constexpr (std::is_same_v<T, bool>) {
                 if (!value.IsBool()) Fail(where, std::string("expected a boolean, got ") + ToString(value.GetType()));
                 owner.*member = value.AsBool();
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                if (!value.IsString()) Fail(where, std::string("expected a string, got ") + ToString(value.GetType()));
+                owner.*member = value.AsString();
             } else if constexpr (std::is_floating_point_v<T>) {
                 if (!value.IsNumber()) Fail(where, std::string("expected a number, got ") + ToString(value.GetType()));
                 double v = value.AsNumber();

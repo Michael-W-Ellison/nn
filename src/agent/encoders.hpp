@@ -17,6 +17,7 @@
 #pragma once
 
 #include "agent/environment.hpp"
+#include "nn/matrix.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -50,6 +51,24 @@ struct EncoderConfig {
     /// TEXT: hash buckets for words and character tri-grams, embedding width
     size_t text_buckets{1024};
     size_t text_embedding_size{32};
+
+    /// TEXT word sequences (docs/AGENT_PLAN.md, Phase 10): the first
+    /// text_sequence_length words become word ids (0 = off), slots in order
+    /// of first appearance up to text_vocabulary (later new words share one
+    /// id). With text_word_vectors (a file in GloVe text format: a word and
+    /// its values per line, an optional "count dimension" header), its first
+    /// text_word_vectors_limit words take the first ids with their vectors,
+    /// fixed unless train_word_vectors. Other words get learned vectors of
+    /// text_word_dimension values (the file's dimension when there is one).
+    /// The agent's network reads the words with a GRU of
+    /// text_sequence_units.
+    size_t text_sequence_length{32};
+    size_t text_vocabulary{20000};
+    std::string text_word_vectors;
+    size_t text_word_vectors_limit{40000};
+    bool train_word_vectors{false};
+    size_t text_word_dimension{50};
+    size_t text_sequence_units{64};
 
     /// TIME_SERIES: number of most recent values kept per series
     size_t time_series_window{16};
@@ -235,7 +254,7 @@ class TextEncoder : public Encoder {
 public:
     TextEncoder(InputSpec spec, const EncoderConfig& config);
 
-    size_t OutputSize() const override { return buckets_ + 1; }
+    size_t OutputSize() const override { return buckets_ + sequence_length_ + 1; }
     size_t EmbeddingSize() const override { return embedding_size_; }
     std::vector<float> Encode(const Value* value) const override;
     void Update(const Value* value) override;
@@ -251,10 +270,36 @@ public:
 
     uint64_t TextsSeen() const { return texts_seen_; }
 
+    /// Word sequences: ids per text (0 = none), the vocabulary and vectors
+    size_t SequenceLength() const { return sequence_length_; }
+    /// Ids the next text would get for its first SequenceLength() words
+    std::vector<uint32_t> WordIds(const std::string& text) const;
+    /// Words with an id (pretrained first), in id order from id 1
+    const std::vector<std::string>& Vocabulary() const { return words_; }
+    size_t PretrainedWords() const;
+    /// Learned-vector ids after the pretrained ones (the last is shared by
+    /// the words beyond the vocabulary)
+    size_t LearnedWords() const { return vocabulary_ + 1; }
+    size_t WordDimension() const;
+    /// The file's vectors (rows = pretrained words); null without a file
+    std::shared_ptr<const nn::Matrix> WordVectors() const;
+    const EncoderConfig& Config() const { return config_; }
+
 private:
+    /// Reads text_word_vectors once (on first use, so a restored encoder
+    /// does not need the file)
+    void LoadWordVectors() const;
+
     size_t buckets_;
     size_t embedding_size_;
+    size_t sequence_length_;
+    size_t vocabulary_;
+    EncoderConfig config_;
     uint64_t texts_seen_{0};
+    mutable bool vectors_loaded_{false};
+    mutable std::shared_ptr<nn::Matrix> vectors_;
+    mutable std::vector<std::string> words_;
+    mutable std::map<std::string, uint32_t> ids_;
 };
 
 /// TIME_SERIES: each observation adds one value per series. Per series, the
@@ -364,6 +409,16 @@ struct ChannelLayout {
     size_t image_height{0};
     size_t image_width{0};
     size_t image_channels{0};
+    /// TEXT channels with word sequences: the channel is [hash features
+    /// (size - sequence_length - 1)] [sequence_length word ids] [missing];
+    /// ids 1..pretrained rows have the vectors in `word_vectors`, the next
+    /// learned_words ids learned vectors of word_dimension values
+    size_t sequence_length{0};
+    size_t learned_words{0};
+    size_t word_dimension{0};
+    size_t sequence_units{0};
+    bool train_word_vectors{false};
+    std::shared_ptr<const nn::Matrix> word_vectors;
 };
 
 /// Encodes whole observations into one fused vector (channels in spec order)

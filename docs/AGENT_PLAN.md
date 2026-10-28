@@ -1198,3 +1198,44 @@ number of independent windows, not the memory itself, limited Q-learning.
 Cost: with memory a training step of an environment with action outputs
 unrolls 256 steps (32 × 8) instead of training 64 samples; the memory tests
 take about 13 minutes together (label `memory`; `ctest -LE memory` skips them).
+
+## Phase 10: sentence meaning (plan)
+
+Goal: TEXT inputs whose meaning depends on word order, negation and word
+meaning, not only on which words occur. Today a TEXT channel is a bag of
+hashed words and within-word character tri-grams (1,024 buckets): word order
+is lost, and on SST-2 (below) the agent reaches 0.644–0.698 (seeds 1–3, one
+pass; 0.749 and 0.777 with 8,192 buckets) against 0.818 for logistic
+regression on bag-of-words.
+
+**Design.** A TEXT channel keeps its hashed features and adds a word
+sequence:
+
+- *Encoder:* the first `text_sequence_length` (32) words become word ids
+  (0 = no word). Ids are slots in order of first appearance, up to
+  `text_vocabulary` (20,000; later new words share one id). If
+  `text_word_vectors` names a word-vector file (GloVe text format: a word
+  and its values per line; an optional "count dimension" header line), its
+  first `text_word_vectors_limit` (40,000) words take the first ids, with
+  their vectors.
+- *Network:* each id is looked up in a table of word vectors: the file's
+  vectors, fixed unless `train_word_vectors`, shared between copies of the
+  network; learned vectors (`text_word_dimension`, 50, without a file) for
+  the other words. A GRU (`text_sequence_units`, 64) reads the words in
+  order; its state after the last word and the mean word vector are added
+  to the channel's embedding.
+- The pattern memory, the anomaly autoencoder and TD3 read the hashed
+  features only (the word ids are not quantities).
+- Checkpoints hold the vocabulary and the vectors; loading needs no file.
+
+**Tests** (criteria fixed before the first run; seeds 1–3; the agent before
+this change is run on each for comparison):
+
+| | Test | Pass |
+|---|---|---|
+| T1 | SST-2 (Stanford Sentiment Treebank, binary, 6,920 training / 1,821 test sentences): one pass over the training sentences, labels after each prediction, then the test sentences | with GloVe (6B, 100 dimensions): test accuracy ≥ 0.818 (bag-of-words logistic regression, regularization chosen on the 872 dev sentences) for every seed; without a word-vector file: ≥ 0.75 for every seed |
+| T2 | Negation and word order (generated): (a) "the ⟨noun⟩ was [not] ⟨adjective⟩", label = the adjective's polarity, reversed by "not"; (b) "the ⟨animal⟩ chased the ⟨animal⟩" and "the ⟨animal⟩ was chased by the ⟨animal⟩", label = the chaser (6 animals). 3,000 training sentences, 1,000 test sentences each, no word-vector file | test accuracy ≥ 0.95 for (a) and (b); bag-of-words features cannot tell the two orders in (b) apart |
+| T3 | Unseen synonyms: "the ⟨noun⟩ was ⟨adjective⟩"; training uses 4 positive and 4 negative adjectives, the test 4 positive and 4 negative adjectives never seen in training | with GloVe: test accuracy ≥ 0.85 |
+
+T1 and T3 need files outside the repository (SST-2 and GloVe); their tests
+run when `DPAN_SST2_DIR` and `DPAN_WORD_VECTORS` point to them.

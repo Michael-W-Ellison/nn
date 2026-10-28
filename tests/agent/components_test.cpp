@@ -5,6 +5,7 @@
 #include "agent/network.hpp"
 #include "agent/pattern_memory.hpp"
 #include "agent/replay_buffer.hpp"
+#include "agent/word_sequence.hpp"
 
 #include <gtest/gtest.h>
 
@@ -402,6 +403,83 @@ TEST(AgentNetworkTest, MemoryNetworkWidensCopiesAndSerializes) {
         for (size_t c = 0; c < 2; ++c) EXPECT_FLOAT_EQ(two(r, c), four(r, c));
     }
     EXPECT_THROW(network.Infer(x, 0, &x), std::invalid_argument);  // wrong state size
+}
+
+TEST(WordSequenceTest, GradientsMatchFiniteDifferences) {
+    auto pretrained = std::make_shared<Matrix>(Matrix::FromRows({{0.5f, -0.2f, 0.1f}, {-0.3f, 0.4f, 0.2f}}));
+    WordSequenceModel model(4, 3, 0, 5, pretrained, false, 3);
+    EXPECT_EQ(2 * 5u + 3u, model.OutputSize());
+    // Rows: ids (2 pretrained, 3 learned + 1 shared): lengths 4, 2, 0
+    Matrix ids = Matrix::FromRows({{1, 3, 4, 2}, {5, 6, 0, 0}, {0, 0, 0, 0}});
+    std::mt19937 rng(4);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    Matrix weights(3, model.OutputSize());
+    for (size_t i = 0; i < weights.Size(); ++i) weights.Data()[i] = normal(rng);
+    auto loss = [&](WordSequenceModel& m) {
+        Matrix out = m.Infer(ids);
+        double sum = 0.0;
+        for (size_t i = 0; i < out.Size(); ++i) sum += static_cast<double>(out.Data()[i]) * weights.Data()[i];
+        return sum;
+    };
+    Matrix out = model.Forward(ids, true);
+    EXPECT_EQ(out.Values(), model.Infer(ids).Values());
+    for (size_t j = 0; j < model.OutputSize(); ++j) EXPECT_EQ(0.0f, out(2, j));  // no words
+    model.ZeroGradients();
+    model.Backward(weights);
+    const float epsilon = 1e-3f;
+    for (auto& parameter : model.Parameters()) {
+        for (size_t i = 0; i < parameter.value->Size(); ++i) {
+            float saved = parameter.value->Data()[i];
+            parameter.value->Data()[i] = saved + epsilon;
+            double plus = loss(model);
+            parameter.value->Data()[i] = saved - epsilon;
+            double minus = loss(model);
+            parameter.value->Data()[i] = saved;
+            double numeric = (plus - minus) / (2.0 * epsilon);
+            ASSERT_NEAR(numeric, parameter.gradient->Data()[i], 2e-2 * std::max(1.0, std::fabs(numeric)));
+        }
+    }
+    // The pretrained vectors are fixed and shared by copies; a deserialized
+    // model needs them attached
+    WordSequenceModel copy(model);
+    EXPECT_EQ(out.Values(), copy.Infer(ids).Values());
+    std::stringstream buffer;
+    model.Serialize(buffer);
+    WordSequenceModel loaded = WordSequenceModel::Deserialize(buffer);
+    EXPECT_TRUE(loaded.NeedsPretrained());
+    EXPECT_THROW(loaded.Infer(ids), std::logic_error);
+    EXPECT_THROW(loaded.AttachPretrained(std::make_shared<Matrix>(3, 3)), std::invalid_argument);
+    loaded.AttachPretrained(pretrained);
+    EXPECT_EQ(out.Values(), loaded.Infer(ids).Values());
+}
+
+TEST(AgentNetworkTest, ReadsWordOrder) {
+    // A TEXT channel of 4 features and 3 word ids: the class is which of
+    // words 1 and 2 comes first (both always occur; the features are the same)
+    ChannelLayout text{"t", InputType::TEXT, 0, 4 + 3 + 1, 2};
+    text.sequence_length = 3;
+    text.learned_words = 4;
+    text.word_dimension = 4;
+    text.sequence_units = 8;
+    AgentNetwork network({text}, {{"c", HeadKind::CLASSIFIER, 2}}, 1e-2f, 10);
+    Matrix x(32, 8);
+    std::vector<HeadTarget> labels(2);
+    labels[0].label = 0;
+    labels[1].label = 1;
+    std::vector<const HeadTarget*> targets(32);
+    for (size_t r = 0; r < 32; ++r) {
+        bool first = r % 2 == 0;
+        x(r, 0) = 0.5f;
+        x(r, 4) = first ? 1.0f : 2.0f;
+        x(r, 5) = r % 4 < 2 ? 3.0f : (first ? 2.0f : 1.0f);
+        x(r, 6) = r % 4 < 2 ? (first ? 2.0f : 1.0f) : 0.0f;
+        targets[r] = &labels[first ? 0 : 1];
+    }
+    for (int i = 0; i < 300; ++i) network.TrainBatch(x, {targets}, {1.0f}, 5.0f);
+    Matrix logits = network.Infer(x, 0);
+    int correct = 0;
+    for (size_t r = 0; r < 32; ++r) correct += (logits(r, 1) > logits(r, 0)) == (r % 2 == 1);
+    EXPECT_EQ(32, correct);
 }
 
 TEST(ReplayBufferTest, StaysWithinByteBudget) {

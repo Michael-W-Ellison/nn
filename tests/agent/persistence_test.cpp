@@ -199,6 +199,56 @@ TEST(PersistenceTest, SavedBeforeInputSizesAreKnown) {
     ExpectIdentical(a, b);
 }
 
+TEST(PersistenceTest, TextWithWordVectorsContinuesWithoutTheFile) {
+    // Phase 10: pretrained word vectors are saved with the encoder, so the
+    // loaded agent does not need the file
+    const std::string path = test::UniqueTempPath("dpan_vectors");
+    {
+        std::ofstream out(path);
+        std::mt19937 rng(3);
+        std::normal_distribution<float> normal(0.0f, 1.0f);
+        for (const char* word : {"alpha", "beta", "gamma", "delta", "good", "bad"}) {
+            out << word;
+            for (int j = 0; j < 8; ++j) out << ' ' << normal(rng);
+            out << '\n';
+        }
+    }
+    EnvironmentSpec spec;
+    spec.inputs = {{"note", InputType::TEXT}};
+    spec.outputs = {{"kind", OutputType::CLASS}};
+    spec.feedback = {{"label", FeedbackType::LABEL, "kind"}};
+    AgentConfig config;
+    config.encoder.text_word_vectors = path;
+    config.encoder.text_word_dimension = 8;
+    const std::vector<std::string> words = {"alpha", "beta", "gamma", "delta", "good", "bad", "unseen"};
+    std::mt19937 rng(8);
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(words.size()) - 1);
+    std::vector<std::pair<std::string, std::string>> data;
+    for (int i = 0; i < 1600; ++i) {
+        int a = pick(rng), b = pick(rng);
+        data.emplace_back(words[a] + " " + words[b], a < b ? "first" : "second");
+    }
+    auto run = [&](Agent& agent, size_t begin, size_t end, Trace& trace) {
+        for (size_t i = begin; i < end; ++i) {
+            StepId step = agent.Observe({{"note", data[i].first}});
+            trace.Add(agent.Predict(step, "kind"));
+            agent.Feedback(step, "label", data[i].second);
+        }
+        trace.Add(agent.Stats());
+    };
+    Agent original(spec, config);
+    Trace before;
+    run(original, 0, 800, before);
+    std::stringstream buffer;
+    original.Save(buffer);
+    std::remove(path.c_str());
+    Agent restored = Agent::Load(buffer);
+    Trace a, b;
+    run(original, 800, 1600, a);
+    run(restored, 800, 1600, b);
+    ExpectIdentical(a, b);
+}
+
 // ============================================================================
 // Saved during drift recovery
 // ============================================================================

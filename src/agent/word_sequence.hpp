@@ -1,0 +1,87 @@
+// File: src/agent/word_sequence.hpp
+//
+// The agent network's reader of a TEXT channel's word sequence
+// (docs/AGENT_PLAN.md, Phase 10): word ids -> word vectors -> a GRU over the
+// words in order. The output is the GRU's state after the last word, the
+// mean of its states over the words and the mean of the word vectors.
+//
+// Ids: 0 = no word (the sequence ends at the first 0); 1..P = the P
+// pretrained vectors (shared between copies of the model, fixed unless
+// trainable); P+1..P+L = L learned vectors.
+#pragma once
+
+#include "nn/layers.hpp"
+#include "nn/matrix.hpp"
+#include "nn/recurrent.hpp"
+
+#include <cstdint>
+#include <iosfwd>
+#include <memory>
+#include <vector>
+
+namespace dpan {
+namespace agent {
+
+class WordSequenceModel {
+public:
+    /// @param pretrained Vectors of ids 1..rows (nullptr = none); their
+    ///        width sets the dimension if given
+    /// @param train_pretrained Learn the pretrained vectors too (the model
+    ///        then keeps its own copy)
+    WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units,
+                      std::shared_ptr<const nn::Matrix> pretrained, bool train_pretrained, uint32_t seed);
+
+    size_t Length() const { return length_; }
+    size_t OutputSize() const { return 2 * units_ + dimension_; }
+
+    /// ids: rows x Length() word ids (as floats). Forward keeps what Backward needs.
+    nn::Matrix Forward(const nn::Matrix& ids, bool training);
+    nn::Matrix Infer(const nn::Matrix& ids) const;
+
+    /// Adds to the gradients of the learned vectors and the GRU
+    void Backward(const nn::Matrix& grad_output);
+
+    std::vector<nn::Parameter> Parameters();
+    void ZeroGradients();
+    size_t ParameterCount() const;
+
+    /// The pretrained vectors are not serialized; a deserialized model needs
+    /// them attached (rows and width must match)
+    bool NeedsPretrained() const { return pretrained_rows_ > 0 && !train_pretrained_ && !pretrained_; }
+    /// @throws std::invalid_argument if the shape does not match
+    void AttachPretrained(std::shared_ptr<const nn::Matrix> pretrained);
+
+    void Serialize(std::ostream& out) const;
+    static WordSequenceModel Deserialize(std::istream& in);
+
+private:
+    WordSequenceModel() = default;
+
+    /// Vector of an id (nullptr for 0 or an id beyond the table)
+    const float* Vector(uint32_t id) const;
+    /// Ids of each row and their count (up to the first 0)
+    void Parse(const nn::Matrix& ids, std::vector<std::vector<uint32_t>>& rows, std::vector<size_t>& lengths) const;
+    std::vector<nn::Matrix> Inputs(const std::vector<std::vector<uint32_t>>& rows) const;
+    nn::Matrix Output(const std::vector<nn::Matrix>& states, const std::vector<std::vector<uint32_t>>& rows,
+                      const std::vector<size_t>& lengths) const;
+
+    size_t length_{0};
+    size_t dimension_{0};
+    size_t units_{0};
+    size_t pretrained_rows_{0};
+    bool train_pretrained_{false};
+    std::shared_ptr<const nn::Matrix> pretrained_;  // fixed, shared
+    nn::Matrix learned_, learned_grad_;              // trainable rows (with train_pretrained: pretrained first)
+    std::unique_ptr<nn::GRU> gru_;
+
+    std::vector<std::vector<uint32_t>> cache_ids_;
+    std::vector<size_t> cache_lengths_;
+
+public:
+    WordSequenceModel(const WordSequenceModel& other);
+    WordSequenceModel& operator=(const WordSequenceModel&) = delete;
+    WordSequenceModel(WordSequenceModel&&) = default;
+};
+
+}  // namespace agent
+}  // namespace dpan

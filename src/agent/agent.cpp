@@ -164,7 +164,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 9;
+constexpr uint32_t kCheckpointVersion = 10;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -314,6 +314,12 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.encoder.category_embedding_size);
     io::WriteSize(out, c.encoder.text_buckets);
     io::WriteSize(out, c.encoder.text_embedding_size);
+    for (size_t v : {c.encoder.text_sequence_length, c.encoder.text_vocabulary, c.encoder.text_word_vectors_limit,
+                     c.encoder.text_word_dimension, c.encoder.text_sequence_units}) {
+        io::WriteSize(out, v);
+    }
+    io::WriteString(out, c.encoder.text_word_vectors);
+    io::Write<uint8_t>(out, c.encoder.train_word_vectors ? 1 : 0);
     io::WriteSize(out, c.encoder.time_series_window);
     io::WriteSize(out, c.encoder.image_size);
     io::WriteSize(out, c.encoder.max_image_size);
@@ -393,6 +399,12 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.category_embedding_size = io::ReadSize(in);
     c.encoder.text_buckets = io::ReadSize(in);
     c.encoder.text_embedding_size = io::ReadSize(in);
+    for (size_t* v : {&c.encoder.text_sequence_length, &c.encoder.text_vocabulary, &c.encoder.text_word_vectors_limit,
+                      &c.encoder.text_word_dimension, &c.encoder.text_sequence_units}) {
+        *v = io::ReadSize(in);
+    }
+    c.encoder.text_word_vectors = io::ReadString(in, 1u << 16);
+    c.encoder.train_word_vectors = io::Read<uint8_t>(in) != 0;
     c.encoder.time_series_window = io::ReadSize(in);
     c.encoder.image_size = io::ReadSize(in);
     c.encoder.max_image_size = io::ReadSize(in);
@@ -654,6 +666,7 @@ struct Agent::Impl {
 
     void BuildModels() {
         auto layout = encoder.Layout();
+        FindWordIds();
         auto heads = PrepareLayout();
         if (!heads.empty()) {
             network = std::make_unique<AgentNetwork>(layout, heads, config.learning_rate, config.seed,
@@ -716,7 +729,7 @@ struct Agent::Impl {
     size_t ModelBytes() const {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
         size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
-        size_t bytes = parameters * 4 * sizeof(float) * copies;
+        size_t bytes = parameters * 4 * sizeof(float) * copies + word_vector_bytes;
         // Actor-critics: live, target and snapshot copies
         for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
         return bytes;
@@ -1109,6 +1122,28 @@ struct Agent::Impl {
 
     bool HasMemory() const { return network && network->MemoryUnits() > 0; }
 
+    /// TEXT word ids in the fused vector (offset, count): not quantities, so
+    /// the pattern memory, the anomaly autoencoder and TD3 do not see them
+    void FindWordIds() {
+        word_ids.clear();
+        word_vector_bytes = 0;
+        for (const auto& channel : encoder.Layout()) {
+            if (channel.sequence_length == 0) continue;
+            word_ids.emplace_back(channel.offset + channel.size - 1 - channel.sequence_length, channel.sequence_length);
+            if (channel.word_vectors) word_vector_bytes += channel.word_vectors->Size() * sizeof(float);
+        }
+    }
+
+    void MaskWordIds(float* row) const {
+        for (const auto& [offset, count] : word_ids) std::fill(row + offset, row + offset + count, 0.0f);
+    }
+
+    nn::Matrix QuantityRow(const Pending& entry) const {
+        nn::Matrix row = FusedRow(entry);
+        MaskWordIds(row.Data());
+        return row;
+    }
+
     /// The network's state after this sample's step (0 if it has none)
     nn::Matrix MemoryRow(const Sample* sample) const {
         const size_t m = network->MemoryUnits();
@@ -1264,7 +1299,7 @@ struct Agent::Impl {
             for (auto& a : normalized) a = uniform(rng);
         } else {
             const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-            nn::Matrix greedy = ac.Act(FusedRow(entry));
+            nn::Matrix greedy = ac.Act(QuantityRow(entry));
             std::normal_distribution<float> noise(0.0f, config.continuous_exploration_noise);
             for (size_t i = 0; i < n; ++i) {
                 float a = greedy(0, i);
@@ -1370,7 +1405,7 @@ struct Agent::Impl {
                 break;
             case OutputType::CONTINUOUS_ACTION: {
                 const ActorCritic& ac = *actor_critics[static_cast<size_t>(out.continuous_slot)];
-                nn::Matrix state = FusedRow(entry);
+                nn::Matrix state = QuantityRow(entry);
                 nn::Matrix greedy = ac.Act(state);
                 prediction.available = true;
                 prediction.values = ToBounds(*out.spec, greedy.Data());
@@ -1598,7 +1633,9 @@ struct Agent::Impl {
         if (fused && patterns) {
             entry.encoded = true;
             entry.observed = Observed(observation);
-            entry.point = patterns->Project(*fused);
+            std::vector<float> quantities = *fused;
+            MaskWordIds(quantities.data());
+            entry.point = patterns->Project(quantities);
 
             auto placement = patterns->Insert(entry.point, step, entry.observed);
             entry.pattern = placement.id;
@@ -1677,7 +1714,7 @@ struct Agent::Impl {
         float pattern_percentile = std::isfinite(distance) ? Percentile(pattern_baseline, distance) : 0.5f;
         float neural_percentile = 0.5f;
         float weight = 0.0f;
-        float error = autoencoder->Errors(FusedRow(entry))[0];
+        float error = autoencoder->Errors(QuantityRow(entry))[0];
         if (anomaly_samples >= config.cold_start_samples) {
             neural_percentile = Percentile(neural_baseline, error);
             weight = 0.5f;
@@ -1839,6 +1876,7 @@ struct Agent::Impl {
         for (size_t r = 0; r < rows.size(); ++r) {
             const Sample& sample = *rows[r];
             sample.Fill(b.states.Data() + r * width, width);
+            MaskWordIds(b.states.Data() + r * width);
             std::copy(sample.continuous[slot].action.begin(), sample.continuous[slot].action.end(),
                       b.actions.Data() + r * n);
             b.rewards[r] = sample.continuous[slot].reward;
@@ -1846,6 +1884,7 @@ struct Agent::Impl {
                 b.discounts[r] = 0.0f;
             } else {
                 sample.FillNext(b.next_states.Data() + r * width, width);
+                MaskWordIds(b.next_states.Data() + r * width);
                 b.discounts[r] = config.discount;
             }
         }
@@ -2123,7 +2162,10 @@ struct Agent::Impl {
             }
             if (!rows.empty()) {
                 nn::Matrix inputs(rows.size(), width);
-                for (size_t r = 0; r < rows.size(); ++r) rows[r]->Fill(inputs.Data() + r * width, width);
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    rows[r]->Fill(inputs.Data() + r * width, width);
+                    MaskWordIds(inputs.Data() + r * width);
+                }
                 float loss = autoencoder->TrainBatch(inputs, config.gradient_clip_norm);
                 diverged = diverged || bad(loss) || std::isnan(loss);
                 total_loss += loss;
@@ -2327,9 +2369,12 @@ struct Agent::Impl {
         if (io::Read<uint8_t>(in)) {
             if (!encoder.Ready()) throw std::runtime_error("Agent checkpoint: models without known input sizes");
             auto heads = PrepareLayout();
+            const auto layout = encoder.Layout();
             for (auto* n : {&network, &target_network, &snapshot_network}) {
                 *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
+                if (*n) (*n)->AttachWordVectors(layout);
             }
+            FindWordIds();
             for (auto* a : {&autoencoder, &snapshot_autoencoder}) {
                 *a = io::Read<uint8_t>(in) ? AnomalyAutoencoder::Deserialize(in) : nullptr;
             }
@@ -2565,6 +2610,8 @@ struct Agent::Impl {
     uint64_t feedback_count{0};
     uint64_t ignored_feedback{0};
     uint64_t training_steps{0};
+    std::vector<std::pair<size_t, size_t>> word_ids;  ///< TEXT word ids in the fused vector
+    size_t word_vector_bytes{0};                      ///< Pretrained word vectors (shared by network copies)
     std::deque<SamplePtr> history;      ///< Memory: the newest steps, in order
     std::vector<float> memory_state;    ///< Memory: the state after the last step
     std::deque<SamplePtr> held_out;     ///< Newest held-out samples (never trained on)

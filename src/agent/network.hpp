@@ -20,6 +20,7 @@
 #pragma once
 
 #include "agent/encoders.hpp"
+#include "agent/word_sequence.hpp"
 #include "nn/layers.hpp"
 #include "nn/optimizer.hpp"
 #include "nn/recurrent.hpp"
@@ -111,6 +112,11 @@ public:
     /// Number of trainable values (weights and biases)
     size_t ParameterCount() const;
 
+    /// After Deserialize: give the TEXT channels their fixed word vectors
+    /// (ChannelLayout::word_vectors, from the encoder)
+    /// @throws std::invalid_argument if they do not match
+    void AttachWordVectors(const std::vector<ChannelLayout>& layout);
+
     /// All trainable parameters (embeddings, trunk, heads)
     std::vector<nn::Parameter> AllParameters();
 
@@ -171,6 +177,10 @@ private:
         size_t output_offset;
         size_t width{0};
         std::unique_ptr<nn::Sequential> model;  // nullptr = pass through
+        // TEXT word sequence: the channel's word ids follow the features
+        // the model reads; the reader's output follows the model's
+        std::unique_ptr<WordSequenceModel> words;
+        size_t Features() const { return size - 1 - (words ? words->Length() : 0); }
     };
 
     static std::unique_ptr<nn::Sequential> ImageModel(const ChannelLayout& channel, uint32_t& seed);

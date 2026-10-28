@@ -29,18 +29,23 @@ AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector
         if (channel.size == 0) {
             throw std::invalid_argument("AgentNetwork: channel '" + channel.name + "' has no size");
         }
-        Embedding embedding{channel.offset, channel.size, embedded_size_, 0, nullptr};
+        Embedding embedding{channel.offset, channel.size, embedded_size_, 0, nullptr, nullptr};
+        if (channel.sequence_length > 0) {
+            embedding.words = std::make_unique<WordSequenceModel>(
+                channel.sequence_length, channel.learned_words, channel.word_dimension, channel.sequence_units,
+                channel.word_vectors, channel.train_word_vectors, ++layer_seed);
+        }
         if (channel.embedding_size > 0 && channel.size > 1) {
             // Map the features; the missing indicator passes through
             if (channel.image_height > 0) {
                 embedding.model = ImageModel(channel, layer_seed);
             } else {
                 embedding.model = std::make_unique<nn::Sequential>();
-                embedding.model->Emplace<nn::Dense>(channel.size - 1, channel.embedding_size,
+                embedding.model->Emplace<nn::Dense>(embedding.Features(), channel.embedding_size,
                                                     nn::Initialization::XAVIER, ++layer_seed);
             }
             embedding.width = channel.embedding_size;
-            embedded_size_ += channel.embedding_size + 1;
+            embedded_size_ += channel.embedding_size + 1 + (embedding.words ? embedding.words->OutputSize() : 0);
         } else {
             embedded_size_ += channel.size;
         }
@@ -93,7 +98,8 @@ AgentNetwork::AgentNetwork(const AgentNetwork& other)
       head_optimizers_(other.head_optimizers_) {
     for (const auto& embedding : other.embeddings_) {
         embeddings_.push_back({embedding.offset, embedding.size, embedding.output_offset, embedding.width,
-                               embedding.model ? std::make_unique<nn::Sequential>(*embedding.model) : nullptr});
+                               embedding.model ? std::make_unique<nn::Sequential>(*embedding.model) : nullptr,
+                               embedding.words ? std::make_unique<WordSequenceModel>(*embedding.words) : nullptr});
     }
     for (const auto& layer : other.trunk_) {
         trunk_.push_back(layer->Clone());
@@ -127,6 +133,8 @@ void AgentNetwork::Serialize(std::ostream& out) const {
         io::WriteSize(out, embedding.width);
         io::Write<uint8_t>(out, embedding.model ? 1 : 0);
         if (embedding.model) embedding.model->Serialize(out);
+        io::Write<uint8_t>(out, embedding.words ? 1 : 0);
+        if (embedding.words) embedding.words->Serialize(out);
     }
     io::WriteSize(out, trunk_.size());
     for (const auto& layer : trunk_) layer->Serialize(out);
@@ -162,6 +170,9 @@ std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
         embedding.output_offset = io::ReadSize(in, 1u << 30);
         embedding.width = io::ReadSize(in, 1u << 20);
         if (io::Read<uint8_t>(in)) embedding.model = std::make_unique<nn::Sequential>(nn::Sequential::Deserialize(in));
+        if (io::Read<uint8_t>(in)) {
+            embedding.words = std::make_unique<WordSequenceModel>(WordSequenceModel::Deserialize(in));
+        }
         network->embeddings_.push_back(std::move(embedding));
     }
     size_t layers = io::ReadSize(in, 64);
@@ -193,6 +204,15 @@ std::unique_ptr<AgentNetwork> AgentNetwork::Deserialize(std::istream& in) {
     }
     network->body_optimizer_.LoadState(in);
     return network;
+}
+
+void AgentNetwork::AttachWordVectors(const std::vector<ChannelLayout>& layout) {
+    if (layout.size() != embeddings_.size()) throw std::invalid_argument("AgentNetwork: layout does not match");
+    for (size_t i = 0; i < layout.size(); ++i) {
+        if (embeddings_[i].words && embeddings_[i].words->NeedsPretrained()) {
+            embeddings_[i].words->AttachPretrained(layout[i].word_vectors);
+        }
+    }
 }
 
 std::unique_ptr<nn::Sequential> AgentNetwork::ImageModel(const ChannelLayout& channel, uint32_t& seed) {
@@ -228,14 +248,21 @@ Matrix AgentNetwork::Embed(const Matrix& inputs, bool training) const {
             }
             continue;
         }
-        Matrix slice = inputs.SliceCols(embedding.offset, embedding.offset + embedding.size - 1);
+        const size_t features = embedding.Features();
+        Matrix slice = inputs.SliceCols(embedding.offset, embedding.offset + features);
         Matrix projected = training ? embedding.model->Forward(slice, true) : embedding.model->Predict(slice);
         size_t width = projected.Cols();
+        Matrix read;
+        if (embedding.words) {
+            Matrix ids = inputs.SliceCols(embedding.offset + features, embedding.offset + features + embedding.words->Length());
+            read = embedding.words->Forward(ids, training);
+        }
+        const size_t read_width = read.Cols();
         for (size_t r = 0; r < inputs.Rows(); ++r) {
-            std::copy(projected.Data() + r * width, projected.Data() + (r + 1) * width,
-                      embedded.Data() + r * embedded_size_ + embedding.output_offset);
-            embedded(r, embedding.output_offset + width) =
-                inputs(r, embedding.offset + embedding.size - 1);
+            float* out = embedded.Data() + r * embedded_size_ + embedding.output_offset;
+            std::copy(projected.Data() + r * width, projected.Data() + (r + 1) * width, out);
+            if (read_width > 0) std::copy(read.Data() + r * read_width, read.Data() + (r + 1) * read_width, out + width);
+            out[width + read_width] = inputs(r, embedding.offset + embedding.size - 1);
         }
     }
     return embedded;
@@ -340,6 +367,7 @@ void AgentNetwork::GrowClasses(size_t head, size_t class_count) {
 size_t AgentNetwork::ParameterCount() const {
     size_t count = 0;
     for (const auto& embedding : embeddings_) {
+        if (embedding.words) count += embedding.words->ParameterCount();
         if (!embedding.model) continue;
         for (const auto& p : const_cast<nn::Sequential&>(*embedding.model).Parameters()) count += p.value->Size();
     }
@@ -470,6 +498,10 @@ std::vector<nn::Parameter> AgentNetwork::BodyParameters() {
             auto p = embedding.model->Parameters();
             parameters.insert(parameters.end(), p.begin(), p.end());
         }
+        if (embedding.words) {
+            auto p = embedding.words->Parameters();
+            parameters.insert(parameters.end(), p.begin(), p.end());
+        }
     }
     for (auto& layer : trunk_) {
         auto p = layer->Parameters();
@@ -495,6 +527,7 @@ void AgentNetwork::SetLearningRate(float learning_rate) {
 Matrix AgentNetwork::BodyForward(const Matrix& inputs) {
     for (auto& embedding : embeddings_) {
         if (embedding.model) embedding.model->ZeroGradients();
+        if (embedding.words) embedding.words->ZeroGradients();
     }
     for (auto& layer : trunk_) {
         layer->ZeroGradients();
@@ -615,6 +648,15 @@ void AgentNetwork::BodyBackward(const Matrix& grad_hidden) {
                       slice.Data() + r * width);
         }
         embedding.model->Backward(slice);
+        if (embedding.words) {
+            const size_t read_width = embedding.words->OutputSize();
+            Matrix read(rows, read_width);
+            for (size_t r = 0; r < rows; ++r) {
+                const float* from = grad.Data() + r * embedded_size_ + embedding.output_offset + width;
+                std::copy(from, from + read_width, read.Data() + r * read_width);
+            }
+            embedding.words->Backward(read);
+        }
     }
 }
 
