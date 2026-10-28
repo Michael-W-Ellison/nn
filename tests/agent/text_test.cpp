@@ -7,7 +7,9 @@
 //   DPAN_WORD_VECTORS GloVe text file (glove.6B.100d.txt, uncompressed)
 // With DPAN_TEXT_BASELINE set, every test runs without the word sequence
 // (text_sequence_length 0: the hashed bag of words only) and only prints
-// its results. DPAN_TEXT_CONFIG (JSON, as in AgentConfig) changes settings.
+// its results. DPAN_TEXT_CONFIG (JSON, as in AgentConfig) changes settings;
+// DPAN_SST2_PASSES sets T1's number of passes (1 by default; later passes in
+// new orders).
 
 #include "agent/agent.hpp"
 #include "agent/spec_json.hpp"
@@ -57,16 +59,24 @@ protected:
 
     /// Streams `train` once (label after each prediction), then the test
     /// accuracy without labels
-    double Accuracy(const AgentConfig& config, const std::vector<Example>& train, const std::vector<Example>& test) {
+    /// `passes` > 1: the later passes go through `train` in new orders
+    /// (shuffled with a generator seeded by `seed`)
+    double Accuracy(const AgentConfig& config, const std::vector<Example>& train, const std::vector<Example>& test,
+                    size_t passes = 1, uint32_t seed = 0) {
         EnvironmentSpec spec;
         spec.inputs = {{"sentence", InputType::TEXT}};
         spec.outputs = {{"meaning", OutputType::CLASS}};
         spec.feedback = {{"label", FeedbackType::LABEL, "meaning"}};
         Agent agent(spec, config);
-        for (const auto& [text, label] : train) {
-            StepId step = agent.Observe({{"sentence", text}});
-            agent.Feedback(step, "label", label);
-            clock_->Advance(std::chrono::seconds(1));
+        std::vector<Example> order = train;
+        std::mt19937 rng(seed);
+        for (size_t pass = 0; pass < passes; ++pass) {
+            if (pass > 0) std::shuffle(order.begin(), order.end(), rng);
+            for (const auto& [text, label] : order) {
+                StepId step = agent.Observe({{"sentence", text}});
+                agent.Feedback(step, "label", label);
+                clock_->Advance(std::chrono::seconds(1));
+            }
         }
         size_t correct = 0;
         for (const auto& [text, label] : test) {
@@ -142,10 +152,12 @@ TEST_P(TextTest, T1_Sst2) {
     ASSERT_FALSE(test.empty());
     std::mt19937 rng(GetParam());
     std::shuffle(train.begin(), train.end(), rng);
-    double plain = Accuracy(Config(GetParam(), false), train, test);
+    const char* passes_text = std::getenv("DPAN_SST2_PASSES");
+    const size_t passes = passes_text ? std::stoul(passes_text) : 1;
+    double plain = Accuracy(Config(GetParam(), false), train, test, passes, GetParam() + 50);
     Check(plain >= 0.75, Describe("T1 SST-2 without word vectors", GetParam(), plain));
     if (Vectors()) {
-        double glove = Accuracy(Config(GetParam(), true), train, test);
+        double glove = Accuracy(Config(GetParam(), true), train, test, passes, GetParam() + 50);
         Check(glove >= 0.818, Describe("T1 SST-2 with word vectors", GetParam(), glove));
     }
 }
