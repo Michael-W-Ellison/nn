@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 
 namespace dpan {
@@ -20,7 +21,8 @@ WordSequenceModel::WordSequenceModel(size_t length, size_t learned_words, size_t
       dimension_(pretrained ? pretrained->Cols() : dimension),
       units_(units),
       pretrained_rows_(pretrained ? pretrained->Rows() : 0),
-      train_pretrained_(train_pretrained && pretrained) {
+      train_pretrained_(train_pretrained && pretrained),
+      rng_(seed + 7) {
     if (length_ == 0 || dimension_ == 0 || units_ == 0 || learned_words == 0) {
         throw std::invalid_argument("WordSequenceModel: sizes must be positive");
     }
@@ -49,8 +51,19 @@ WordSequenceModel::WordSequenceModel(const WordSequenceModel& other)
       train_pretrained_(other.train_pretrained_),
       pretrained_(other.pretrained_),
       learned_(other.learned_),
-      learned_grad_(other.learned_grad_) {
+      learned_grad_(other.learned_grad_),
+      word_dropout_(other.word_dropout_),
+      dropout_(other.dropout_),
+      rng_(other.rng_) {
     for (const auto& gru : other.grus_) grus_.push_back(std::make_unique<nn::GRU>(*gru));
+}
+
+void WordSequenceModel::SetDropout(float word_dropout, float dropout) {
+    if (!(word_dropout >= 0.0f && word_dropout < 1.0f) || !(dropout >= 0.0f && dropout < 1.0f)) {
+        throw std::invalid_argument("WordSequenceModel: dropout must be in [0, 1)");
+    }
+    word_dropout_ = word_dropout;
+    dropout_ = dropout;
 }
 
 const float* WordSequenceModel::Vector(uint32_t id) const {
@@ -126,11 +139,30 @@ Matrix WordSequenceModel::Forward(const Matrix& ids, bool training) {
     if (!training) return Infer(ids);
     if (NeedsPretrained()) throw std::logic_error("WordSequenceModel: pretrained vectors not attached");
     Parse(ids, cache_ids_, cache_lengths_);
+    std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+    if (word_dropout_ > 0.0f) {
+        // A dropped word has an id beyond the table: an empty vector, no gradient
+        for (size_t r = 0; r < cache_ids_.size(); ++r) {
+            for (size_t t = 0; t < cache_lengths_[r]; ++t) {
+                if (uniform(rng_) < word_dropout_) cache_ids_[r][t] = UINT32_MAX;
+            }
+        }
+    }
     std::vector<std::vector<Matrix>> states;
     for (size_t d = 0; d < grus_.size(); ++d) {
         states.push_back(grus_[d]->Forward(Inputs(cache_ids_, cache_lengths_, d), Matrix(ids.Rows(), units_), {}));
     }
-    return Output(states, cache_ids_, cache_lengths_);
+    Matrix out = Output(states, cache_ids_, cache_lengths_);
+    cache_mask_ = Matrix();
+    if (dropout_ > 0.0f) {
+        cache_mask_ = Matrix(out.Rows(), out.Cols());
+        const float keep = 1.0f / (1.0f - dropout_);
+        for (size_t i = 0; i < out.Size(); ++i) {
+            cache_mask_.Data()[i] = uniform(rng_) < dropout_ ? 0.0f : keep;
+            out.Data()[i] *= cache_mask_.Data()[i];
+        }
+    }
+    return out;
 }
 
 Matrix WordSequenceModel::Infer(const Matrix& ids) const {
@@ -156,6 +188,15 @@ void WordSequenceModel::Backward(const Matrix& grad_output) {
     if (grad_output.Rows() != rows || grad_output.Cols() != OutputSize()) {
         throw std::invalid_argument("WordSequenceModel::Backward: gradient does not match the last Forward");
     }
+    if (cache_mask_.Empty()) {
+        BackwardMasked(grad_output);
+    } else {
+        BackwardMasked(Hadamard(grad_output, cache_mask_));
+    }
+}
+
+void WordSequenceModel::BackwardMasked(const Matrix& grad_output) {
+    const size_t rows = cache_ids_.size();
     // Gradient of each word's vector: from every direction's GRU input and
     // from the mean vector
     auto add = [&](size_t r, size_t t, const float* g, float scale) {
@@ -230,6 +271,11 @@ void WordSequenceModel::Serialize(std::ostream& out) const {
     learned_.Serialize(out);
     io::Write<uint8_t>(out, static_cast<uint8_t>(grus_.size()));
     for (const auto& gru : grus_) gru->Serialize(out);
+    io::Write<float>(out, word_dropout_);
+    io::Write<float>(out, dropout_);
+    std::ostringstream rng;
+    rng << rng_;
+    io::WriteString(out, rng.str());
 }
 
 WordSequenceModel WordSequenceModel::Deserialize(std::istream& in) {
@@ -250,6 +296,14 @@ WordSequenceModel WordSequenceModel::Deserialize(std::istream& in) {
         }
     }
     if (model.learned_.Cols() != model.dimension_ || model.length_ == 0) {
+        throw std::runtime_error("WordSequenceModel: malformed data");
+    }
+    model.word_dropout_ = io::Read<float>(in);
+    model.dropout_ = io::Read<float>(in);
+    std::istringstream rng(io::ReadString(in, 1u << 16));
+    rng >> model.rng_;
+    if (!rng || !(model.word_dropout_ >= 0.0f && model.word_dropout_ < 1.0f) ||
+        !(model.dropout_ >= 0.0f && model.dropout_ < 1.0f)) {
         throw std::runtime_error("WordSequenceModel: malformed data");
     }
     return model;

@@ -34,6 +34,7 @@ AgentNetwork::AgentNetwork(const std::vector<ChannelLayout>& layout, std::vector
             embedding.words = std::make_unique<WordSequenceModel>(
                 channel.sequence_length, channel.learned_words, channel.word_dimension, channel.sequence_units,
                 channel.bidirectional, channel.word_vectors, channel.train_word_vectors, ++layer_seed);
+            embedding.words->SetDropout(channel.word_dropout, channel.dropout);
         }
         if (channel.embedding_size > 0 && channel.size > 1) {
             // Map the features; the missing indicator passes through

@@ -73,6 +73,10 @@ struct EncoderConfig {
     float text_word_vector_norm{10.0f};
     bool train_word_vectors{true};
     bool text_bidirectional{true};
+    /// Training only: probability that a word is read as an empty vector, and
+    /// that a value of the word reader's output is zeroed
+    float text_word_dropout{0.0f};
+    float text_dropout{0.0f};
     size_t text_word_dimension{50};
     size_t text_sequence_units{64};
 
@@ -424,6 +428,8 @@ struct ChannelLayout {
     size_t word_dimension{0};
     size_t sequence_units{0};
     bool bidirectional{false};
+    float word_dropout{0.0f};
+    float dropout{0.0f};
     bool train_word_vectors{false};
     std::shared_ptr<const nn::Matrix> word_vectors;
 };

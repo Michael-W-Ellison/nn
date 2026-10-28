@@ -94,6 +94,9 @@ void ValidateEncoderConfig(const EncoderConfig& config) {
             "EncoderConfig: with text_sequence_length > 0, text_vocabulary, text_word_dimension and "
             "text_sequence_units must be > 0");
     }
+    for (float p : {config.text_word_dropout, config.text_dropout}) {
+        if (!(p >= 0.0f && p < 1.0f)) throw std::invalid_argument("EncoderConfig: text dropout must be in [0, 1)");
+    }
     if (!(config.text_word_vector_norm >= 0.0f) || !std::isfinite(config.text_word_vector_norm)) {
         throw std::invalid_argument("EncoderConfig: text_word_vector_norm must be finite and >= 0");
     }
@@ -1012,6 +1015,8 @@ std::vector<ChannelLayout> ObservationEncoder::Layout() const {
             channel.sequence_units = text->Config().text_sequence_units;
             channel.train_word_vectors = text->Config().train_word_vectors;
             channel.bidirectional = text->Config().text_bidirectional;
+            channel.word_dropout = text->Config().text_word_dropout;
+            channel.dropout = text->Config().text_dropout;
             channel.word_vectors = text->WordVectors();
         }
         layout.push_back(channel);

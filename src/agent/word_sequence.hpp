@@ -16,6 +16,7 @@
 #include "nn/recurrent.hpp"
 
 #include <cstdint>
+#include <random>
 #include <iosfwd>
 #include <memory>
 #include <vector>
@@ -31,6 +32,11 @@ public:
     ///        then keeps its own copy)
     WordSequenceModel(size_t length, size_t learned_words, size_t dimension, size_t units, bool bidirectional,
                       std::shared_ptr<const nn::Matrix> pretrained, bool train_pretrained, uint32_t seed);
+
+    /// Training only: each word is read as an empty vector with probability
+    /// `word_dropout`, each output value is zeroed with probability `dropout`
+    /// (the others scaled by 1 / (1 - dropout))
+    void SetDropout(float word_dropout, float dropout);
 
     size_t Length() const { return length_; }
     size_t OutputSize() const { return grus_.size() * 2 * units_ + dimension_; }
@@ -58,6 +64,7 @@ public:
 private:
     WordSequenceModel() = default;
 
+    void BackwardMasked(const nn::Matrix& grad_output);
     /// Vector of an id (nullptr for 0 or an id beyond the table)
     const float* Vector(uint32_t id) const;
     /// Ids of each row and their count (up to the first 0)
@@ -77,6 +84,11 @@ private:
     std::shared_ptr<const nn::Matrix> pretrained_;  // fixed, shared
     nn::Matrix learned_, learned_grad_;              // trainable rows (with train_pretrained: pretrained first)
     std::vector<std::unique_ptr<nn::GRU>> grus_;     // one per direction
+
+    float word_dropout_{0.0f};
+    float dropout_{0.0f};
+    std::mt19937 rng_;
+    nn::Matrix cache_mask_;  // output dropout of the last Forward (empty = none)
 
     std::vector<std::vector<uint32_t>> cache_ids_;
     std::vector<size_t> cache_lengths_;
