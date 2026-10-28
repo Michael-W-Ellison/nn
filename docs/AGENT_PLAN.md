@@ -1288,8 +1288,20 @@ Attention pooling was chosen from a PyTorch prototype of the reader under
 the same training regime (12 runs: mean 0.819, minimum 0.809, against
 0.812 and 0.787 for the default reader, 0.805 and 0.752 for a convolution
 over 3–5 word windows); in the agent it gave the result above and T3 at
-seed 3 0.776, so it is off by default. T1 with GloVe therefore meets its
-criterion for the C++ test's order only.
+seed 3 0.776, so it is off by default.
+
+More passes over the training sentences (`DPAN_SST2_PASSES`; later passes
+in new orders) lower the result, as on Adult:
+
+| Passes | Min | Mean |
+|---|---|---|
+| 1 | 0.802 | 0.818 |
+| 2 | 0.786 | 0.803 |
+| 3 | 0.794 | 0.803 |
+| 2, `text_dropout` 0.5, `text_word_dropout` 0.25 | 0.792 | 0.801 |
+
+T1 with GloVe therefore meets its criterion for the C++ test's order
+only.
 
 Bag-of-words features are enough for T2a (the network learns the "not" ×
 adjective interaction); T2b and T3 need the word sequence.
