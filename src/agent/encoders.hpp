@@ -75,7 +75,7 @@ struct EncoderConfig {
     bool text_bidirectional{true};
     /// The word reader pools the GRUs' states with learned attention weights
     /// (false: each GRU's final state and the mean of its states)
-    bool text_attention{true};
+    bool text_attention{false};
     /// Training only: probability that a word is read as an empty vector, and
     /// that a value of the word reader's output is zeroed
     float text_word_dropout{0.0f};

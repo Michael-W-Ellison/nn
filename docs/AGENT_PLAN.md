@@ -1266,6 +1266,31 @@ gives 0.802 / 0.827 / 0.804, so the criterion holds for the C++ test's
 order only. One SST-2 pass with GloVe takes about 3 minutes (about 1
 minute with one GRU).
 
+**Sentence order.** Six runs (both orders, seeds 1–3) give a mean of 0.818
+and a minimum of 0.802 with the defaults. After one pass the network scores
+0.982 on a sample of training sentences against 0.802 on the test sentences
+(Python order, seed 1); the blend weight stays at 0.93–0.99, and averaging
+the predictions of the last 2–8 checkpoints adds at most 0.005. None of
+these raised the minimum to 0.818 (six runs each, min / mean):
+
+| | Min | Mean |
+|---|---|---|
+| defaults | 0.802 | 0.818 |
+| `text_dropout` 0.25 (optional dropout of the reader's output) | 0.808 | 0.816 |
+| `text_word_dropout` 0.1 (a word read as an empty vector) | 0.791 | 0.811 |
+| `learning_rate` 2e-3, `text_word_vector_norm` 7 | 0.792 | 0.813 |
+| `text_buckets` 64 | 0.787 | 0.809 |
+| `text_sequence_units` 32 | 0.800 | 0.808 |
+| `text_word_vectors_limit` 100,000 | 0.792 | 0.816 |
+| `text_attention` (states pooled by learned attention weights) | 0.802 | 0.813 |
+
+Attention pooling was chosen from a PyTorch prototype of the reader under
+the same training regime (12 runs: mean 0.819, minimum 0.809, against
+0.812 and 0.787 for the default reader, 0.805 and 0.752 for a convolution
+over 3–5 word windows); in the agent it gave the result above and T3 at
+seed 3 0.776, so it is off by default. T1 with GloVe therefore meets its
+criterion for the C++ test's order only.
+
 Bag-of-words features are enough for T2a (the network learns the "not" ×
 adjective interaction); T2b and T3 need the word sequence.
 
