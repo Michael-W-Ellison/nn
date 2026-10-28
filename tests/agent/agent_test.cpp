@@ -44,13 +44,6 @@ TEST(AgentTest, RejectsUnsupportedOrInvalidSpecs) {
     AgentConfig config;
     config.batch_size = 0;
     EXPECT_THROW(Agent(ClassSpec(), config), std::invalid_argument);
-    AgentConfig ensemble;
-    ensemble.ensemble_size = 2;
-    ensemble.memory_units = 8;
-    EXPECT_THROW(Agent(ClassSpec(), ensemble), std::invalid_argument);  // not with memory
-    ensemble.ensemble_size = 17;
-    ensemble.memory_units = 0;
-    EXPECT_THROW(Agent(ClassSpec(), ensemble), std::invalid_argument);
 }
 
 TEST(AgentTest, StepsExpireAndNamesAreChecked) {

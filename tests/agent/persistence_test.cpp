@@ -187,22 +187,6 @@ TEST(PersistenceTest, MixedAgentContinuesExactly) {
     EXPECT_LT(original.Stats().learning_rate, rate_at_save) << "no learning-rate drop after the save";
 }
 
-TEST(PersistenceTest, EnsembleContinuesExactly) {
-    // Three networks; MixedSpec has no ACTION outputs
-    MixedStream stream(3000);
-    AgentConfig config;
-    config.ensemble_size = 3;
-    Agent original(MixedSpec(), config);
-    Trace before;
-    RunMixed(original, stream, 0, 1500, before);
-    ASSERT_GT(original.Stats().training_steps, 100u);
-    Agent restored = Copy(original);
-    Trace a, b;
-    RunMixed(original, stream, 1500, 3000, a);
-    RunMixed(restored, stream, 1500, 3000, b);
-    ExpectIdentical(a, b);
-}
-
 TEST(PersistenceTest, SavedBeforeInputSizesAreKnown) {
     MixedStream stream(600);
     Agent original(MixedSpec());

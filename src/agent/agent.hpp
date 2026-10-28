@@ -57,10 +57,6 @@ struct AgentConfig {
     float gradient_clip_norm{5.0f};
     size_t train_every{8};           ///< New trainable samples between training steps (observations with actions)
     size_t batch_size{64};
-    /// Networks trained separately (own initial weights, own replay draws)
-    /// whose predictions are averaged for CLASS, VALUE and NEXT_OBSERVATION
-    /// outputs; 1 = one network. Not with ACTION outputs or memory_units.
-    size_t ensemble_size{1};
     float new_sample_share{0.5f};    ///< Share of each batch taken from the newest samples
     size_t replay_capacity{50000};
     size_t cold_start_samples{200};  ///< Samples a head needs before it is used
