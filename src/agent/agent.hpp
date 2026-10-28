@@ -155,10 +155,13 @@ struct AgentConfig {
     /// CLASS outputs: the network's blend weight is 1 / (1 + exp(s x (L_n -
     /// L_p))), with L_n and L_p the running log-loss of the network and of
     /// the pattern memory (-log of the true class's probability, at
-    /// quality_rate). With quality_rate 0.02 (about 50 labels), s = 10 gives
-    /// the side whose log-loss is 0.1 lower about 73% of the weight, 0.3
-    /// lower 95%. 0: weights by squared running accuracy instead.
+    /// class_blend_rate). s = 10 gives the side whose log-loss is 0.1 lower
+    /// about 73% of the weight, 0.3 lower 95%. 0: weights by squared running
+    /// accuracy (at quality_rate) instead.
     float class_blend_sharpness{10.0f};
+    /// Rate of the running log-losses: about 200 labels. One confident miss
+    /// (log-loss up to 6.9) moves them by at most 0.035.
+    float class_blend_rate{0.005f};
 
     /// Recent anomaly scores kept as the percentile baseline
     size_t anomaly_baseline{1000};

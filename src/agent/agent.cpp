@@ -57,6 +57,7 @@ void CheckConfig(const AgentConfig& c) {
     require(c.quality_rate > 0.0f && c.quality_rate <= 1.0f, "quality_rate must be in (0, 1]");
     require(c.class_blend_sharpness >= 0.0f && std::isfinite(c.class_blend_sharpness),
             "class_blend_sharpness must be finite and >= 0");
+    require(c.class_blend_rate > 0.0f && c.class_blend_rate <= 1.0f, "class_blend_rate must be in (0, 1]");
     require(c.anomaly_baseline > 0, "anomaly_baseline must be > 0");
     require(c.max_classes > 0, "max_classes must be > 0");
     require(c.holdout_every == 0 || (c.holdout_capacity > 0 && c.holdout_check_interval > 0 &&
@@ -164,7 +165,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 10;
+constexpr uint32_t kCheckpointVersion = 11;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -301,6 +302,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.pattern_label_horizon);
     io::Write<float>(out, c.quality_rate);
     io::Write<float>(out, c.class_blend_sharpness);
+    io::Write<float>(out, c.class_blend_rate);
     io::WriteSize(out, c.anomaly_baseline);
     io::WriteSize(out, c.max_classes);
     for (size_t v : {c.holdout_every, c.holdout_capacity, c.holdout_check_interval, c.holdout_min_samples,
@@ -386,6 +388,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.pattern_label_horizon = io::ReadSize(in);
     c.quality_rate = io::Read<float>(in);
     c.class_blend_sharpness = io::Read<float>(in);
+    c.class_blend_rate = io::Read<float>(in);
     c.anomaly_baseline = io::ReadSize(in);
     c.max_classes = io::ReadSize(in);
     for (size_t* v : {&c.holdout_every, &c.holdout_capacity, &c.holdout_check_interval, &c.holdout_min_samples,
@@ -1471,12 +1474,25 @@ struct Agent::Impl {
         return index;
     }
 
+    /// A wrong OUTCOME: the blend's log-losses score -log(1 - p(cls)) on both
+    /// sides, so they are not measured on correct outcomes only
+    void ScoreNotClass(Pending& entry, OutputState& out, size_t cls) {
+        auto not_class = [cls](const std::vector<float>& p) {
+            return -std::log(std::max(1.0f - (cls < p.size() ? p[cls] : 0.0f), 1e-3f));
+        };
+        if (auto neural = NeuralClass(entry, out)) out.neural_log_loss.Add(not_class(*neural), config.class_blend_rate);
+        auto votes = patterns->ClassVotes(entry.point, static_cast<size_t>(out.class_slot), out.classes.size(),
+                                          config.neighbors, config.pattern_label_horizon);
+        if (votes.short_term) out.pattern_short_log_loss.Add(not_class(*votes.short_term), config.class_blend_rate);
+        if (votes.long_term) out.pattern_long_log_loss.Add(not_class(*votes.long_term), config.class_blend_rate);
+    }
+
     void LearnLabel(Pending& entry, OutputState& out, size_t cls) {
         // Score both sides on this sample before learning from it
         if (auto neural = NeuralClass(entry, out)) {
             float correct = ArgMax(*neural) == cls ? 1.0f : 0.0f;
             out.neural.Add(correct, config.quality_rate);
-            out.neural_log_loss.Add(LogLoss(*neural, cls), config.quality_rate);
+            out.neural_log_loss.Add(LogLoss(*neural, cls), config.class_blend_rate);
             ObserveLoss(out, 1.0f - correct);
         }
         if (!out.classes.empty()) {
@@ -1484,11 +1500,11 @@ struct Agent::Impl {
                                               config.neighbors, config.pattern_label_horizon);
             if (votes.short_term) {
                 out.pattern_short.Add(ArgMax(*votes.short_term) == cls ? 1.0f : 0.0f, config.quality_rate);
-                out.pattern_short_log_loss.Add(LogLoss(*votes.short_term, cls), config.quality_rate);
+                out.pattern_short_log_loss.Add(LogLoss(*votes.short_term, cls), config.class_blend_rate);
             }
             if (votes.long_term) {
                 out.pattern_long.Add(ArgMax(*votes.long_term) == cls ? 1.0f : 0.0f, config.quality_rate);
-                out.pattern_long_log_loss.Add(LogLoss(*votes.long_term, cls), config.quality_rate);
+                out.pattern_long_log_loss.Add(LogLoss(*votes.long_term, cls), config.class_blend_rate);
             }
         }
 
@@ -1593,6 +1609,7 @@ struct Agent::Impl {
                 if (correct) {
                     LearnLabel(entry, out, *predicted);
                 } else {
+                    ScoreNotClass(entry, out, *predicted);
                     HeadTarget& target = entry.sample->targets[out.head];
                     if (target.label < 0) target.negative = static_cast<int>(*predicted);
                     patterns->AddNegative(entry.pattern, out.class_slot, *predicted);

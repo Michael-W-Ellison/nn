@@ -58,7 +58,7 @@ struct EncoderConfig {
     /// id). With text_word_vectors (a file in GloVe text format: a word and
     /// its values per line, an optional "count dimension" header), its first
     /// text_word_vectors_limit words take the first ids with their vectors,
-    /// fixed unless train_word_vectors. Other words get learned vectors of
+    /// which are trained further (fixed if not train_word_vectors). Other words get learned vectors of
     /// text_word_dimension values (the file's dimension when there is one).
     /// The agent's network reads the words with a GRU of
     /// text_sequence_units.
@@ -66,7 +66,7 @@ struct EncoderConfig {
     size_t text_vocabulary{20000};
     std::string text_word_vectors;
     size_t text_word_vectors_limit{40000};
-    bool train_word_vectors{false};
+    bool train_word_vectors{true};
     size_t text_word_dimension{50};
     size_t text_sequence_units{64};
 

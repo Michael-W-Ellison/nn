@@ -231,6 +231,7 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, pattern_label_horizon),
         DPAN_FIELD(AgentConfig, quality_rate),
         DPAN_FIELD(AgentConfig, class_blend_sharpness),
+        DPAN_FIELD(AgentConfig, class_blend_rate),
         DPAN_FIELD(AgentConfig, anomaly_baseline),
         DPAN_FIELD(AgentConfig, max_classes),
         DPAN_FIELD(AgentConfig, holdout_every),
