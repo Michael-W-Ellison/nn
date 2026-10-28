@@ -196,6 +196,7 @@ integration test with a fixed seed and a fake clock.
 | 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
 | 8. Continuous actions | Complete. `CONTINUOUS_ACTION` outputs with bounds (`OutputSpec::low` / `high`), learned with TD3 (`src/agent/actor_critic.hpp`); `Agent::ActContinuous`, `dpan_agent_act_continuous`, Python `act_continuous`. Reference environment I passes (results and notes below). |
 | 9. Memory | Complete. A GRU after the trunk (`memory_units`, off by default; `src/nn/recurrent.hpp`), trained on windows of steps with backpropagation through time. Memory tasks M1, M2 and M4 pass at the defaults, M3 with its own window settings (results below). |
+| 10. Sentence meaning | Complete with two criteria not met. TEXT channels add a word sequence (first-appearance vocabulary, optional GloVe vectors) read by a GRU in the network (`src/agent/word_sequence.hpp`). T1 without word vectors, T2a and T3 pass; T1 with GloVe (0.789–0.808 against 0.818) and T2b at seed 1 (0.944 against 0.95) do not (results below). |
 
 ### Phase 1 implementation notes
 
@@ -1086,7 +1087,7 @@ the two sides, so 0.85 against 0.82 gave 0.52, and on Adult the weaker
 pattern side took half of every prediction. It is now
 1 / (1 + exp(s × (L_n − L_p))), with L_n and L_p each side's running
 log-loss (−log of the true class's probability, floored at 1e-3, at
-`quality_rate`) and s = `class_blend_sharpness` (10; 0 restores the
+`quality_rate`; at `class_blend_rate` since Phase 10) and s = `class_blend_sharpness` (10; 0 restores the
 accuracy weights). The short- or long-term pattern memory is still chosen
 by accuracy. `OutputStats::neural_log_loss` and `pattern_log_loss` report
 the two log-losses; checkpoint version 8 stores them.
@@ -1199,37 +1200,44 @@ Cost: with memory a training step of an environment with action outputs
 unrolls 256 steps (32 × 8) instead of training 64 samples; the memory tests
 take about 13 minutes together (label `memory`; `ctest -LE memory` skips them).
 
-## Phase 10: sentence meaning (plan)
+## Phase 10: sentence meaning
 
 Goal: TEXT inputs whose meaning depends on word order, negation and word
-meaning, not only on which words occur. Today a TEXT channel is a bag of
-hashed words and within-word character tri-grams (1,024 buckets): word order
-is lost, and on SST-2 (below) the agent reaches 0.644–0.698 (seeds 1–3, one
-pass; 0.749 and 0.777 with 8,192 buckets) against 0.818 for logistic
-regression on bag-of-words.
+meaning, not only on which words occur. Before this phase a TEXT channel was
+a bag of hashed words and within-word character tri-grams (1,024 buckets):
+word order was lost, and on SST-2 (below) the agent reached 0.644–0.698
+(seeds 1–3, one pass; 0.749 and 0.777 with 8,192 buckets) against 0.818 for
+logistic regression on bag-of-words.
 
 **Design.** A TEXT channel keeps its hashed features and adds a word
 sequence:
 
-- *Encoder:* the first `text_sequence_length` (32) words become word ids
-  (0 = no word). Ids are slots in order of first appearance, up to
+- *Encoder:* the first `text_sequence_length` (32; 0 = off) words become
+  word ids (0 = no word). Ids are slots in order of first appearance, up to
   `text_vocabulary` (20,000; later new words share one id). If
-  `text_word_vectors` names a word-vector file (GloVe text format: a word
-  and its values per line; an optional "count dimension" header line), its
+  `text_word_vectors` names a word-vector file (GloVe text format: a word and
+  its values per line; an optional "count dimension" header line), its
   first `text_word_vectors_limit` (40,000) words take the first ids, with
-  their vectors.
-- *Network:* each id is looked up in a table of word vectors: the file's
-  vectors, fixed unless `train_word_vectors`, shared between copies of the
-  network; learned vectors (`text_word_dimension`, 50, without a file) for
-  the other words. A GRU (`text_sequence_units`, 64) reads the words in
-  order; its state after the last word and the mean word vector are added
-  to the channel's embedding.
+  their vectors. Words are split as for the hashed features (ASCII letters
+  and digits, lower-cased; "n't" becomes "n" and "t").
+- *Network* (`src/agent/word_sequence.hpp`): each id is looked up in a table
+  of word vectors: the file's vectors, trained further unless
+  `train_word_vectors` is false (then fixed and shared between copies of
+  the network); learned vectors (`text_word_dimension`, 50, without a file)
+  for the other words. A GRU (`text_sequence_units`, 64) reads the words in
+  order; its state after the last word, the mean of its states over the
+  words and the mean word vector are added to the channel's embedding.
 - The pattern memory, the anomaly autoencoder and TD3 read the hashed
   features only (the word ids are not quantities).
-- Checkpoints hold the vocabulary and the vectors; loading needs no file.
+- Checkpoints (version 10) hold the vocabulary and the file's vectors;
+  loading needs no file.
 
-**Tests** (criteria fixed before the first run; seeds 1–3; the agent before
-this change is run on each for comparison):
+**Tests** (`tests/agent/text_test.cpp`, label `text`; criteria fixed before
+the first run; seeds 1–3). T1 and T3 run when `DPAN_SST2_DIR` (train.tsv and
+test.tsv, "sentence\tlabel") and `DPAN_WORD_VECTORS` (an uncompressed GloVe
+file) are set; with `DPAN_TEXT_BASELINE` set every test runs without the word
+sequence and only prints its results; `DPAN_TEXT_CONFIG` (JSON) changes
+settings.
 
 | | Test | Pass |
 |---|---|---|
@@ -1237,5 +1245,71 @@ this change is run on each for comparison):
 | T2 | Negation and word order (generated): (a) "the ⟨noun⟩ was [not] ⟨adjective⟩", label = the adjective's polarity, reversed by "not"; (b) "the ⟨animal⟩ chased the ⟨animal⟩" and "the ⟨animal⟩ was chased by the ⟨animal⟩", label = the chaser (6 animals). 3,000 training sentences, 1,000 test sentences each, no word-vector file | test accuracy ≥ 0.95 for (a) and (b); bag-of-words features cannot tell the two orders in (b) apart |
 | T3 | Unseen synonyms: "the ⟨noun⟩ was ⟨adjective⟩"; training uses 4 positive and 4 negative adjectives, the test 4 positive and 4 negative adjectives never seen in training | with GloVe: test accuracy ≥ 0.85 |
 
-T1 and T3 need files outside the repository (SST-2 and GloVe); their tests
-run when `DPAN_SST2_DIR` and `DPAN_WORD_VECTORS` point to them.
+**Results** (seeds 1 / 2 / 3; GloVe 6B 100d, first 40,000 words; "bag of
+words" = `text_sequence_length` 0 with the other settings of this phase):
+
+| | Pass | Word sequence | Bag of words |
+|---|---|---|---|
+| T1, GloVe | ≥ 0.818 | 0.806 / 0.789 / 0.808 (**not met**) | 0.699 / 0.718 / 0.680 |
+| T1, no file | ≥ 0.75 | 0.764 / 0.784 / 0.775 (pass) | 0.699 / 0.718 / 0.680 |
+| T2a negation | ≥ 0.95 | 1.0 / 1.0 / 1.0 (pass) | 1.0 / 1.0 / 1.0 |
+| T2b word order | ≥ 0.95 | 0.944 / 0.979 / 0.985 (**not met** at seed 1) | 0.517 / 0.506 / 0.502 |
+| T3 unseen synonyms | ≥ 0.85 | 0.927 / 0.989 / 0.853 (pass) | 0.604 / 0.681 / 0.618 |
+
+Bag-of-words features are enough for T2a (the network learns the "not" ×
+adjective interaction); T2b and T3 need the word sequence.
+
+Findings:
+
+- *T2b.* The held-out check keeps 1 in 20 observations out of training, by
+  a hash of the observation, so the same sentences for every seed. T2b has
+  60 distinct sentences, so about 4 are never trained on; at seed 1 the
+  network answers each of them like the trained sentence with the same two
+  animals in the same form (for example "the bear chased the cat" → cat).
+  With `holdout_every` 0 T2b reaches 1.0; with `text_sequence_units` 128,
+  0.981 / 1.0 / 0.984, but SST-2 then takes about 4 times as long with no
+  consistent gain (0.780 / 0.809 / 0.799 without a file). The mean of the
+  GRU states was added to the output for this test; it did not change the
+  T2b range (0.944–0.985 with it, 0.947–0.979 without).
+- *T1 with GloVe.* With the vectors fixed, GloVe gave no gain over learned
+  vectors (0.783 / 0.789 / 0.795 against 0.786 / 0.801 / 0.799 at
+  `quality_rate` 0.02). For comparison, logistic regression on the mean
+  GloVe vector of a sentence reaches 0.753, and on bag-of-words plus the
+  mean vector 0.823. Training the vectors (now the default) and the
+  separate blend rate below gave 0.809 / 0.825 / 0.809 in a Python run with
+  a different sentence order and 0.806 / 0.789 / 0.808 in the C++ test.
+  More training steps (`train_every` 4 or 2) and `learning_rate` 1e-3 did
+  not help (0.633–0.789).
+- *T1 without a file* went from 0.786 / 0.801 / 0.799 to 0.764 / 0.784 /
+  0.775 with the blend change below; which part of the change causes this
+  was not measured.
+
+**Change: separate blend rate.** On SST-2 the network's weight in the CLASS
+blend fell from 0.90 to 0.23 over the last 20 training sentences of one run,
+so the test used mostly the pattern memory: at `quality_rate` 0.02 the
+running log-losses follow about the last 50 labels, and one confident miss
+(log-loss up to 6.9) moves them by up to 0.14. They now use
+`class_blend_rate` (0.005, about 200 labels; at most 0.035 per miss);
+`quality_rate` still drives the running accuracies. With the slower rate an
+agent trained by OUTCOME feedback only stayed at chance
+(`AgentTest.LearnsFromOutcomesOnly`, 250 of 500): the log-losses were
+scored on correct outcomes only, where both sides predicted the same class
+with probability near 1. A wrong outcome now scores −log(1 − p(predicted))
+on both sides (the true class's log-loss when there are two classes).
+Checkpoint version 11 stores the rate.
+
+With these changes the other CLASS tasks stay within noise (seeds 1–3;
+before = the s = 10 column of the log-loss blend table under "Real-world datasets"):
+
+| | Before | After |
+|---|---|---|
+| Adult, pass 1 / 2 / 3 | 0.849–0.855 / 0.850–0.852 / 0.841–0.847 | 0.851–0.855 / 0.849–0.853 / 0.841–0.845 |
+| A (C++): before / 800–1,000 after / after the drift | 0.985 / 0.995 / 0.983 | 0.985 / 0.995 / 0.984 |
+| A (Python) | 0.990 / 0.990 / 0.985 | 0.989 / 0.990 / 0.985 |
+| G | 0.972 | 0.972 |
+| S1 / S3 / S10 | 0.949–0.957 / 0.945–0.950 / 0.997–0.999 | 0.948–0.956 / 0.942–0.948 / 0.997–0.999 |
+| SMS, 1 / 3 passes | 0.980–0.986 / 0.979–0.987 | 0.984–0.987 / 0.979–0.986 |
+| Digits, 1 / 3 passes | 0.983–0.989 / 0.986–0.994 | 0.983–0.989 / 0.986–0.994 |
+
+SMS, S1 and S3 have TEXT inputs, so their "after" includes the word
+sequence. The full suite (scenarios included) passes except T2b at seed 1.
