@@ -158,9 +158,11 @@ TEST_P(TextTest, T1_Sst2) {
     Check(plain >= 0.75, Describe("T1 SST-2 without word vectors", GetParam(), plain));
     if (Vectors()) {
         // The result depends on the order of the training sentences
-        // (docs/AGENT_PLAN.md, Phase 10): the criterion is the mean over
-        // kT1Orders orders, the first the one above
+        // (docs/AGENT_PLAN.md, Phase 10): an ensemble of 4 agents, and the
+        // criterion is the mean over kT1Orders orders, the first the one above
         constexpr size_t kT1Orders = 3;
+        AgentConfig config = Config(GetParam(), true);
+        if (!std::getenv("DPAN_TEXT_CONFIG")) config.ensemble_size = 4;
         double sum = 0.0;
         std::vector<Example> order = train;
         for (size_t k = 0; k < kT1Orders; ++k) {
@@ -169,7 +171,7 @@ TEST_P(TextTest, T1_Sst2) {
                 std::mt19937 shuffle(GetParam() * 1000 + static_cast<uint32_t>(k));
                 std::shuffle(order.begin(), order.end(), shuffle);
             }
-            double glove = Accuracy(Config(GetParam(), true), order, test, passes, GetParam() + 50);
+            double glove = Accuracy(config, order, test, passes, GetParam() + 50);
             std::cout << "T1 SST-2 with word vectors seed " << GetParam() << ", order " << k + 1
                       << ": test accuracy " << glove << "\n";
             sum += glove;
