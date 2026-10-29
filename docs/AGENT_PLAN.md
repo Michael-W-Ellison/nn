@@ -1300,8 +1300,24 @@ in new orders) lower the result, as on Adult:
 | 3 | 0.794 | 0.803 |
 | 2, `text_dropout` 0.5, `text_word_dropout` 0.25 | 0.792 | 0.801 |
 
-T1 with GloVe therefore meets its criterion for the C++ test's order
-only.
+`ensemble_size` K (default 1) runs K complete agents (seeds `seed`,
+`seed` + 7919, ...; each with its own networks, pattern memory, replay
+buffer and training schedule) on the same observations and feedback and
+averages their predictions; it is not available with ACTION outputs or
+`memory_units`, each agent uses `memory_budget_bytes`, and training takes
+K times as long. A first version that kept K networks inside one agent
+(sharing its pattern memory, newest samples and training schedule) gave
+less (K = 4: min 0.807, mean 0.820). Six runs:
+
+| Agents | Min | Mean |
+|---|---|---|
+| 1 | 0.802 | 0.818 |
+| 4 | 0.817 | 0.824 |
+| 5 | 0.815 | 0.826 |
+
+With 4 or 5 agents five of the six runs pass; Python order seed 1 or 3
+stays at 0.815–0.817. T1 with GloVe therefore meets its criterion for the
+C++ test's order only (one agent; 4 and 5 agents also pass it there).
 
 Bag-of-words features are enough for T2a (the network learns the "not" ×
 adjective interaction); T2b and T3 need the word sequence.
