@@ -1422,7 +1422,7 @@ sequence (one GRU). With two GRUs and norm 10: S1 0.947–0.949, S3
 (scenarios included) passes.
 
 
-## Phase 11: predictor-guided settings search (plan)
+## Phase 11: predictor-guided settings search
 
 Goal: find out whether the agent can choose better settings for a task by
 learning, from settings it has tried, to predict which untried settings
@@ -1469,3 +1469,34 @@ seeds × 3 agent seeds, defaults over 3 agent seeds):
 
 Also reported: the best validation accuracy found after each number of
 trials (mean over search seeds) for both methods.
+
+**Results** (mean test accuracy; random and guided: 3 search seeds × 3
+agent seeds; defaults: 3 agent seeds):
+
+| | Defaults | Random | Guided | Guided − random | Guided − defaults |
+|---|---|---|---|---|---|
+| Adult | 0.8527 | 0.8540 | 0.8554 | +0.0014 | +0.0027 |
+| SMS | 0.9880 | 0.9870 | 0.9874 | +0.0004 | −0.0006 |
+
+G1 (guided against random) is **not met**: the guided search is not worse
+than random on either task, but its gain (Adult +0.0014) is below 0.002.
+G2 (guided against defaults) is **not met**: on SMS the chosen settings are
+0.0006 below the defaults.
+
+Best validation accuracy after n trials (mean over search seeds):
+
+| | 12 | 20 | 28 | 40 |
+|---|---|---|---|---|
+| Adult, random | 0.8544 | 0.8544 | 0.8554 | 0.8556 |
+| Adult, guided | 0.8544 | 0.8551 | 0.8551 | 0.8558 |
+| SMS, random | 0.9914 | 0.9936 | 0.9940 | 0.9940 |
+| SMS, guided | 0.9914 | 0.9922 | 0.9936 | 0.9936 |
+
+The predictor did not find good settings faster than random draws. The
+settings themselves matter little on these tasks: across all searches the
+best validation accuracy is within about 0.002 (Adult) and 0.003 (SMS) of
+the defaults' test accuracy, and on SMS the validation gains (0.994
+against the defaults' 0.988 test accuracy) did not carry over to the test
+rows. One choice recurs: `class_blend_sharpness` 25 in 9 of the 12 chosen
+settings (default 10).
+
