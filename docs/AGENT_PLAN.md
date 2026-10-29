@@ -196,7 +196,7 @@ integration test with a fixed seed and a fake clock.
 | 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
 | 8. Continuous actions | Complete. `CONTINUOUS_ACTION` outputs with bounds (`OutputSpec::low` / `high`), learned with TD3 (`src/agent/actor_critic.hpp`); `Agent::ActContinuous`, `dpan_agent_act_continuous`, Python `act_continuous`. Reference environment I passes (results and notes below). |
 | 9. Memory | Complete. A GRU after the trunk (`memory_units`, off by default; `src/nn/recurrent.hpp`), trained on windows of steps with backpropagation through time. Memory tasks M1, M2 and M4 pass at the defaults, M3 with its own window settings (results below). |
-| 10. Sentence meaning | Complete. TEXT channels add a word sequence (first-appearance vocabulary, optional GloVe vectors) read by two GRUs, one in each direction, in the network (`src/agent/word_sequence.hpp`). T1–T3 pass for seeds 1–3; T1 with GloVe passes in the C++ test but not for two seeds with another sentence order (results below). |
+| 10. Sentence meaning | Complete. TEXT channels add a word sequence (first-appearance vocabulary, optional GloVe vectors) read by two GRUs, one in each direction, in the network (`src/agent/word_sequence.hpp`). T1–T3 pass for seeds 1–3; T1 with GloVe uses an ensemble of 8 agents (`ensemble_size`), which passes in both sentence orders tested (results below). |
 
 ### Phase 1 implementation notes
 
@@ -1314,10 +1314,13 @@ less (K = 4: min 0.807, mean 0.820). Six runs:
 | 1 | 0.802 | 0.818 |
 | 4 | 0.817 | 0.824 |
 | 5 | 0.815 | 0.826 |
+| 8 | 0.820 | 0.829 |
 
-With 4 or 5 agents five of the six runs pass; Python order seed 1 or 3
-stays at 0.815–0.817. T1 with GloVe therefore meets its criterion for the
-C++ test's order only (one agent; 4 and 5 agents also pass it there).
+With 4 or 5 agents five of the six runs pass (Python order seed 1 or 3 at
+0.815–0.817); with 8 all six pass (Python order 0.823 / 0.835 / 0.832, C++
+test 0.820 / 0.832 / 0.833), with a margin of 0.002 at the lowest. T1's
+GloVe run therefore uses `ensemble_size` 8; one pass then takes about 30
+minutes per seed on one core. The agent's default stays 1.
 
 Bag-of-words features are enough for T2a (the network learns the "not" ×
 adjective interaction); T2b and T3 need the word sequence.

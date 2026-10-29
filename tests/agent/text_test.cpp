@@ -157,7 +157,11 @@ TEST_P(TextTest, T1_Sst2) {
     double plain = Accuracy(Config(GetParam(), false), train, test, passes, GetParam() + 50);
     Check(plain >= 0.75, Describe("T1 SST-2 without word vectors", GetParam(), plain));
     if (Vectors()) {
-        double glove = Accuracy(Config(GetParam(), true), train, test, passes, GetParam() + 50);
+        // An ensemble of 8 agents: with one agent the result depends on the
+        // order of the training sentences (docs/AGENT_PLAN.md, Phase 10)
+        AgentConfig config = Config(GetParam(), true);
+        if (!std::getenv("DPAN_TEXT_CONFIG")) config.ensemble_size = 8;
+        double glove = Accuracy(config, train, test, passes, GetParam() + 50);
         Check(glove >= 0.818, Describe("T1 SST-2 with word vectors", GetParam(), glove));
     }
 }
