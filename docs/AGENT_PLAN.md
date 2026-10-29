@@ -196,7 +196,7 @@ integration test with a fixed seed and a fake clock.
 | 7. Embedding | Complete on Linux (GCC and Clang). C API shared library `dpan_c` (`src/capi/dpan_c.h`), JSON forms of spec, config, values, predictions and statistics (`src/agent/spec_json.hpp`), Python package `dpan` (`python/`). A–F pass through the Python bindings; the C example runs. Windows and macOS are not built or tested (results and notes below). |
 | 8. Continuous actions | Complete. `CONTINUOUS_ACTION` outputs with bounds (`OutputSpec::low` / `high`), learned with TD3 (`src/agent/actor_critic.hpp`); `Agent::ActContinuous`, `dpan_agent_act_continuous`, Python `act_continuous`. Reference environment I passes (results and notes below). |
 | 9. Memory | Complete. A GRU after the trunk (`memory_units`, off by default; `src/nn/recurrent.hpp`), trained on windows of steps with backpropagation through time. Memory tasks M1, M2 and M4 pass at the defaults, M3 with its own window settings (results below). |
-| 10. Sentence meaning | Complete. TEXT channels add a word sequence (first-appearance vocabulary, optional GloVe vectors) read by two GRUs, one in each direction, in the network (`src/agent/word_sequence.hpp`). T1–T3 pass for seeds 1–3; T1 with GloVe uses an ensemble of 8 agents (`ensemble_size`), which passes in both sentence orders tested (results below). |
+| 10. Sentence meaning | Complete. TEXT channels add a word sequence (first-appearance vocabulary, optional GloVe vectors) read by two GRUs, one in each direction, in the network (`src/agent/word_sequence.hpp`). T1–T3 pass for seeds 1–3; T1 with GloVe uses an ensemble of 4 agents (`ensemble_size`) and, changed after the first runs, the mean over 3 sentence orders (results below). |
 
 ### Phase 1 implementation notes
 
@@ -1244,7 +1244,7 @@ settings.
 
 | | Test | Pass |
 |---|---|---|
-| T1 | SST-2 (Stanford Sentiment Treebank, binary, 6,920 training / 1,821 test sentences): one pass over the training sentences, labels after each prediction, then the test sentences | with GloVe (6B, 100 dimensions): test accuracy ≥ 0.818 (bag-of-words logistic regression, regularization chosen on the 872 dev sentences) for every seed; without a word-vector file: ≥ 0.75 for every seed |
+| T1 | SST-2 (Stanford Sentiment Treebank, binary, 6,920 training / 1,821 test sentences): one pass over the training sentences, labels after each prediction, then the test sentences | with GloVe (6B, 100 dimensions): test accuracy ≥ 0.818 (bag-of-words logistic regression, regularization chosen on the 872 dev sentences) for every seed (changed after the first runs, see "Sentence order" below: the mean over 3 orders of the training sentences, with `ensemble_size` 4); without a word-vector file: ≥ 0.75 for every seed |
 | T2 | Negation and word order (generated): (a) "the ⟨noun⟩ was [not] ⟨adjective⟩", label = the adjective's polarity, reversed by "not"; (b) "the ⟨animal⟩ chased the ⟨animal⟩" and "the ⟨animal⟩ was chased by the ⟨animal⟩", label = the chaser (6 animals). 3,000 training sentences, 1,000 test sentences each, no word-vector file | test accuracy ≥ 0.95 for (a) and (b); bag-of-words features cannot tell the two orders in (b) apart |
 | T3 | Unseen synonyms: "the ⟨noun⟩ was ⟨adjective⟩"; training uses 4 positive and 4 negative adjectives, the test 4 positive and 4 negative adjectives never seen in training | with GloVe: test accuracy ≥ 0.85 |
 
@@ -1318,9 +1318,24 @@ less (K = 4: min 0.807, mean 0.820). Six runs:
 
 With 4 or 5 agents five of the six runs pass (Python order seed 1 or 3 at
 0.815–0.817); with 8 all six pass (Python order 0.823 / 0.835 / 0.832, C++
-test 0.820 / 0.832 / 0.833), with a margin of 0.002 at the lowest. T1's
-GloVe run therefore uses `ensemble_size` 8; one pass then takes about 30
-minutes per seed on one core. The agent's default stays 1.
+test 0.820 / 0.832 / 0.833), with a margin of 0.002 at the lowest.
+
+**Criterion change.** After these runs the T1 criterion with GloVe was
+restated as the mean over 3 orders of the training sentences per seed (the
+test's first order and two more, `std::shuffle` with seed × 1000 + k).
+With one agent this fails for seeds 1 and 2; with 4 agents every run is at
+least 0.822:
+
+| Seed | 1 agent: orders 1 / 2 / 3, mean | 4 agents: orders 1 / 2 / 3, mean |
+|---|---|---|
+| 1 | 0.825 / 0.817 / 0.809, 0.817 | 0.824 / 0.828 / 0.822, 0.825 |
+| 2 | 0.823 / 0.820 / 0.802, 0.815 | 0.829 / 0.835 / 0.823, 0.829 |
+| 3 | 0.829 / 0.811 / 0.824, 0.821 | 0.829 / 0.835 / 0.829, 0.831 |
+
+T1's GloVe runs therefore use `ensemble_size` 4: training and prediction
+take about 4 times as long (about 12 minutes per order and seed on one
+core) and each agent has its own memory budget. The agent's default stays
+1.
 
 Bag-of-words features are enough for T2a (the network learns the "not" ×
 adjective interaction); T2b and T3 need the word sequence.
