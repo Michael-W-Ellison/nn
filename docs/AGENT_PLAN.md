@@ -1420,3 +1420,52 @@ SMS, S1 and S3 have TEXT inputs, so their "after" includes the word
 sequence (one GRU). With two GRUs and norm 10: S1 0.947–0.949, S3
 0.942–0.949, SMS 0.987–0.989 / 0.981–0.984 (1 / 3 passes). The full suite
 (scenarios included) passes.
+
+
+## Phase 11: predictor-guided settings search (plan)
+
+Goal: find out whether the agent can choose better settings for a task by
+learning, from settings it has tried, to predict which untried settings
+will do well, and whether that beats trying settings at random with the
+same number of trials.
+
+**Tasks and data.** Adult (income, tabular) and SMS Spam (text), with the
+splits of the real-world runs above. The search sees only the training
+rows, split again (fixed permutation, seed 0) into 80% search-training and
+20% validation rows; the test rows are used only for the final check. A
+candidate's score is its validation accuracy after one pass over the
+search-training rows (agent seed 1).
+
+**Search space** (both tasks; the last two for SMS only):
+`learning_rate` (log-uniform 3e-4 to 1e-2), `train_every` {2, 4, 8, 16},
+`batch_size` {32, 64, 128}, `min_trunk_width` {16, 32, 64, 128},
+`new_sample_share` {0.25, 0.5, 0.75}, `class_blend_sharpness` {0, 5, 10,
+25}, `neighbors` {3, 5, 10, 20}, `gradient_clip_norm` {1, 5, 20},
+`holdout_every` {0, 20}, `text_buckets` {256, 1024, 4096},
+`text_sequence_length` {0, 32}.
+
+**Methods** (40 trained candidates each, per task):
+
+- *Random:* 40 settings drawn at random.
+- *Predictor-guided:* the same first 12 random settings, then 7 rounds of
+  4. Each round a new agent (NUMERIC input: the settings scaled to [0, 1],
+  `learning_rate` on a log scale; VALUE output: validation accuracy;
+  `cold_start_samples` 5, `holdout_every` 0) is trained on all measured
+  settings (30 passes) and predicts 2,000 random untried settings; the 3
+  with the highest prediction and 1 random one are measured.
+
+Each method chooses the setting with the highest validation accuracy. Each
+search is repeated with 3 search seeds (different random settings). Each
+chosen setting, and the defaults, are then trained on all training rows
+(one pass, agent seeds 1–3) and scored on the test rows.
+
+**Criteria** (fixed before the first run; mean test accuracy over 3 search
+seeds × 3 agent seeds, defaults over 3 agent seeds):
+
+| | Pass |
+|---|---|
+| G1: guided against random | guided ≥ random − 0.001 on both tasks and ≥ random + 0.002 on at least one |
+| G2: guided against defaults | guided ≥ defaults + 0.002 on both tasks |
+
+Also reported: the best validation accuracy found after each number of
+trials (mean over search seeds) for both methods.
