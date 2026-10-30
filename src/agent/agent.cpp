@@ -45,6 +45,7 @@ void CheckConfig(const AgentConfig& c) {
             "trunk widths must satisfy 0 < min_trunk_width <= max_trunk_width");
     require(c.gradient_clip_norm >= 0.0f, "gradient_clip_norm must be >= 0");
     require(c.train_every > 0 && c.batch_size > 0, "train_every and batch_size must be > 0");
+    require(c.ensemble_size >= 1 && c.ensemble_size <= 16, "ensemble_size must be in [1, 16]");
     require(c.new_sample_share >= 0.0f && c.new_sample_share <= 1.0f, "new_sample_share must be in [0, 1]");
     require(c.replay_capacity > 0, "replay_capacity must be > 0");
     require(c.feedback_timeout > 0, "feedback_timeout must be > 0");
@@ -165,7 +166,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 13;
+constexpr uint32_t kCheckpointVersion = 15;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -265,6 +266,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.gradient_clip_norm);
     io::WriteSize(out, c.train_every);
     io::WriteSize(out, c.batch_size);
+    io::WriteSize(out, c.ensemble_size);
     io::Write<float>(out, c.new_sample_share);
     io::WriteSize(out, c.replay_capacity);
     io::WriteSize(out, c.cold_start_samples);
@@ -323,6 +325,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteString(out, c.encoder.text_word_vectors);
     io::Write<uint8_t>(out, c.encoder.train_word_vectors ? 1 : 0);
     io::Write<uint8_t>(out, c.encoder.text_bidirectional ? 1 : 0);
+    io::Write<uint8_t>(out, c.encoder.text_attention ? 1 : 0);
     io::Write<float>(out, c.encoder.text_word_vector_norm);
     io::Write<float>(out, c.encoder.text_word_dropout);
     io::Write<float>(out, c.encoder.text_dropout);
@@ -355,6 +358,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.gradient_clip_norm = io::Read<float>(in);
     c.train_every = io::ReadSize(in);
     c.batch_size = io::ReadSize(in);
+    c.ensemble_size = io::ReadSize(in, 16);
     c.new_sample_share = io::Read<float>(in);
     c.replay_capacity = io::ReadSize(in);
     c.cold_start_samples = io::ReadSize(in);
@@ -413,6 +417,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.encoder.text_word_vectors = io::ReadString(in, 1u << 16);
     c.encoder.train_word_vectors = io::Read<uint8_t>(in) != 0;
     c.encoder.text_bidirectional = io::Read<uint8_t>(in) != 0;
+    c.encoder.text_attention = io::Read<uint8_t>(in) != 0;
     c.encoder.text_word_vector_norm = io::Read<float>(in);
     c.encoder.text_word_dropout = io::Read<float>(in);
     c.encoder.text_dropout = io::Read<float>(in);
@@ -2677,6 +2682,16 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
     bool has_actions = std::any_of(spec.outputs.begin(), spec.outputs.end(), [](const OutputSpec& output) {
         return output.type == OutputType::ACTION || output.type == OutputType::CONTINUOUS_ACTION;
     });
+    if (config.ensemble_size > 1 && (has_actions || config.memory_units > 0)) {
+        throw std::invalid_argument("AgentConfig: ensemble_size > 1 is not supported with ACTION or "
+                                    "CONTINUOUS_ACTION outputs or with memory_units > 0");
+    }
+    for (size_t k = 1; k < config.ensemble_size; ++k) {
+        AgentConfig member = config;
+        member.ensemble_size = 1;
+        member.seed = config.seed + 7919 * static_cast<uint32_t>(k);
+        members_.push_back(std::make_unique<Agent>(spec, member));
+    }
     if (has_actions) {
         config.train_every = config.action_train_every;
         config.learning_rate = config.action_learning_rate;
@@ -2707,6 +2722,9 @@ StepId Agent::Observe(const Observation& observation) {
             stats = impl_->StatsLocked();
         }
     }
+    for (auto& member : members_) {
+        if (member->Observe(observation) != step) throw std::logic_error("Agent ensemble: step ids differ");
+    }
     if (hook) hook(stats);
     return step;
 }
@@ -2730,19 +2748,60 @@ bool AgentTestAccess::InjectNaN(Agent& agent) {
 }
 
 Prediction Agent::Predict(StepId step, const std::string& output) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    for (size_t i = 0; i < impl_->outputs.size(); ++i) {
-        if (impl_->outputs[i].spec->name == output) {
-            return impl_->PredictLocked(impl_->FindPending(step), i);
-        }
+    Prediction prediction;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto it = std::find_if(impl_->outputs.begin(), impl_->outputs.end(),
+                               [&](const auto& out) { return out.spec->name == output; });
+        if (it == impl_->outputs.end()) throw std::invalid_argument("Unknown output '" + output + "'");
+        prediction = impl_->PredictLocked(impl_->FindPending(step), static_cast<size_t>(it - impl_->outputs.begin()));
     }
-    throw std::invalid_argument("Unknown output '" + output + "'");
+    if (members_.empty()) return prediction;
+    // Ensemble: the mean over the agents that have a prediction
+    std::vector<Prediction> all{prediction};
+    for (const auto& member : members_) all.push_back(member->Predict(step, output));
+    std::vector<const Prediction*> available;
+    for (const auto& p : all) {
+        if (p.available) available.push_back(&p);
+    }
+    if (available.empty()) return prediction;
+    Prediction mean = *available.front();
+    const auto n = static_cast<float>(available.size());
+    auto average = [&](std::vector<float> Prediction::*field) {
+        std::vector<float>& to = mean.*field;
+        for (size_t i = 0; i < to.size(); ++i) {
+            double sum = 0.0;
+            for (const Prediction* p : available) sum += i < (p->*field).size() ? (p->*field)[i] : 0.0f;
+            to[i] = static_cast<float>(sum / n);
+        }
+    };
+    average(&Prediction::probabilities);
+    average(&Prediction::values);
+    float score = 0.0f, confidence = 0.0f, weight = 0.0f;
+    for (const Prediction* p : available) {
+        score += p->score / n;
+        confidence += p->confidence / n;
+        weight += p->neural_weight / n;
+    }
+    mean.score = score;
+    mean.neural_weight = weight;
+    mean.confidence = confidence;
+    if (mean.type == OutputType::CLASS && !mean.probabilities.empty()) {
+        auto best = static_cast<size_t>(std::max_element(mean.probabilities.begin(), mean.probabilities.end()) -
+                                        mean.probabilities.begin());
+        if (best < mean.classes.size()) mean.label = mean.classes[best];
+        mean.confidence = mean.probabilities[best];
+    }
+    return mean;
 }
 
 void Agent::Feedback(StepId step, const std::string& feedback, const Value& value) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->FeedbackLocked(step, feedback, value);
-    impl_->MaybeTrain();
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->FeedbackLocked(step, feedback, value);
+        impl_->MaybeTrain();
+    }
+    for (auto& member : members_) member->Feedback(step, feedback, value);
 }
 
 std::string Agent::Act(StepId step, const std::string& action_output, bool explore) {
@@ -2774,6 +2833,7 @@ std::vector<float> Agent::ActContinuous(StepId step, const std::string& action_o
 }
 
 void Agent::EndEpisode(bool terminal) {
+    for (auto& member : members_) member->EndEpisode(terminal);
     std::lock_guard<std::mutex> lock(impl_->mutex);
     Impl& m = *impl_;
     if (terminal && m.last_acted_step) {
@@ -2806,6 +2866,7 @@ void Agent::Save(std::ostream& out) const {
     SaveSpec(out, impl_->spec);
     SaveConfig(out, impl_->config);
     impl_->SaveState(out);
+    for (const auto& member : members_) member->Save(out);
     if (!out) throw std::runtime_error("Agent::Save: write failed");
 }
 
@@ -2846,6 +2907,7 @@ Agent Agent::Load(std::istream& in) {
     AgentConfig config = LoadConfig(in);
     Agent agent(std::move(spec), config);
     agent.impl_->LoadState(in);
+    for (auto& member : agent.members_) member = std::make_unique<Agent>(Load(in));
     return agent;
 }
 
@@ -2861,6 +2923,7 @@ const AgentConfig& Agent::Config() const { return impl_->config; }
 void Agent::SetClock(std::shared_ptr<const Clock> clock) { dpan::SetClock(std::move(clock)); }
 
 void Agent::SetLogger(Logger logger) {
+    for (auto& member : members_) member->SetLogger(logger);
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->logger = std::move(logger);
 }

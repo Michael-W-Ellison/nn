@@ -405,10 +405,13 @@ TEST(AgentNetworkTest, MemoryNetworkWidensCopiesAndSerializes) {
     EXPECT_THROW(network.Infer(x, 0, &x), std::invalid_argument);  // wrong state size
 }
 
-TEST(WordSequenceTest, GradientsMatchFiniteDifferences) {
+class WordSequenceTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(WordSequenceTest, GradientsMatchFiniteDifferences) {
+    const bool attention = GetParam();
     auto pretrained = std::make_shared<Matrix>(Matrix::FromRows({{0.5f, -0.2f, 0.1f}, {-0.3f, 0.4f, 0.2f}}));
-    WordSequenceModel model(4, 3, 0, 5, true, pretrained, false, 3);
-    EXPECT_EQ(2 * 2 * 5u + 3u, model.OutputSize());
+    WordSequenceModel model(4, 3, 0, 5, true, attention, pretrained, false, 3);
+    EXPECT_EQ((attention ? 2 * 5u : 2 * 2 * 5u) + 3u, model.OutputSize());
     // Rows: ids (2 pretrained, 3 learned + 1 shared): lengths 4, 2, 0
     Matrix ids = Matrix::FromRows({{1, 3, 4, 2}, {5, 6, 0, 0}, {0, 0, 0, 0}});
     std::mt19937 rng(4);
@@ -452,6 +455,9 @@ TEST(WordSequenceTest, GradientsMatchFiniteDifferences) {
     loaded.AttachPretrained(pretrained);
     EXPECT_EQ(out.Values(), loaded.Infer(ids).Values());
 }
+
+INSTANTIATE_TEST_SUITE_P(Pooling, WordSequenceTest, ::testing::Values(false, true),
+                         [](const auto& info) { return info.param ? "Attention" : "FinalAndMean"; });
 
 TEST(AgentNetworkTest, ReadsWordOrder) {
     // A TEXT channel of 4 features and 3 word ids: the class is which of
