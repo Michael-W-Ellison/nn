@@ -89,11 +89,14 @@ class ClassicControlTest(unittest.TestCase):
         dpan.use_system_clock()
 
     def _check(self, label, name, training_steps):
+        failed = []  # every seed runs before the test fails
         for seed in SEEDS:
             mean, random_mean, episodes, threshold = _play_control(name, training_steps, seed)
             print(f"{label} {name} seed {seed}: mean return {mean:.1f} over 100 greedy episodes "
                   f"(threshold {threshold}; random play {random_mean:.1f}; {episodes} training episodes)", flush=True)
-            self.assertGreaterEqual(mean, threshold, f"{label} seed {seed}")
+            if mean < threshold:
+                failed.append(seed)
+        self.assertEqual([], failed, f"{label}: seeds below the threshold")
 
     def test_c1_cart_pole(self):
         self._check("C1", "CartPole-v1", 300_000)
@@ -310,15 +313,16 @@ class BoardGameTest(unittest.TestCase):
         print("B1 baselines: random vs random wins %.3f losses %.3f; random vs minimax wins %.3f losses %.3f" % (
             *baseline(game, random_player, random_player, 1000, rng),
             *baseline(game, random_player, minimax_player, 200, rng)), flush=True)
+        failed = []
         for seed in SEEDS:
             agent, rng = self._train(game, (random_player, minimax_player), 30_000, seed)
             wins, losses = evaluate(game, agent, random_player, 1000, rng)
             m_wins, m_losses = evaluate(game, agent, minimax_player, 200, rng)
             print(f"B1 tic-tac-toe seed {seed}: against random wins {wins:.3f} losses {losses:.3f}; "
                   f"against minimax wins {m_wins:.3f} losses {m_losses:.3f}", flush=True)
-            self.assertLessEqual(losses, 0.01, f"B1 seed {seed}: losses against random")
-            self.assertGreaterEqual(wins, 0.80, f"B1 seed {seed}: wins against random")
-            self.assertLessEqual(m_losses, 0.05, f"B1 seed {seed}: losses against minimax")
+            if not (losses <= 0.01 and wins >= 0.80 and m_losses <= 0.05):
+                failed.append(seed)
+        self.assertEqual([], failed, "B1: seeds that do not pass")
 
     def test_b2_connect_four(self):
         game = ConnectFour
@@ -328,14 +332,16 @@ class BoardGameTest(unittest.TestCase):
                   *baseline(game, random_player, random_player, 1000, rng),
                   *baseline(game, random_player, rule_player, 1000, rng),
                   *baseline(game, rule_player, random_player, 1000, rng)), flush=True)
+        failed = []
         for seed in SEEDS:
             agent, rng = self._train(game, (random_player, rule_player), 50_000, seed)
             wins, losses = evaluate(game, agent, random_player, 1000, rng)
             r_wins, r_losses = evaluate(game, agent, rule_player, 1000, rng)
             print(f"B2 Connect Four seed {seed}: against random wins {wins:.3f} losses {losses:.3f}; "
                   f"against rule-based wins {r_wins:.3f} losses {r_losses:.3f}", flush=True)
-            self.assertGreaterEqual(wins, 0.95, f"B2 seed {seed}: wins against random")
-            self.assertGreaterEqual(r_wins, 0.50, f"B2 seed {seed}: wins against the rule-based opponent")
+            if not (wins >= 0.95 and r_wins >= 0.50):
+                failed.append(seed)
+        self.assertEqual([], failed, "B2: seeds that do not pass")
 
 
 if __name__ == "__main__":
