@@ -1500,3 +1500,46 @@ against the defaults' 0.988 test accuracy) did not carry over to the test
 rows. One choice recurs: `class_blend_sharpness` 25 in 9 of the 12 chosen
 settings (default 10).
 
+
+
+## Phase 12: games (plan)
+
+Goal: measure how well the agent learns to play games from rewards alone,
+with its ACTION outputs (Double DQN, default settings). Criteria fixed
+before the first run; seeds 1–3; every seed must pass. Tests:
+`python/tests/test_games.py`, run when `DPAN_GAMES` is set (the classic
+control games also need the `gymnasium` package; with
+`gymnasium[box2d]` for LunarLander).
+
+**Classic control** (Gymnasium; the observation as one NUMERIC input, one
+ACTION output, the game's reward as REWARD feedback, `EndEpisode(true)` when
+the game ends, `EndEpisode(false)` at the time limit). Training for a fixed
+number of steps with exploration; then 100 episodes without exploration
+(new game seeds). Pass: their mean return reaches Gymnasium's
+`reward_threshold` for the game.
+
+| | Game | Training steps | Pass: mean return of 100 greedy episodes |
+|---|---|---|---|
+| C1 | CartPole-v1 | 300,000 | ≥ 475 |
+| C2 | Acrobot-v1 | 200,000 | ≥ −100 |
+| C3 | MountainCar-v0 | 500,000 | ≥ −110 |
+| C4 | LunarLander-v3 | 600,000 | ≥ 200 |
+
+**Board games** (written in the test; the board from the agent's side as one
+NUMERIC input, +1 own stone, −1 the opponent's, 0 empty; one ACTION output
+per cell or column; reward +1 for a win, −1 for a loss, 0 otherwise, at the
+agent's move that ends the game or after the opponent's reply; a move to a
+full cell or column loses the game). The agent moves first in half of the
+games. Opponents: *random* (a random legal move) and a rule-based one
+(tic-tac-toe: perfect play by minimax; Connect Four: win if it can, else
+block the agent's immediate win, else a random legal move). Training games
+alternate between the two opponents.
+
+| | Game | Training games | Pass (games without exploration) |
+|---|---|---|---|
+| B1 | Tic-tac-toe | 30,000 | against random (1,000 games): losses ≤ 1% and wins ≥ 85%; against minimax (200 games): losses ≤ 5% |
+| B2 | Connect Four (6 × 7) | 50,000 | against random (1,000 games): wins ≥ 95%; against the rule-based opponent (1,000 games): wins ≥ 50% |
+
+Reported for comparison: a random player's mean return in each classic
+control game, and random and rule-based players against each other in the
+board games.
