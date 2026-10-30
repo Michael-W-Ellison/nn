@@ -2748,7 +2748,8 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
         config.memory_window = config.action_memory_window;
         config.memory_batch = config.action_memory_batch;
     }
-    if (std::any_of(spec.outputs.begin(), spec.outputs.end(),
+    if (config.memory_units == 0 &&
+        std::any_of(spec.outputs.begin(), spec.outputs.end(),
                     [](const OutputSpec& output) { return output.type == OutputType::ACTION; })) {
         config.replay_capacity = config.action_replay_capacity;
     }

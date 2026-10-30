@@ -77,7 +77,7 @@ struct AgentConfig {
     // learning_rate and min_trunk_width: learning from rewards needs more
     // updates per observation and a smaller, steadier step
     size_t action_train_every{1};
-    size_t action_replay_capacity{200000};  ///< Replaces replay_capacity when the spec has ACTION outputs
+    size_t action_replay_capacity{200000};  ///< Replaces replay_capacity with ACTION outputs and memory_units 0
     float action_learning_rate{2e-4f};
     size_t action_min_trunk_width{64};
     size_t action_return_steps{3};       ///< Rewards summed before bootstrapping (multi-step returns)

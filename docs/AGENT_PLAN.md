@@ -1596,8 +1596,9 @@ tic-tac-toe passes.
    The last but one is the only setting whose mean over the three seeds
    reaches the threshold in all three games. The Huber loss was already in
    use. Adopted: a new setting `action_replay_capacity` (default 200,000)
-   replaces `replay_capacity` when the spec has ACTION outputs (agents
-   without them keep 50,000). `target_sync` 1000 as the default made
+   replaces `replay_capacity` when the spec has ACTION outputs and
+   `memory_units` is 0 (other agents keep 50,000; with 200,000, memory task
+   M3 was not solved in 2,000 episodes, with 50,000 it passes). `target_sync` 1000 as the default made
    reference E (64 of 100 shortest paths in C++, 78 in Python; needs 95)
    and Python F (best average 182.7; needs 195) fail, so the default stays
    500 and C1–C4 set `target_sync` 1000 in the test. Checkpoint version 17.
