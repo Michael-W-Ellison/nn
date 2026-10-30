@@ -71,4 +71,20 @@ if(DPAN_BUILD_TESTS)
         endif()
     endforeach()
     set_tests_properties(python.test_api PROPERTIES LABELS python)
+    # Games (Phase 12): skipped unless DPAN_GAMES is set; label "games"
+    foreach(test c1_cart_pole c2_acrobot c3_mountain_car c4_lunar_lander)
+        add_test(NAME python.games.${test}
+                 COMMAND ${Python_EXECUTABLE} -m unittest -v test_games.ClassicControlTest.test_${test}
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    endforeach()
+    foreach(test b1_tic_tac_toe b2_connect_four)
+        add_test(NAME python.games.${test}
+                 COMMAND ${Python_EXECUTABLE} -m unittest -v test_games.BoardGameTest.test_${test}
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    endforeach()
+    foreach(test c1_cart_pole c2_acrobot c3_mountain_car c4_lunar_lander b1_tic_tac_toe b2_connect_four)
+        set_tests_properties(python.games.${test} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 14400 LABELS "python;games")
+    endforeach()
 endif()

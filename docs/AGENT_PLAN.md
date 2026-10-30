@@ -1537,9 +1537,15 @@ alternate between the two opponents.
 
 | | Game | Training games | Pass (games without exploration) |
 |---|---|---|---|
-| B1 | Tic-tac-toe | 30,000 | against random (1,000 games): losses ≤ 1% and wins ≥ 85%; against minimax (200 games): losses ≤ 5% |
+| B1 | Tic-tac-toe | 30,000 | against random (1,000 games): losses ≤ 1% and wins ≥ 80%; against minimax (200 games): losses ≤ 5% |
 | B2 | Connect Four (6 × 7) | 50,000 | against random (1,000 games): wins ≥ 95%; against the rule-based opponent (1,000 games): wins ≥ 50% |
 
 Reported for comparison: a random player's mean return in each classic
 control game, and random and rule-based players against each other in the
 board games.
+
+B1's win threshold against random play was first 85%. Before any agent run,
+the baselines showed that minimax (perfect play, a random choice among
+equally good moves) wins 85% of 500 games against random play, so the
+threshold was lowered to 80%: 85% would have required beating perfect play
+or matching it within sampling noise.
