@@ -84,6 +84,7 @@ void CheckConfig(const AgentConfig& c) {
     require(c.target_sync > 0, "target_sync must be > 0");
     require(c.action_return_steps > 0, "action_return_steps must be > 0");
     require(c.action_train_every > 0, "action_train_every must be > 0");
+    require(c.action_replay_capacity > 0, "action_replay_capacity must be > 0");
     require(c.action_learning_rate >= c.min_learning_rate, "action_learning_rate must be >= min_learning_rate");
     require(c.exploration_start >= 0.0f && c.exploration_start <= 1.0f && c.exploration_end >= 0.0f &&
                 c.exploration_end <= c.exploration_start,
@@ -167,7 +168,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 16;
+constexpr uint32_t kCheckpointVersion = 17;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -276,6 +277,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.plateau_patience);
     io::Write<float>(out, c.plateau_factor);
     io::WriteSize(out, c.action_train_every);
+    io::WriteSize(out, c.action_replay_capacity);
     io::Write<float>(out, c.action_learning_rate);
     io::WriteSize(out, c.action_min_trunk_width);
     io::WriteSize(out, c.action_return_steps);
@@ -370,6 +372,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.plateau_patience = io::ReadSize(in);
     c.plateau_factor = io::Read<float>(in);
     c.action_train_every = io::ReadSize(in);
+    c.action_replay_capacity = io::ReadSize(in);
     c.action_learning_rate = io::Read<float>(in);
     c.action_min_trunk_width = io::ReadSize(in);
     c.action_return_steps = io::ReadSize(in);
@@ -2744,6 +2747,10 @@ Agent::Agent(EnvironmentSpec spec, AgentConfig config) {
                                           std::max(config.min_trunk_width, config.action_min_trunk_width));
         config.memory_window = config.action_memory_window;
         config.memory_batch = config.action_memory_batch;
+    }
+    if (std::any_of(spec.outputs.begin(), spec.outputs.end(),
+                    [](const OutputSpec& output) { return output.type == OutputType::ACTION; })) {
+        config.replay_capacity = config.action_replay_capacity;
     }
 
     impl_ = std::make_unique<Impl>(std::move(spec), config);

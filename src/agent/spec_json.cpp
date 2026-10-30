@@ -196,6 +196,7 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, plateau_patience),
         DPAN_FIELD(AgentConfig, plateau_factor),
         DPAN_FIELD(AgentConfig, action_train_every),
+        DPAN_FIELD(AgentConfig, action_replay_capacity),
         DPAN_FIELD(AgentConfig, action_learning_rate),
         DPAN_FIELD(AgentConfig, action_min_trunk_width),
         DPAN_FIELD(AgentConfig, action_return_steps),
