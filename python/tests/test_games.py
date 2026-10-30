@@ -1,5 +1,6 @@
 """Games (docs/AGENT_PLAN.md, Phase 12): the agent learns to play from
-rewards alone with its ACTION outputs and the default config.
+rewards alone with its ACTION outputs. C1-C4 use target_sync 1000 (chosen on
+tuning seeds 11-13); everything else is the default config.
 
 Run when DPAN_GAMES is set; C1-C4 also need the gymnasium package
 (gymnasium[box2d] for LunarLander). DPAN_GAMES_SEEDS (default "1,2,3")
@@ -23,14 +24,17 @@ except ImportError:  # C1-C4 are skipped
 RUN = os.environ.get("DPAN_GAMES") is not None
 SEEDS = [int(s) for s in os.environ.get("DPAN_GAMES_SEEDS", "1,2,3").split(",")]
 CONFIG = json.loads(os.environ.get("DPAN_GAMES_CONFIG", "{}"))
+# Chosen for C1-C4 on seeds 11-13 (docs/AGENT_PLAN.md, Phase 12); the default
+# (500) suits short tasks such as reference environments E and F
+CONTROL_CONFIG = {"target_sync": 1000}
 
 
-def _agent(inputs, actions, seed):
+def _agent(inputs, actions, seed, config=None):
     return dpan.Agent({
         "inputs": [{"name": "state", "type": "numeric", "size": inputs}],
         "feedback": [{"name": "reward", "type": "reward", "output": "move"}],
         "outputs": [{"name": "move", "type": "action", "actions": [str(a) for a in range(actions)]}],
-    }, {**CONFIG, "seed": seed})
+    }, {**(config or {}), **CONFIG, "seed": seed})
 
 
 # ----------------------------------------------------------------------
@@ -40,7 +44,7 @@ def _play_control(name, training_steps, seed):
     """Train for `training_steps` exploring steps; return the mean return of
     100 greedy episodes and of 100 random-policy episodes"""
     env = gymnasium.make(name)
-    agent = _agent(env.observation_space.shape[0], env.action_space.n, seed)
+    agent = _agent(env.observation_space.shape[0], env.action_space.n, seed, CONTROL_CONFIG)
     steps, episode = 0, 0
     while steps < training_steps:
         obs, _ = env.reset(seed=seed * 1_000_000 + episode)

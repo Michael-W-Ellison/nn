@@ -82,7 +82,7 @@ struct AgentConfig {
     size_t action_min_trunk_width{64};
     size_t action_return_steps{3};       ///< Rewards summed before bootstrapping (multi-step returns)
     float discount{0.99f};               ///< Weight of future rewards
-    size_t target_sync{1000};             ///< Training steps between target network copies
+    size_t target_sync{500};             ///< Training steps between target network copies
     float exploration_start{1.0f};       ///< Probability of a random action at first...
     float exploration_end{0.05f};        ///< ...falling linearly to this
     size_t exploration_steps{10000};     ///< ...over this many exploring Act calls per output
