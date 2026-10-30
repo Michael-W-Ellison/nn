@@ -45,6 +45,7 @@ void CheckConfig(const AgentConfig& c) {
             "trunk widths must satisfy 0 < min_trunk_width <= max_trunk_width");
     require(c.gradient_clip_norm >= 0.0f, "gradient_clip_norm must be >= 0");
     require(c.train_every > 0 && c.batch_size > 0, "train_every and batch_size must be > 0");
+    require(c.action_best_episodes > 0, "action_best_episodes must be > 0");
     require(c.ensemble_size >= 1 && c.ensemble_size <= 16, "ensemble_size must be in [1, 16]");
     require(c.new_sample_share >= 0.0f && c.new_sample_share <= 1.0f, "new_sample_share must be in [0, 1]");
     require(c.replay_capacity > 0, "replay_capacity must be > 0");
@@ -166,7 +167,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 15;
+constexpr uint32_t kCheckpointVersion = 16;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -283,6 +284,8 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::Write<float>(out, c.exploration_start);
     io::Write<float>(out, c.exploration_end);
     io::WriteSize(out, c.exploration_steps);
+    io::Write<uint8_t>(out, c.action_keep_best ? 1 : 0);
+    io::WriteSize(out, c.action_best_episodes);
     io::Write<uint8_t>(out, c.detect_drift ? 1 : 0);
     io::Write<double>(out, c.drift_delta);
     io::Write<double>(out, c.drift_threshold);
@@ -375,6 +378,8 @@ AgentConfig LoadConfig(std::istream& in) {
     c.exploration_start = io::Read<float>(in);
     c.exploration_end = io::Read<float>(in);
     c.exploration_steps = io::ReadSize(in);
+    c.action_keep_best = io::Read<uint8_t>(in) != 0;
+    c.action_best_episodes = io::ReadSize(in);
     c.detect_drift = io::Read<uint8_t>(in) != 0;
     c.drift_delta = io::Read<double>(in);
     c.drift_threshold = io::Read<double>(in);
@@ -744,7 +749,7 @@ struct Agent::Impl {
     /// target network and the rollback snapshot
     size_t ModelBytes() const {
         size_t parameters = (network ? network->ParameterCount() : 0) + (autoencoder ? autoencoder->ParameterCount() : 0);
-        size_t copies = 2 + (target_network ? 1 : 0);  // live + snapshot (+ target)
+        size_t copies = 2 + (target_network ? 1 : 0) + (target_network && config.action_keep_best ? 1 : 0);  // live + snapshot (+ target, best)
         size_t bytes = parameters * 4 * sizeof(float) * copies + word_vector_bytes;
         // Actor-critics: live, target and snapshot copies
         for (const auto& ac : actor_critics) bytes += ac->ParameterCount() * 4 * sizeof(float) * 3;
@@ -1138,6 +1143,26 @@ struct Agent::Impl {
 
     bool HasMemory() const { return network && network->MemoryUnits() > 0; }
 
+    /// action_keep_best: the mean return of the last episodes; copy the
+    /// network when it is the best so far
+    void EndActionEpisode() {
+        if (config.action_keep_best && episode_explored && target_network && !HasMemory()) {
+            episode_returns.push_back(episode_return);
+            if (episode_returns.size() > config.action_best_episodes) episode_returns.pop_front();
+            if (episode_returns.size() == config.action_best_episodes) {
+                double mean = 0.0;
+                for (double r : episode_returns) mean += r;
+                mean /= static_cast<double>(episode_returns.size());
+                if (mean > best_return) {
+                    best_return = mean;
+                    best_network = std::make_unique<AgentNetwork>(*network);
+                }
+            }
+        }
+        episode_return = 0.0;
+        episode_explored = false;
+    }
+
     /// TEXT word ids in the fused vector (offset, count): not quantities, so
     /// the pattern memory, the anomaly autoencoder and TD3 do not see them
     void FindWordIds() {
@@ -1222,16 +1247,18 @@ struct Agent::Impl {
     }
 
     /// Q-values once the head is past the cold start
-    std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out) const {
+    std::optional<std::vector<float>> NeuralQ(const Pending& entry, const OutputState& out, bool best = false) const {
         if (!network || out.samples < config.cold_start_samples) return std::nullopt;
+        if (best && best_network) return best_network->Infer(FusedRow(entry), static_cast<size_t>(out.head)).Row(0);
         return HeadOutputs(entry, static_cast<size_t>(out.head)).Row(0);
     }
 
     /// Highest Q-value; ties (and the cold start) decided by association
     /// strength; remaining ties by `rng` if given, else the first action
-    size_t GreedyAction(const Pending& entry, const OutputState& out, std::mt19937* tie_rng) const {
+    /// `use_best`: with the kept best network, if there is one
+    size_t GreedyAction(const Pending& entry, const OutputState& out, std::mt19937* tie_rng, bool use_best = false) const {
         const size_t n = out.classes.size();
-        auto q = NeuralQ(entry, out);
+        auto q = NeuralQ(entry, out, use_best);
         auto strengths = patterns->ActionStrengths(entry.pattern, out.action_ids);
         std::vector<size_t> candidates;
         if (q) {
@@ -1262,14 +1289,17 @@ struct Agent::Impl {
         if (existing != entry.actions.end()) return out.classes[existing->second];
 
         float epsilon = Exploration(out);
-        if (explore) out.acts++;
+        if (explore) {
+            out.acts++;
+            episode_explored = true;
+        }
         size_t action;
         std::uniform_real_distribution<float> unit(0.0f, 1.0f);
         bool random = !entry.encoded || (explore && unit(rng) < epsilon);
         if (random) {
             action = std::uniform_int_distribution<size_t>(0, out.classes.size() - 1)(rng);
         } else {
-            action = GreedyAction(entry, out, &rng);
+            action = GreedyAction(entry, out, &rng, !explore);
         }
         entry.actions[index] = action;
         if (entry.encoded) {
@@ -1354,6 +1384,7 @@ struct Agent::Impl {
 
     void LearnReward(Pending& entry, OutputState& out, size_t index, float reward) {
         size_t action = entry.actions.at(index);
+        episode_return += reward;
         entry.sample->targets[static_cast<size_t>(out.head)].reward += reward;
         patterns->ReinforceAction(entry.pattern, out.action_ids[action], reward);
         if (entry.transition_complete) MakeTrainable(entry.sample);
@@ -2274,7 +2305,7 @@ struct Agent::Impl {
         // Models
         io::Write<uint8_t>(out, patterns ? 1 : 0);
         if (patterns) {
-            for (const AgentNetwork* n : {network.get(), target_network.get(), snapshot_network.get()}) {
+            for (const AgentNetwork* n : {network.get(), target_network.get(), snapshot_network.get(), best_network.get()}) {
                 io::Write<uint8_t>(out, n ? 1 : 0);
                 if (n) n->Serialize(out);
             }
@@ -2351,6 +2382,10 @@ struct Agent::Impl {
         io::WriteSize(out, plateau_checks);
         SaveOptional(out, previous_step);
         SaveOptional(out, last_acted_step);
+        io::Write<double>(out, best_return);
+        WriteVector(out, std::vector<double>(episode_returns.begin(), episode_returns.end()));
+        io::Write<double>(out, episode_return);
+        io::Write<uint8_t>(out, episode_explored ? 1 : 0);
         WriteVector(out, std::vector<float>(pattern_baseline.begin(), pattern_baseline.end()));
         WriteVector(out, std::vector<float>(neural_baseline.begin(), neural_baseline.end()));
         for (uint64_t v : {anomaly_samples, steps, feedback_count, ignored_feedback, training_steps, episodes,
@@ -2400,7 +2435,7 @@ struct Agent::Impl {
             if (!encoder.Ready()) throw std::runtime_error("Agent checkpoint: models without known input sizes");
             auto heads = PrepareLayout();
             const auto layout = encoder.Layout();
-            for (auto* n : {&network, &target_network, &snapshot_network}) {
+            for (auto* n : {&network, &target_network, &snapshot_network, &best_network}) {
                 *n = io::Read<uint8_t>(in) ? AgentNetwork::Deserialize(in) : nullptr;
                 if (*n) (*n)->AttachWordVectors(layout);
             }
@@ -2506,6 +2541,11 @@ struct Agent::Impl {
         plateau_checks = io::ReadSize(in);
         previous_step = LoadOptional(in);
         last_acted_step = LoadOptional(in);
+        best_return = io::Read<double>(in);
+        auto returns = ReadVector<double>(in);
+        episode_returns.assign(returns.begin(), returns.end());
+        episode_return = io::Read<double>(in);
+        episode_explored = io::Read<uint8_t>(in) != 0;
         auto baseline = ReadVector<float>(in);
         pattern_baseline.assign(baseline.begin(), baseline.end());
         baseline = ReadVector<float>(in);
@@ -2602,6 +2642,11 @@ struct Agent::Impl {
 
     std::unique_ptr<AgentNetwork> network;
     std::unique_ptr<AgentNetwork> target_network;  // ACTION heads (Double DQN)
+    std::unique_ptr<AgentNetwork> best_network;    // ACTION: kept for greedy Act (action_keep_best)
+    double best_return{-std::numeric_limits<double>::infinity()};
+    std::deque<double> episode_returns;  // of the last action_best_episodes exploring episodes
+    double episode_return{0.0};          // rewards of ACTION outputs in this episode
+    bool episode_explored{false};        // an exploring Act call in this episode
     std::unique_ptr<AgentNetwork> snapshot_network;          // last healthy weights
     std::unique_ptr<AnomalyAutoencoder> snapshot_autoencoder;
     uint64_t last_snapshot{0};
@@ -2843,6 +2888,7 @@ void Agent::EndEpisode(bool terminal) {
             m.CompleteTransition(*last);
         }
     }
+    m.EndActionEpisode();
     m.encoder.ResetEpisode();
     m.previous_step.reset();
     m.memory_state.clear();

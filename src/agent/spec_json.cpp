@@ -204,6 +204,8 @@ const std::vector<FieldEntry<AgentConfig>>& AgentFields() {
         DPAN_FIELD(AgentConfig, exploration_start),
         DPAN_FIELD(AgentConfig, exploration_end),
         DPAN_FIELD(AgentConfig, exploration_steps),
+        DPAN_FIELD(AgentConfig, action_keep_best),
+        DPAN_FIELD(AgentConfig, action_best_episodes),
         DPAN_FIELD(AgentConfig, continuous_hidden),
         DPAN_FIELD(AgentConfig, continuous_actor_learning_rate),
         DPAN_FIELD(AgentConfig, continuous_critic_learning_rate),

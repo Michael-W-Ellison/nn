@@ -3,10 +3,11 @@ rewards alone with its ACTION outputs and the default config.
 
 Run when DPAN_GAMES is set; C1-C4 also need the gymnasium package
 (gymnasium[box2d] for LunarLander). DPAN_GAMES_SEEDS (default "1,2,3")
-selects the seeds. Each test prints its results and the random (and
-rule-based) baselines.
+selects the seeds; DPAN_GAMES_CONFIG (JSON) changes agent settings. Each
+test prints its results and the random (and rule-based) baselines.
 """
 
+import json
 import os
 import unittest
 
@@ -21,6 +22,7 @@ except ImportError:  # C1-C4 are skipped
 
 RUN = os.environ.get("DPAN_GAMES") is not None
 SEEDS = [int(s) for s in os.environ.get("DPAN_GAMES_SEEDS", "1,2,3").split(",")]
+CONFIG = json.loads(os.environ.get("DPAN_GAMES_CONFIG", "{}"))
 
 
 def _agent(inputs, actions, seed):
@@ -28,7 +30,7 @@ def _agent(inputs, actions, seed):
         "inputs": [{"name": "state", "type": "numeric", "size": inputs}],
         "feedback": [{"name": "reward", "type": "reward", "output": "move"}],
         "outputs": [{"name": "move", "type": "action", "actions": [str(a) for a in range(actions)]}],
-    }, {"seed": seed})
+    }, {**CONFIG, "seed": seed})
 
 
 # ----------------------------------------------------------------------

@@ -85,6 +85,13 @@ struct AgentConfig {
     float exploration_start{1.0f};       ///< Probability of a random action at first...
     float exploration_end{0.05f};        ///< ...falling linearly to this
     size_t exploration_steps{10000};     ///< ...over this many exploring Act calls per output
+    /// ACTION outputs: Act(explore = false) uses a copy of the network taken
+    /// when the mean return of the last action_best_episodes episodes with
+    /// exploring Act calls (rewards summed between EndEpisode calls) was the
+    /// highest so far; exploring Act, Predict and training use the live
+    /// network. Not with memory_units > 0.
+    bool action_keep_best{true};
+    size_t action_best_episodes{50};
 
     // Continuous actions (TD3). The actor and two critics read the fused
     // state; actions are scaled to [-1, 1] inside, to each output's bounds
