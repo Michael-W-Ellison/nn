@@ -1569,3 +1569,53 @@ CartPole seed 1 300,000 training steps took 10,428 episodes (29 steps each),
 so the policy was poor through much of the training as well. Only
 tic-tac-toe passes.
 
+**Two changes after these results.**
+
+1. *Keep the best policy* (`action_keep_best`, default true;
+   `action_best_episodes`, default 50): `Act` without exploration uses a
+   copy of the network taken when the mean return of the last 50 episodes
+   with exploration was highest. Not with `memory_units`. The copy is in
+   checkpoints.
+2. *Action settings chosen on the games.* Tuning runs used seeds 11–13 (not
+   the test seeds) and C1, C2 and C4, with keep-best on. Mean return of 100
+   greedy episodes, seeds 11 / 12 / 13:
+
+   | Settings | CartPole | Acrobot | LunarLander |
+   |---|---|---|---|
+   | defaults | 213 / 304 / 500 | −499 / −90 / −97 | 210 / 132 / 269 |
+   | `target_sync` 2000 | 496 / 500 / 488 | −86 / −500 / −91 | 175 / 139 / 124 |
+   | `action_learning_rate` 0.0005 | 327 / 259 / 148 | −101 / −83 / −500 | 211 / 234 / 233 |
+   | `action_learning_rate` 0.0001 | 86 / 500 / 217 | −500 / −90 / −106 | 258 / 220 / 213 |
+   | `replay_capacity` 200,000 | 495 / 422 / 422 | −497 / −85 / −95 | 214 / 191 / 237 |
+   | `exploration_steps` 50,000 | 492 / 92 / 500 | −115 / −88 / −500 | 216 / 218 / 77 |
+   | `target_sync` 2000, rate 0.0001 | 495 / 482 / 252 | −500 / −88 / −120 | 244 / 215 / 196 |
+   | `target_sync` 1000 | 204 / 194 / 500 | −106 / −88 / −87 | 251 / 244 / 192 |
+   | **`target_sync` 1000, replay 200,000** | 467 / 500 / 500 | −113 / −88 / −80 | 278 / 272 / 230 |
+   | replay 200,000, rate 0.0001 | 86 / 500 / 500 | −500 / −99 / −370 | 234 / 248 / 243 |
+
+   The last but one is the only setting whose mean over the three seeds
+   reaches the threshold in all three games. The Huber loss was already in
+   use. Adopted: a new setting `action_replay_capacity` (default 200,000)
+   replaces `replay_capacity` when the spec has ACTION outputs (agents
+   without them keep 50,000). `target_sync` 1000 as the default made
+   reference E (64 of 100 shortest paths in C++, 78 in Python; needs 95)
+   and Python F (best average 182.7; needs 195) fail, so the default stays
+   500 and C1–C4 set `target_sync` 1000 in the test. Checkpoint version 17.
+
+**Results after the two changes** (seeds 1 / 2 / 3):
+
+| | Game | Pass | Result |
+|---|---|---|---|
+| C1 | CartPole-v1 | ≥ 475 | 500.0 / 309.5 / 327.2 (**not met** at seeds 2 and 3) |
+| C2 | Acrobot-v1 | ≥ −100 | −84.9 / −89.8 / −91.8 (pass) |
+| C3 | MountainCar-v0 | ≥ −110 | −195.5 / −187.6 / −199.3 (**not met**) |
+| C4 | LunarLander-v3 | ≥ 200 | 213.4 / 229.8 / 244.8 (pass) |
+| B1 | Tic-tac-toe | see above | against random wins 0.941 / 0.919 / 0.930, losses 0.012 / 0.027 / 0.006; against minimax losses 0.045 / 0.155 / 0.020 (**not met** at seeds 1 and 2) |
+| B2 | Connect Four | see above | against random wins 0.969 / 0.960 / 0.952; against the rule-based opponent wins 0.526 / 0.550 / 0.488 (**not met** at seed 3) |
+
+C2 and C4 now pass, C1 and B2 are closer, and MountainCar's greedy episodes
+reach the goal in a few cases. B1 no longer passes. Undoing one change at a
+time does not restore it: without keep-best, seed 2 loses 0.010 against
+random and 0.060 against minimax; with `action_replay_capacity` 50,000,
+seed 2 loses 0.018 and 0.110. Before the changes B1 passed with small
+margins (seed 2: 0.009 and 0.050).
