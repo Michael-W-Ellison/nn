@@ -1502,7 +1502,7 @@ settings (default 10).
 
 
 
-## Phase 12: games (plan)
+## Phase 12: games
 
 Goal: measure how well the agent learns to play games from rewards alone,
 with its ACTION outputs (Double DQN, default settings). Criteria fixed
@@ -1549,3 +1549,23 @@ the baselines showed that minimax (perfect play, a random choice among
 equally good moves) wins 85% of 500 games against random play, so the
 threshold was lowered to 80%: 85% would have required beating perfect play
 or matching it within sampling noise.
+
+**Results** (seeds 1 / 2 / 3; default settings):
+
+| | Game | Pass | Result | Random play |
+|---|---|---|---|---|
+| C1 | CartPole-v1 | ≥ 475 | 34.9 / 294.3 / 106.8 (**not met**) | 20.9–23.5 |
+| C2 | Acrobot-v1 | ≥ −100 | −89.5 / −495.2 / −82.4 (**not met** at seed 2) | −496.9 to −499.5 |
+| C3 | MountainCar-v0 | ≥ −110 | −200.0 / −200.0 / −200.0 (**not met**) | −200.0 |
+| C4 | LunarLander-v3 | ≥ 200 | 115.6 / 185.1 / 40.1 (**not met**) | −188.8 to −194.3 |
+| B1 | Tic-tac-toe | see above | against random wins 0.942 / 0.939 / 0.931, losses 0.010 / 0.009 / 0.007; against minimax losses 0.045 / 0.050 / 0.020 (pass) | random against random: wins 0.474, losses 0.409 |
+| B2 | Connect Four | see above | against random wins 0.947 / 0.922 / 0.927 (**not met**); against the rule-based opponent wins 0.532 / 0.422 / 0.484 (**not met** at seeds 2 and 3) | rule-based against random: wins 0.965 |
+
+The agent learns something in every game but MountainCar (all greedy
+episodes reach the 200-step limit: the car never reached the goal, whose
+reward is the only signal). The results vary strongly between seeds
+(CartPole 34.9 to 294.3; Acrobot −495.2 against −82.4 and −89.5), and in
+CartPole seed 1 300,000 training steps took 10,428 episodes (29 steps each),
+so the policy was poor through much of the training as well. Only
+tic-tac-toe passes.
+
