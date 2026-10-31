@@ -1620,3 +1620,33 @@ time does not restore it: without keep-best, seed 2 loses 0.010 against
 random and 0.060 against minimax; with `action_replay_capacity` 50,000,
 seed 2 loses 0.018 and 0.110. Before the changes B1 passed with small
 margins (seed 2: 0.009 and 0.050).
+
+**B1 investigation.** On seeds 1–10 (wins against random ≥ 0.80 throughout;
+mean losses against random / against minimax):
+
+| Settings | Seeds passing | Mean losses |
+|---|---|---|
+| keep-best off, `action_replay_capacity` 50,000 (before the changes) | 5 | 0.0104 / 0.0385 |
+| keep-best on, 50,000 | 4 | 0.0176 / 0.0605 |
+| keep-best off, 200,000 | 4 | 0.0129 / 0.0540 |
+| keep-best on, 200,000 (current defaults) | 1 | 0.0227 / 0.0765 |
+| `action_best_episodes` 500, 50,000 | 5 | 0.0118 / 0.0380 |
+| `action_best_episodes` 500, 200,000 | 4 | 0.0156 / 0.0575 |
+| `action_best_margin` 1 | 0 | 0.0383 / 0.1860 |
+| `action_best_margin` 2 | 0 | 0.0612 / 0.2480 |
+
+The training return in tic-tac-toe rises until the last game (seed 2, by
+5,000-game block: −0.52, 0.12, 0.23, 0.27, 0.27, 0.29), but the mean of 50
+games varies by about ±0.065, more than the late improvement. The highest
+50-game mean (0.44–0.50) is therefore a lucky window at a nearly arbitrary
+point (games 12,745 to 29,884), and the copy misses what was learned
+afterwards; the two worst seeds have the earliest copies (2: game 12,745;
+4: game 14,953).
+
+`action_best_margin` (default 0) replaces the copy only when the new mean is
+higher by that many standard errors of the difference of the two means. It
+makes B1 worse: the first high window sets the bar, later windows rarely
+exceed it by the margin, and the copy is older (seed 2: game 7,129 with
+margin 1; seed 1: game 14,547 with margin 1, 5,477 with margin 2). A 500-game
+window instead removes keep-best's effect on B1. The 200,000-sample replay
+accounts for the rest of the change.

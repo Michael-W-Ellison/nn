@@ -46,6 +46,8 @@ void CheckConfig(const AgentConfig& c) {
     require(c.gradient_clip_norm >= 0.0f, "gradient_clip_norm must be >= 0");
     require(c.train_every > 0 && c.batch_size > 0, "train_every and batch_size must be > 0");
     require(c.action_best_episodes > 0, "action_best_episodes must be > 0");
+    require(std::isfinite(c.action_best_margin) && c.action_best_margin >= 0.0f,
+            "action_best_margin must be finite and >= 0");
     require(c.ensemble_size >= 1 && c.ensemble_size <= 16, "ensemble_size must be in [1, 16]");
     require(c.new_sample_share >= 0.0f && c.new_sample_share <= 1.0f, "new_sample_share must be in [0, 1]");
     require(c.replay_capacity > 0, "replay_capacity must be > 0");
@@ -168,7 +170,7 @@ constexpr char kCheckpointMagic[4] = {'D', 'P', 'A', 'G'};
 // 4: continuous_updates_per_step in the config
 // 5: slots of open-vocabulary categories in the encoder state; pending steps
 //    without a dense copy of the fused vector
-constexpr uint32_t kCheckpointVersion = 17;
+constexpr uint32_t kCheckpointVersion = 18;
 
 template <typename T>
 void WriteVector(std::ostream& out, const std::vector<T>& values) {
@@ -288,6 +290,7 @@ void SaveConfig(std::ostream& out, const AgentConfig& c) {
     io::WriteSize(out, c.exploration_steps);
     io::Write<uint8_t>(out, c.action_keep_best ? 1 : 0);
     io::WriteSize(out, c.action_best_episodes);
+    io::Write<float>(out, c.action_best_margin);
     io::Write<uint8_t>(out, c.detect_drift ? 1 : 0);
     io::Write<double>(out, c.drift_delta);
     io::Write<double>(out, c.drift_threshold);
@@ -383,6 +386,7 @@ AgentConfig LoadConfig(std::istream& in) {
     c.exploration_steps = io::ReadSize(in);
     c.action_keep_best = io::Read<uint8_t>(in) != 0;
     c.action_best_episodes = io::ReadSize(in);
+    c.action_best_margin = io::Read<float>(in);
     c.detect_drift = io::Read<uint8_t>(in) != 0;
     c.drift_delta = io::Read<double>(in);
     c.drift_threshold = io::Read<double>(in);
@@ -1147,17 +1151,22 @@ struct Agent::Impl {
     bool HasMemory() const { return network && network->MemoryUnits() > 0; }
 
     /// action_keep_best: the mean return of the last episodes; copy the
-    /// network when it is the best so far
+    /// network when it is the best so far by action_best_margin standard errors
     void EndActionEpisode() {
         if (config.action_keep_best && episode_explored && target_network && !HasMemory()) {
             episode_returns.push_back(episode_return);
             if (episode_returns.size() > config.action_best_episodes) episode_returns.pop_front();
             if (episode_returns.size() == config.action_best_episodes) {
-                double mean = 0.0;
+                const double n = static_cast<double>(episode_returns.size());
+                double mean = 0.0, variance = 0.0;
                 for (double r : episode_returns) mean += r;
-                mean /= static_cast<double>(episode_returns.size());
-                if (mean > best_return) {
+                mean /= n;
+                for (double r : episode_returns) variance += (r - mean) * (r - mean);
+                variance /= n > 1.0 ? n - 1.0 : 1.0;
+                double margin = config.action_best_margin * std::sqrt((variance + best_variance) / n);
+                if (!best_network || mean > best_return + margin) {
                     best_return = mean;
+                    best_variance = variance;
                     best_network = std::make_unique<AgentNetwork>(*network);
                 }
             }
@@ -2386,6 +2395,7 @@ struct Agent::Impl {
         SaveOptional(out, previous_step);
         SaveOptional(out, last_acted_step);
         io::Write<double>(out, best_return);
+        io::Write<double>(out, best_variance);
         WriteVector(out, std::vector<double>(episode_returns.begin(), episode_returns.end()));
         io::Write<double>(out, episode_return);
         io::Write<uint8_t>(out, episode_explored ? 1 : 0);
@@ -2545,6 +2555,7 @@ struct Agent::Impl {
         previous_step = LoadOptional(in);
         last_acted_step = LoadOptional(in);
         best_return = io::Read<double>(in);
+        best_variance = io::Read<double>(in);
         auto returns = ReadVector<double>(in);
         episode_returns.assign(returns.begin(), returns.end());
         episode_return = io::Read<double>(in);
@@ -2647,6 +2658,7 @@ struct Agent::Impl {
     std::unique_ptr<AgentNetwork> target_network;  // ACTION heads (Double DQN)
     std::unique_ptr<AgentNetwork> best_network;    // ACTION: kept for greedy Act (action_keep_best)
     double best_return{-std::numeric_limits<double>::infinity()};
+    double best_variance{0.0};           // of the returns in best_return's window
     std::deque<double> episode_returns;  // of the last action_best_episodes exploring episodes
     double episode_return{0.0};          // rewards of ACTION outputs in this episode
     bool episode_explored{false};        // an exploring Act call in this episode

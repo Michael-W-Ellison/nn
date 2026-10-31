@@ -93,6 +93,10 @@ struct AgentConfig {
     /// network. Not with memory_units > 0.
     bool action_keep_best{true};
     size_t action_best_episodes{50};
+    /// A new mean replaces the copy only when it is higher than the copy's
+    /// by this many standard errors of the difference of the two means
+    /// (from the returns' variance in each window); 0: whenever it is higher
+    float action_best_margin{0.0f};
 
     // Continuous actions (TD3). The actor and two critics read the fused
     // state; actions are scaled to [-1, 1] inside, to each output's bounds
