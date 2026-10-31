@@ -1650,3 +1650,21 @@ exceed it by the margin, and the copy is older (seed 2: game 7,129 with
 margin 1; seed 1: game 14,547 with margin 1, 5,477 with margin 2). A 500-game
 window instead removes keep-best's effect on B1. The 200,000-sample replay
 accounts for the rest of the change.
+
+**`action_best_episodes` 500 on the Gymnasium games** (mean return of 100
+greedy episodes; window 50 → window 500; training is the same, only the
+copy differs):
+
+| Game | Seeds 1 / 2 / 3 | Seeds 11 / 12 / 13 |
+|---|---|---|
+| CartPole | 500.0 / 309.5 / 327.2 → 185.4 / 277.4 / 159.3 | 467.1 / 500.0 / 500.0 → 496.0 / 157.2 / 238.1 |
+| Acrobot | −84.9 / −89.8 / −91.8 → −81.7 / −96.8 / −87.2 | −112.9 / −88.4 / −80.0 → −109.3 / −91.2 / −82.7 |
+| MountainCar | −195.5 / −187.6 / −199.3 → −195.5 / −200.0 / −200.0 | (not run) |
+| LunarLander | 213.4 / 229.8 / 244.8 → 161.0 / 252.1 / 169.4 | 278.2 / 271.9 / 230.4 → 116.3 / 254.5 / 202.4 |
+
+A 500-episode window is worse in CartPole and LunarLander and about the same
+in Acrobot and MountainCar, so the default stays 50. The copy is the
+network at the end of the best window; with 500 of these games' 1,300–2,300
+training episodes in one window, that end can lie well after the policy was
+best. The window that suits tic-tac-toe (30,000 games) does not suit these
+games.
